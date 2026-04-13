@@ -114,6 +114,48 @@ final class AudioCaptureService: @unchecked Sendable {
     }
 }
 
+/// Provides a live audio level stream for positioning feedback.
+final class AudioLevelMonitor: @unchecked Sendable {
+
+    private var engine: AVAudioEngine?
+    /// Current peak amplitude (0...1), updated ~20x/sec.
+    @MainActor var level: Float = 0
+
+    /// Start monitoring audio level. Call `stop()` when done.
+    func start() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.record, mode: .measurement, options: [])
+        try session.setActive(true)
+
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+
+        inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
+            guard let data = buffer.floatChannelData?[0] else { return }
+            let count = Int(buffer.frameLength)
+            var peak: Float = 0
+            for i in 0..<count {
+                let abs = Swift.abs(data[i])
+                if abs > peak { peak = abs }
+            }
+            Task { @MainActor in
+                self?.level = peak
+            }
+        }
+
+        try engine.start()
+        self.engine = engine
+    }
+
+    /// Stop monitoring.
+    func stop() {
+        engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine = nil
+    }
+}
+
 /// Thread-safe sample accumulator.
 private actor SampleCollector {
     let expectedSamples: Int

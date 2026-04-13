@@ -13,6 +13,8 @@ struct ContentView: View {
             switch coordinator.state {
             case .idle:
                 idleView
+            case .monitoring:
+                monitoringView
             case .requestingPermission:
                 ProgressView("Requesting microphone access...")
             case .recording(let elapsed, let total):
@@ -35,18 +37,70 @@ struct ContentView: View {
 
     private var idleView: some View {
         VStack(spacing: 16) {
-            Text("Press your iPhone firmly against the watch, then tap Measure.")
+            Text("Press your iPhone mic against the watch caseback, then tap Listen to check signal level.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
-            Button(action: { coordinator.startMeasurement() }) {
-                Text("Measure")
+            Button(action: { coordinator.startMonitoring() }) {
+                Text("Listen")
                     .font(.title2.bold())
                     .frame(maxWidth: .infinity)
                     .padding()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+        }
+    }
+
+    // MARK: - Live level monitor
+
+    private var monitoringView: some View {
+        VStack(spacing: 20) {
+            Text("Position your watch against the mic")
+                .font(.headline)
+
+            // Level meter
+            VStack(spacing: 8) {
+                LevelMeterView(level: coordinator.audioLevel)
+                    .frame(height: 40)
+
+                Text(levelDescription(coordinator.audioLevel))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Adjust until you see activity, then tap Measure.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button(action: { coordinator.startMeasurement() }) {
+                Text("Measure (30s)")
+                    .font(.title2.bold())
+                    .frame(maxWidth: .infinity)
+                    .padding()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button("Cancel") {
+                coordinator.stopMonitoring()
+            }
+            .foregroundStyle(.red)
+        }
+    }
+
+    private func levelDescription(_ level: Float) -> String {
+        if level < 0.001 {
+            return "No signal detected"
+        } else if level < 0.01 {
+            return "Very weak signal"
+        } else if level < 0.05 {
+            return "Weak signal -- try pressing harder"
+        } else if level < 0.2 {
+            return "Good signal"
+        } else {
+            return "Strong signal"
         }
     }
 
@@ -75,7 +129,6 @@ struct ContentView: View {
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
         VStack(spacing: 20) {
-            // Rate
             VStack(spacing: 4) {
                 Text("Detected Rate")
                     .font(.caption)
@@ -84,16 +137,16 @@ struct ContentView: View {
                     .font(.title2.bold())
             }
 
-            // Rate error — the main number
             VStack(spacing: 4) {
                 Text("Rate Error")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(data.rateErrorSecondsPerDay)
-                    .font(.system(size: 48, weight: .bold, design: .monospaced))
+                    .font(.system(size: 44, weight: .bold, design: .monospaced))
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
             }
 
-            // Beat error (mechanical only)
             if let beatError = data.beatErrorMilliseconds {
                 VStack(spacing: 4) {
                     Text("Beat Error")
@@ -104,7 +157,6 @@ struct ContentView: View {
                 }
             }
 
-            // Quality + tick count
             HStack(spacing: 32) {
                 VStack(spacing: 4) {
                     Text("Quality")
@@ -122,7 +174,6 @@ struct ContentView: View {
                 }
             }
 
-            // Diagnostics (collapsible)
             DisclosureGroup("Diagnostics") {
                 Text(data.diagnosticText)
                     .font(.caption.monospaced())
@@ -130,7 +181,7 @@ struct ContentView: View {
             }
             .font(.caption)
 
-            Button(action: { coordinator.startMeasurement() }) {
+            Button(action: { coordinator.startMonitoring() }) {
                 Text("Measure Again")
                     .frame(maxWidth: .infinity)
                     .padding()
@@ -153,9 +204,42 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Button("Try Again") {
-                coordinator.startMeasurement()
+                coordinator.startMonitoring()
             }
             .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+// MARK: - Level Meter
+
+struct LevelMeterView: View {
+    let level: Float
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Background
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(.systemGray5))
+
+                // Level bar (log-scaled for better visibility of quiet signals)
+                let logLevel = level > 0 ? max(0, 1.0 + log10(max(Double(level), 1e-4)) / 4.0) : 0
+                let barWidth = min(CGFloat(logLevel), 1.0) * geo.size.width
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(barColor)
+                    .frame(width: max(0, barWidth))
+            }
+        }
+    }
+
+    private var barColor: Color {
+        if level < 0.01 {
+            return .red
+        } else if level < 0.05 {
+            return .orange
+        } else {
+            return .green
         }
     }
 }

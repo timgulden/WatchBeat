@@ -8,6 +8,7 @@ final class MeasurementCoordinator: ObservableObject {
 
     enum State: Equatable {
         case idle
+        case monitoring  // live level meter before recording
         case requestingPermission
         case recording(elapsed: Double, total: Double)
         case analyzing
@@ -26,16 +27,50 @@ final class MeasurementCoordinator: ObservableObject {
     }
 
     @Published var state: State = .idle
+    @Published var audioLevel: Float = 0
 
     /// Capture duration in seconds.
     var captureDuration: Double = 30.0
 
     private let captureService = AudioCaptureService()
+    private let levelMonitor = AudioLevelMonitor()
     private let pipeline = MeasurementPipeline()
     private var recordingTask: Task<Void, Never>?
+    private var levelTask: Task<Void, Never>?
 
-    /// Start a measurement: request permission, record, analyze, display result.
+    /// Start the live level monitor so the user can position the watch.
+    func startMonitoring() {
+        do {
+            try levelMonitor.start()
+            state = .monitoring
+            // Poll the level monitor and publish updates
+            levelTask = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(50))
+                    self.audioLevel = self.levelMonitor.level
+                }
+            }
+        } catch {
+            state = .error("Could not start audio monitor: \(error.localizedDescription)")
+        }
+    }
+
+    /// Stop monitoring and go back to idle.
+    func stopMonitoring() {
+        levelTask?.cancel()
+        levelTask = nil
+        levelMonitor.stop()
+        state = .idle
+        audioLevel = 0
+    }
+
+    /// Start a measurement: stop monitor, record, analyze, display result.
     func startMeasurement() {
+        // Stop the level monitor — capture will start its own engine
+        levelTask?.cancel()
+        levelTask = nil
+        levelMonitor.stop()
+
         recordingTask?.cancel()
         recordingTask = Task {
             await performMeasurement()
@@ -46,7 +81,11 @@ final class MeasurementCoordinator: ObservableObject {
     func cancelMeasurement() {
         recordingTask?.cancel()
         recordingTask = nil
+        levelTask?.cancel()
+        levelTask = nil
+        levelMonitor.stop()
         state = .idle
+        audioLevel = 0
     }
 
     private func performMeasurement() async {
