@@ -35,10 +35,15 @@ public struct MeasurementPipeline {
         let sampleRate = input.sampleRate
         let n = samples.count
 
-        // Step 1: FFT of the raw signal
-        let fftLength = nextPowerOfTwo(n)
-        let magnitudes = computeFFTMagnitudes(samples: samples, fftLength: fftLength)
-        let freqResolution = sampleRate / Double(fftLength)
+        // Step 1: Compute envelope and FFT it for rate identification.
+        // Rectification (abs) demodulates the carrier — converts kHz tick bursts
+        // into positive bumps. Lowpass at 50 Hz removes carrier residue.
+        // Decimation to ~1 kHz reduces FFT size. The result has clear peaks
+        // at the tick rate regardless of the carrier frequency.
+        let envelope = computeEnvelope(samples: samples, sampleRate: sampleRate)
+        let envFftLength = nextPowerOfTwo(envelope.samples.count)
+        let magnitudes = computeFFTMagnitudes(samples: envelope.samples, fftLength: envFftLength)
+        let freqResolution = envelope.sampleRate / Double(envFftLength)
 
         // Step 2: Score each standard rate by FFT magnitude at its fundamental.
         // To distinguish harmonically related rates (e.g., 4 Hz vs 8 Hz), also
@@ -125,6 +130,46 @@ public struct MeasurementPipeline {
         )
 
         return (result, diagnostics)
+    }
+
+    // MARK: - Envelope
+
+    /// Rectify + lowpass + decimate to extract the tick repetition envelope.
+    private func computeEnvelope(samples: [Float], sampleRate: Double) -> (samples: [Float], sampleRate: Double) {
+        let n = samples.count
+
+        // Rectify: abs(signal)
+        var rectified = [Float](repeating: 0, count: n)
+        vDSP_vabs(samples, 1, &rectified, 1, vDSP_Length(n))
+
+        // Lowpass at 50 Hz using a simple moving average.
+        // Window size = sampleRate / (2 * cutoff) to get -3dB at ~50 Hz.
+        let cutoff = 50.0
+        let avgWindow = max(3, Int(sampleRate / (2.0 * cutoff)))
+        let smoothedCount = n - avgWindow + 1
+        guard smoothedCount > 0 else { return (rectified, sampleRate) }
+
+        var smoothed = [Float](repeating: 0, count: smoothedCount)
+        // Running sum for efficiency
+        var sum: Float = 0
+        for i in 0..<avgWindow { sum += rectified[i] }
+        smoothed[0] = sum / Float(avgWindow)
+        for i in 1..<smoothedCount {
+            sum += rectified[i + avgWindow - 1] - rectified[i - 1]
+            smoothed[i] = sum / Float(avgWindow)
+        }
+
+        // Decimate to ~1 kHz
+        let decimFactor = max(1, Int(sampleRate / 1000.0))
+        let decimCount = smoothedCount / decimFactor
+        guard decimCount > 0 else { return (smoothed, sampleRate) }
+
+        var decimated = [Float](repeating: 0, count: decimCount)
+        for i in 0..<decimCount {
+            decimated[i] = smoothed[i * decimFactor]
+        }
+
+        return (decimated, sampleRate / Double(decimFactor))
     }
 
     // MARK: - FFT
