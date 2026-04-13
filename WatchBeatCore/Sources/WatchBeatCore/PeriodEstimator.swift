@@ -1,25 +1,25 @@
 import Foundation
 import Accelerate
 
-/// FFT-based period detection with sub-bin interpolation and snap to standard rate.
+/// FFT-based period measurement with sub-bin precision.
 ///
-/// Uses autocorrelation of the decimated envelope to score each candidate standard
-/// beat rate. Autocorrelation naturally selects the true fundamental period because
-/// the signal repeats at that period but not at sub-multiples.
+/// Two-stage approach:
+/// 1. Rate identification: autocorrelation of the envelope scores each candidate
+///    standard rate. The correct rate has the highest normalized autocorrelation.
+/// 2. Precise frequency: FFT of the envelope with parabolic interpolation around
+///    the peak near the identified rate gives sub-bin frequency resolution.
+///    The deviation from nominal frequency directly gives rate error in s/day.
 public struct PeriodEstimator {
 
     public init() {}
 
     /// Estimate the beat period from a decimated envelope.
-    ///
-    /// - Parameter envelope: Decimated envelope from SignalConditioner.
-    /// - Returns: Period estimate with measured frequency, snapped rate, and confidence.
     public func estimate(envelope: AudioBuffer) -> PeriodEstimate {
         let samples = envelope.samples
         let sampleRate = envelope.sampleRate
         let n = samples.count
 
-        // Remove DC offset so autocorrelation reflects periodicity, not mean level
+        // Remove DC offset
         var mean: Float = 0
         vDSP_meanv(samples, 1, &mean, vDSP_Length(n))
         var centered = [Float](repeating: 0, count: n)
@@ -33,8 +33,7 @@ public struct PeriodEstimator {
             return PeriodEstimate(measuredHz: 0, snappedRate: .bph28800, confidence: 0)
         }
 
-        // Score each standard beat rate by autocorrelation at its period.
-        // Store all scores so we can apply sub-harmonic preference.
+        // Stage 1: Score each standard rate by autocorrelation
         var rateScores: [(rate: StandardBeatRate, corr: Float)] = []
 
         for rate in StandardBeatRate.allCases {
@@ -48,24 +47,16 @@ public struct PeriodEstimator {
             rateScores.append((rate, normalizedCorr))
         }
 
-        // Sort by correlation strength (descending)
         rateScores.sort { $0.corr > $1.corr }
 
-        // Sub-harmonic preference: if the best rate is a sub-harmonic of another
-        // standard rate (e.g., 4 Hz is a sub-harmonic of 8 Hz), and the higher rate
-        // also has strong autocorrelation (>80% of the sub-harmonic's score), prefer
-        // the higher rate. This handles beat error creating a 2-beat pattern that
-        // makes the pair frequency score higher than the true beat frequency.
+        // Sub-harmonic preference: prefer higher rate if it has strong correlation
         var bestRate = rateScores.first?.rate ?? .bph28800
         var bestCorr = rateScores.first?.corr ?? 0
 
         if let topScore = rateScores.first {
             for candidate in rateScores {
-                // Check if candidate is a higher harmonic of the current best
                 let ratio = candidate.rate.hz / topScore.rate.hz
                 if ratio > 1.5 && ratio < 2.5 {
-                    // candidate is roughly 2x the best rate's frequency
-                    // Prefer the higher rate if its correlation is still strong
                     let relativeStrength = candidate.corr / topScore.corr
                     if relativeStrength > 0.7 {
                         bestRate = candidate.rate
@@ -76,16 +67,11 @@ public struct PeriodEstimator {
             }
         }
 
-        // Refine the frequency with parabolic interpolation around the best lag
-        let bestLag = Int(round(sampleRate / bestRate.hz))
-        let measuredHz = refineFrequency(
-            signal: centered, sampleRate: sampleRate, approximateLag: bestLag
+        // Stage 2: Precise frequency measurement via FFT
+        let measuredHz = measureFrequencyViaFFT(
+            samples: centered, sampleRate: sampleRate, nearHz: bestRate.hz
         )
 
-        // Confidence is primarily the absolute autocorrelation strength at the
-        // winning lag. A clean periodic signal produces normalized autocorrelation
-        // near 1.0; noise produces values near 0. This directly indicates whether
-        // there is a detectable periodic signal, regardless of which rate wins.
         let confidence = min(1.0, max(0.0, Double(bestCorr)))
 
         return PeriodEstimate(
@@ -95,51 +81,106 @@ public struct PeriodEstimator {
         )
     }
 
-    // MARK: - Frequency refinement
+    // MARK: - FFT-based frequency measurement
 
-    /// Parabolic interpolation around the autocorrelation peak near `approximateLag`
-    /// for sub-sample period precision.
-    private func refineFrequency(signal: [Float], sampleRate: Double, approximateLag: Int) -> Double {
-        let n = signal.count
-        // Search a small window around the expected lag
-        let searchRadius = max(2, approximateLag / 20)
-        let minLag = max(1, approximateLag - searchRadius)
-        let maxLag = min(n / 2 - 1, approximateLag + searchRadius)
+    /// Compute FFT of the signal and find the precise frequency of the peak
+    /// nearest to `nearHz`, using parabolic interpolation for sub-bin resolution.
+    func measureFrequencyViaFFT(samples: [Float], sampleRate: Double, nearHz: Double) -> Double {
+        let n = samples.count
 
-        // Find the peak autocorrelation in the search window
-        var peakLag = approximateLag
-        var peakCorr: Float = -.greatestFiniteMagnitude
+        // Apply Hann window
+        var windowed = [Float](repeating: 0, count: n)
+        vDSP_hann_window(&windowed, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(samples, 1, windowed, 1, &windowed, 1, vDSP_Length(n))
 
-        for lag in minLag...maxLag {
-            let overlap = n - lag
-            var corr: Float = 0
-            vDSP_dotpr(signal, 1, Array(signal[lag...]), 1, &corr, vDSP_Length(overlap))
-            if corr > peakCorr {
-                peakCorr = corr
-                peakLag = lag
+        // Zero-pad to next power of two
+        let fftLength = nextPowerOfTwo(n)
+        var padded = [Float](repeating: 0, count: fftLength)
+        padded.replaceSubrange(0..<n, with: windowed)
+
+        // FFT
+        let log2n = vDSP_Length(log2(Double(fftLength)))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return nearHz
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        let halfN = fftLength / 2
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+
+        padded.withUnsafeBufferPointer { buf in
+            for i in 0..<halfN {
+                realPart[i] = buf[2 * i]
+                imagPart[i] = buf[2 * i + 1]
             }
         }
 
-        // Parabolic interpolation using neighbors
-        guard peakLag > minLag && peakLag < maxLag else {
-            return sampleRate / Double(peakLag)
+        var magnitudes = [Float](repeating: 0, count: halfN)
+
+        realPart.withUnsafeMutableBufferPointer { realBuf in
+            imagPart.withUnsafeMutableBufferPointer { imagBuf in
+                var splitComplex = DSPSplitComplex(
+                    realp: realBuf.baseAddress!,
+                    imagp: imagBuf.baseAddress!
+                )
+                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfN))
+            }
         }
 
-        let overlap = n - peakLag
-        var corrMinus: Float = 0
-        var corrPlus: Float = 0
-        vDSP_dotpr(signal, 1, Array(signal[(peakLag - 1)...]), 1, &corrMinus, vDSP_Length(overlap))
-        vDSP_dotpr(signal, 1, Array(signal[(peakLag + 1)...]), 1, &corrPlus, vDSP_Length(min(overlap, n - peakLag - 1)))
+        // sqrt for magnitude (not power)
+        var sqrtMagnitudes = [Float](repeating: 0, count: halfN)
+        var count32 = Int32(halfN)
+        vvsqrtf(&sqrtMagnitudes, magnitudes, &count32)
 
-        let denom = corrMinus - 2.0 * peakCorr + corrPlus
+        // Find peak near the target frequency
+        let freqResolution = sampleRate / Double(fftLength)
+        let targetBin = nearHz / freqResolution
+        let searchRadius = max(3, Int(targetBin * 0.15)) // ±15% around target
+        let minBin = max(1, Int(targetBin) - searchRadius)
+        let maxBin = min(halfN - 2, Int(targetBin) + searchRadius)
+
+        guard minBin < maxBin else { return nearHz }
+
+        var peakBin = minBin
+        var peakMag = sqrtMagnitudes[minBin]
+        for bin in (minBin + 1)...maxBin {
+            if sqrtMagnitudes[bin] > peakMag {
+                peakMag = sqrtMagnitudes[bin]
+                peakBin = bin
+            }
+        }
+
+        // Parabolic interpolation for sub-bin precision
+        guard peakBin > minBin && peakBin < maxBin else {
+            return Double(peakBin) * freqResolution
+        }
+
+        let alpha = sqrtMagnitudes[peakBin - 1]
+        let beta = sqrtMagnitudes[peakBin]
+        let gamma = sqrtMagnitudes[peakBin + 1]
+
+        let denom = alpha - 2.0 * beta + gamma
         let offset: Float
         if abs(denom) > 1e-10 {
-            offset = 0.5 * (corrMinus - corrPlus) / denom
+            offset = 0.5 * (alpha - gamma) / denom
         } else {
             offset = 0
         }
 
-        let refinedLag = Double(peakLag) + Double(offset)
-        return sampleRate / refinedLag
+        return (Double(peakBin) + Double(offset)) * freqResolution
+    }
+
+    // MARK: - Helpers
+
+    private func nextPowerOfTwo(_ n: Int) -> Int {
+        var v = n - 1
+        v |= v >> 1
+        v |= v >> 2
+        v |= v >> 4
+        v |= v >> 8
+        v |= v >> 16
+        return v + 1
     }
 }

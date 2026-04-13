@@ -138,17 +138,21 @@ final class MeasurementCoordinator: ObservableObject {
             }
 
             // Build diagnostic text
+            let scoresText = diagnostics.rateScores
+                .sorted { $0.magnitude > $1.magnitude }
+                .prefix(3)
+                .map { "\($0.rate.rawValue)bph: \(String(format: "%.1f", $0.magnitude))" }
+                .joined(separator: ", ")
+
             let diagText = """
             Audio: \(captureService.lastConfigInfo)
             Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
-            Filtered peak: \(String(format: "%.4f", diagnostics.filteredPeakAmplitude))
-            Envelope peak: \(String(format: "%.6f", diagnostics.envelopePeakAmplitude))
-            Period: \(String(format: "%.3f", diagnostics.periodEstimate.measuredHz)) Hz
+            Period: \(String(format: "%.4f", diagnostics.periodEstimate.measuredHz)) Hz
             Confidence: \(String(format: "%.1f%%", diagnostics.periodEstimate.confidence * 100))
-            Ticks found: \(diagnostics.tickCount)
-            Envelope rate: \(Int(diagnostics.envelopeSampleRate)) Hz
-            Sample rate: \(Int(buffer.sampleRate)) Hz
-            Samples: \(buffer.samples.count)
+            Ticks: \(diagnostics.tickCount)
+            Top rates: \(scoresText)
+            Sample rate: \(Int(diagnostics.sampleRate)) Hz
+            Samples: \(diagnostics.sampleCount)
             """
 
             let displayData = MeasurementDisplayData(
