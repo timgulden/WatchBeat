@@ -95,6 +95,9 @@ final class AudioCaptureService: @unchecked Sendable {
         }
     }
 
+    /// Optional callback for each chunk of samples during capture (for live monitoring).
+    var onSamples: (([Float]) -> Void)?
+
     /// Capture audio for the specified duration.
     func capture(duration: Double) async throws -> WatchBeatCore.AudioBuffer {
         do {
@@ -118,12 +121,14 @@ final class AudioCaptureService: @unchecked Sendable {
         let collector = SampleCollector(expectedSamples: expectedSamples)
         let bufferSize: AVAudioFrameCount = 4096
 
+        let onSamplesCallback = self.onSamples
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: format) { buffer, _ in
             let channelData = buffer.floatChannelData?[0]
             let frameCount = Int(buffer.frameLength)
             if let data = channelData {
                 let samples = Array(UnsafeBufferPointer(start: data, count: frameCount))
                 Task { await collector.append(samples) }
+                onSamplesCallback?(samples)
             }
         }
 

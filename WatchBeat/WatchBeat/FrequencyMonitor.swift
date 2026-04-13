@@ -55,6 +55,22 @@ final class FrequencyMonitor: @unchecked Sendable {
         rollingBuffer = []
     }
 
+    /// Feed external samples into the monitor (e.g., from the capture service during recording).
+    /// Call this instead of start() when another component owns the audio engine.
+    func initializeForExternalFeed(sampleRate: Double) {
+        self.sampleRate = sampleRate
+        rollingBufferSize = Int(rollingBufferDuration * sampleRate)
+        rollingBuffer = [Float](repeating: 0, count: rollingBufferSize)
+        samplesAccumulated = 0
+        analysisCooldown = 0
+    }
+
+    func feedSamples(_ samples: [Float]) {
+        analysisQueue.async {
+            self.appendAndAnalyze(samples)
+        }
+    }
+
     // MARK: - Analysis
 
     private var samplesAccumulated: Int = 0

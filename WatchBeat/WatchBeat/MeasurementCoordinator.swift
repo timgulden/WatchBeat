@@ -69,10 +69,11 @@ final class MeasurementCoordinator: ObservableObject {
         rawPeak = 0
     }
 
-    /// Start a measurement: stop monitor, record, analyze, display result.
+    /// Start a measurement: keep monitor running for visual feedback during recording.
     func startMeasurement() {
-        monitorTask?.cancel()
-        monitorTask = nil
+        // Keep the frequency monitor running — we'll stop it after analysis.
+        // The capture service will start its own audio engine, so we need to
+        // stop the monitor's engine first, but keep the polling task alive.
         frequencyMonitor.stop()
 
         recordingTask?.cancel()
@@ -102,6 +103,12 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
+        // Set up frequency monitor to receive samples during recording
+        frequencyMonitor.initializeForExternalFeed(sampleRate: 48000)
+        captureService.onSamples = { [weak self] samples in
+            self?.frequencyMonitor.feedSamples(samples)
+        }
+
         // Start recording with progress updates
         state = .recording(elapsed: 0, total: captureDuration)
 
@@ -114,6 +121,8 @@ final class MeasurementCoordinator: ObservableObject {
                     if case .recording = self.state {
                         self.state = .recording(elapsed: min(elapsed, self.captureDuration), total: self.captureDuration)
                     }
+                    // Update frequency bars during recording
+                    self.ratePowers = self.frequencyMonitor.ratePowers
                 }
             }
         }

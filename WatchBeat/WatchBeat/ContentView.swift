@@ -5,7 +5,6 @@ struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
 
     var body: some View {
-        NavigationStack {
         VStack(spacing: 24) {
             Text("WatchBeat")
                 .font(.largeTitle.bold())
@@ -33,7 +32,6 @@ struct ContentView: View {
             Spacer()
         }
         .padding()
-        } // NavigationStack
     }
 
     // MARK: - Idle
@@ -62,27 +60,22 @@ struct ContentView: View {
             Text("Position your watch against the mic")
                 .font(.headline)
 
-            // Rate selector
-            ratePicker
+            Text("Look for a peak at your watch's beat rate")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             // Frequency monitor — shows power at each standard beat rate
             FrequencyBarsView(
                 ratePowers: coordinator.ratePowers,
-                selectedRate: coordinator.selectedRate
+                selectedRate: nil
             )
             .frame(height: 120)
 
             Button(action: { coordinator.startMeasurement() }) {
-                VStack(spacing: 4) {
-                    Text("Measure (30s)")
-                        .font(.title2.bold())
-                    if let rate = coordinator.selectedRate {
-                        Text("at \(rate.rawValue) bph")
-                            .font(.caption)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding()
+                Text("Measure")
+                    .font(.title2.bold())
+                    .frame(maxWidth: .infinity)
+                    .padding()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -94,38 +87,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Rate picker
-
-    private var ratePicker: some View {
-        NavigationLink {
-            RateSelectionView(selectedRate: $coordinator.selectedRate)
-        } label: {
-            HStack {
-                Text("Beat rate:")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(coordinator.selectedRate.map { rateLabel($0) } ?? "Auto-detect")
-                    .bold()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .font(.subheadline)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(Color(.systemGray6))
-            .cornerRadius(10)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func rateLabel(_ rate: StandardBeatRate) -> String {
-        let hz = rate.hz == floor(rate.hz) ? "\(Int(rate.hz))" : String(format: "%.1f", rate.hz)
-        if rate.isQuartz {
-            return "\(rate.rawValue) bph / \(hz) Hz (quartz)"
-        }
-        return "\(rate.rawValue) bph / \(hz) Hz"
-    }
 
     // MARK: - Recording
 
@@ -133,6 +94,13 @@ struct ContentView: View {
         VStack(spacing: 16) {
             Text("Recording...")
                 .font(.title3)
+
+            // Show frequency bars during recording too
+            FrequencyBarsView(
+                ratePowers: coordinator.ratePowers,
+                selectedRate: nil
+            )
+            .frame(height: 100)
 
             ProgressView(value: elapsed, total: total)
                 .progressViewStyle(.linear)
@@ -250,8 +218,8 @@ struct FrequencyBarsView: View {
                 ForEach(rates, id: \.self) { rate in
                     let power = ratePowers[rate] ?? 0
                     let normalizedHeight = maxPower > 0 ? CGFloat(power / maxPower) : 0
-                    let isSelected = selectedRate == rate
-                    let isStrongest = power == maxPower && maxPower > 0
+                    let isSelected = selectedRate == rate || selectedRate == nil
+                    let isStrongest = power == maxPower && maxPower > 0 && power > 0
 
                     VStack(spacing: 2) {
                         // Bar
@@ -260,9 +228,9 @@ struct FrequencyBarsView: View {
                             .frame(height: max(2, normalizedHeight * (geo.size.height - 30)))
 
                         // Label
-                        Text("\(Int(rate.hz))")
-                            .font(.system(size: 10, weight: isSelected ? .bold : .regular))
-                            .foregroundStyle(isSelected ? .primary : .secondary)
+                        Text("\(Int(rate.hz)) Hz")
+                            .font(.system(size: 9, weight: isStrongest ? .bold : .regular))
+                            .foregroundStyle(isStrongest ? .primary : .secondary)
                     }
                 }
             }
@@ -281,80 +249,6 @@ struct FrequencyBarsView: View {
     }
 }
 
-// MARK: - Rate Selection
-
-struct RateSelectionView: View {
-    @Binding var selectedRate: StandardBeatRate?
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        List {
-            Button {
-                selectedRate = nil
-                dismiss()
-            } label: {
-                HStack {
-                    Text("Auto-detect")
-                    Spacer()
-                    if selectedRate == nil {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(.blue)
-                    }
-                }
-            }
-
-            Section("Mechanical") {
-                ForEach(StandardBeatRate.allCases.filter { !$0.isQuartz }, id: \.self) { rate in
-                    Button {
-                        selectedRate = rate
-                        dismiss()
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text("\(rate.rawValue) bph")
-                                    .font(.body)
-                                Text("\(Int(rate.hz)) Hz")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if selectedRate == rate {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Section("Quartz") {
-                ForEach(StandardBeatRate.allCases.filter { $0.isQuartz }, id: \.self) { rate in
-                    Button {
-                        selectedRate = rate
-                        dismiss()
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text("\(rate.rawValue) bph")
-                                    .font(.body)
-                                Text("\(Int(rate.hz)) Hz")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if selectedRate == rate {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle("Beat Rate")
-        .foregroundStyle(.primary)
-    }
-}
 
 #Preview {
     ContentView()
