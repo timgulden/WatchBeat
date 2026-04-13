@@ -97,9 +97,9 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Picker("Beat rate", selection: $coordinator.selectedRate) {
-                Text("Auto-detect").tag(StandardBeatRate?.none)
+                Text("Auto-detect").tag(nil as StandardBeatRate?)
                 ForEach(StandardBeatRate.allCases, id: \.self) { rate in
-                    Text(rateLabel(rate)).tag(StandardBeatRate?.some(rate))
+                    Text(rateLabel(rate)).tag(rate as StandardBeatRate?)
                 }
             }
             .pickerStyle(.menu)
