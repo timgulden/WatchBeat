@@ -328,8 +328,9 @@ public struct MeasurementPipeline {
         let residualStd: Double
     }
 
-    /// Divide the raw signal into beat-length windows, align using median peak
-    /// position, and find energy peaks in each window.
+    /// Divide the raw signal into beat-length windows, find energy peaks.
+    /// Tries two window offsets (0 and half-period) to avoid the boundary problem
+    /// where ticks landing near window edges split their energy and get missed.
     private func extractTicks(
         samples: [Float], sampleRate: Double,
         rate: StandardBeatRate, measuredHz: Double
@@ -347,19 +348,45 @@ public struct MeasurementPipeline {
         var squared = [Float](repeating: 0, count: n)
         vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(n))
 
-        // Pass 1: Divide into windows starting from sample 0, find peak offset in each.
-        // This gives us the raw peak position within each period-length window.
-        let numWindows = n / periodSamples
+        // Try 5 evenly spaced starting offsets across one period.
+        // With 5 offsets, no tick can be closer than 1/10 of a period from the
+        // nearest window center. Pick whichever offset finds the most confirmed ticks.
+        let numOffsets = 5
+        var bestResult = TickExtractionResult(confirmedCount: 0, qualityScore: 0,
+                                               beatErrorMs: nil, amplitudeProxy: 0,
+                                               measuredPeriod: nil, residualStd: .infinity)
+
+        for k in 0..<numOffsets {
+            let offset = k * periodSamples / numOffsets
+            let result = extractTicksAtOffset(
+                squared: squared, n: n, sampleRate: sampleRate, rate: rate,
+                periodSamples: periodSamples, startOffset: offset
+            )
+            if result.confirmedCount > bestResult.confirmedCount {
+                bestResult = result
+            }
+        }
+
+        return bestResult
+    }
+
+    /// Extract ticks with windows starting at a specific offset.
+    private func extractTicksAtOffset(
+        squared: [Float], n: Int, sampleRate: Double, rate: StandardBeatRate,
+        periodSamples: Int, startOffset: Int
+    ) -> TickExtractionResult {
+        // Divide into windows from startOffset, find peak in each
+        let usableLength = n - startOffset
+        let numWindows = usableLength / periodSamples
         guard numWindows >= 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
                                         beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
         }
 
         var peakOffsets = [Int](repeating: 0, count: numWindows)
-        var peakEnergies = [Float](repeating: 0, count: numWindows)
 
         for w in 0..<numWindows {
-            let wStart = w * periodSamples
+            let wStart = startOffset + w * periodSamples
             var bestIdx = 0
             var bestVal: Float = 0
             for i in 0..<periodSamples {
@@ -369,7 +396,6 @@ public struct MeasurementPipeline {
                 }
             }
             peakOffsets[w] = bestIdx
-            peakEnergies[w] = bestVal
         }
 
         // Median peak offset — this is where ticks naturally fall within each window.
@@ -377,7 +403,7 @@ public struct MeasurementPipeline {
         // the median reflects the true tick position.
         let medianOffset = sortedMedianInt(peakOffsets)
 
-        // Pass 2: Re-window centered on the median offset, with a search window
+        // Re-window centered on the median offset, with a search window
         // of 40% of the period for the peak to drift within.
         let tickWindow = max(10, Int(Double(periodSamples) * 0.4))
         let halfTick = tickWindow / 2
@@ -387,7 +413,7 @@ public struct MeasurementPipeline {
         var peakTimes: [Double] = []
 
         for w in 0..<numWindows {
-            let windowCenter = w * periodSamples + medianOffset
+            let windowCenter = startOffset + w * periodSamples + medianOffset
             guard windowCenter >= halfTick && windowCenter + halfTick < n else { continue }
 
             let wStart = windowCenter - halfTick
@@ -418,7 +444,7 @@ public struct MeasurementPipeline {
             }
 
             // Gap energy: midpoint between this tick and next
-            let gapCenter = windowCenter + periodSamples / 2
+            let gapCenter = startOffset + w * periodSamples + medianOffset + periodSamples / 2
             if gapCenter >= halfTick && gapCenter + halfTick < n {
                 var gapE: Float = 0
                 vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + gapCenter - halfTick },
