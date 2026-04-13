@@ -65,15 +65,12 @@ struct ContentView: View {
             // Rate selector
             ratePicker
 
-            // Level meter
-            VStack(spacing: 8) {
-                LevelMeterView(level: coordinator.audioLevel)
-                    .frame(height: 40)
-
-                Text(levelDescription(coordinator.audioLevel))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            // Frequency monitor — shows power at each standard beat rate
+            FrequencyBarsView(
+                ratePowers: coordinator.ratePowers,
+                selectedRate: coordinator.selectedRate
+            )
+            .frame(height: 120)
 
             Button(action: { coordinator.startMeasurement() }) {
                 VStack(spacing: 4) {
@@ -128,20 +125,6 @@ struct ContentView: View {
             return "\(rate.rawValue) bph / \(hz) Hz (quartz)"
         }
         return "\(rate.rawValue) bph / \(hz) Hz"
-    }
-
-    private func levelDescription(_ level: Float) -> String {
-        if level < 0.001 {
-            return "No signal detected"
-        } else if level < 0.01 {
-            return "Very weak signal"
-        } else if level < 0.05 {
-            return "Weak signal -- try pressing harder"
-        } else if level < 0.2 {
-            return "Good signal"
-        } else {
-            return "Strong signal"
-        }
     }
 
     // MARK: - Recording
@@ -251,36 +234,50 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Level Meter
+// MARK: - Frequency Bars
 
-struct LevelMeterView: View {
-    let level: Float
+struct FrequencyBarsView: View {
+    let ratePowers: [StandardBeatRate: Float]
+    let selectedRate: StandardBeatRate?
+
+    private let rates = StandardBeatRate.allCases
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                // Background
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(.systemGray5))
+        let maxPower = ratePowers.values.max() ?? 1.0
 
-                // Level bar (log-scaled for better visibility of quiet signals)
-                let logLevel = level > 0 ? max(0, 1.0 + log10(max(Double(level), 1e-4)) / 4.0) : 0
-                let barWidth = min(CGFloat(logLevel), 1.0) * geo.size.width
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(barColor)
-                    .frame(width: max(0, barWidth))
+        GeometryReader { geo in
+            HStack(alignment: .bottom, spacing: 4) {
+                ForEach(rates, id: \.self) { rate in
+                    let power = ratePowers[rate] ?? 0
+                    let normalizedHeight = maxPower > 0 ? CGFloat(power / maxPower) : 0
+                    let isSelected = selectedRate == rate
+                    let isStrongest = power == maxPower && maxPower > 0
+
+                    VStack(spacing: 2) {
+                        // Bar
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(barColor(isSelected: isSelected, isStrongest: isStrongest))
+                            .frame(height: max(2, normalizedHeight * (geo.size.height - 30)))
+
+                        // Label
+                        Text("\(Int(rate.hz))")
+                            .font(.system(size: 10, weight: isSelected ? .bold : .regular))
+                            .foregroundStyle(isSelected ? .primary : .secondary)
+                    }
+                }
             }
         }
     }
 
-    private var barColor: Color {
-        if level < 0.01 {
-            return .red
-        } else if level < 0.05 {
-            return .orange
-        } else {
+    private func barColor(isSelected: Bool, isStrongest: Bool) -> Color {
+        if isSelected && isStrongest {
             return .green
+        } else if isSelected {
+            return .blue
+        } else if isStrongest {
+            return .orange
         }
+        return Color(.systemGray4)
     }
 }
 

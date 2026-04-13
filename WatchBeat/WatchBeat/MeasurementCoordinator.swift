@@ -27,7 +27,8 @@ final class MeasurementCoordinator: ObservableObject {
     }
 
     @Published var state: State = .idle
-    @Published var audioLevel: Float = 0
+    @Published var ratePowers: [StandardBeatRate: Float] = [:]
+    @Published var rawPeak: Float = 0
 
     /// User-selected beat rate, or nil for auto-detect.
     @Published var selectedRate: StandardBeatRate? = nil
@@ -36,21 +37,21 @@ final class MeasurementCoordinator: ObservableObject {
     var captureDuration: Double = 30.0
 
     private let captureService = AudioCaptureService()
-    private let levelMonitor = AudioLevelMonitor()
+    private let frequencyMonitor = FrequencyMonitor()
     private let pipeline = MeasurementPipeline()
     private var recordingTask: Task<Void, Never>?
-    private var levelTask: Task<Void, Never>?
+    private var monitorTask: Task<Void, Never>?
 
-    /// Start the live level monitor so the user can position the watch.
+    /// Start the frequency monitor so the user can position the watch.
     func startMonitoring() {
         do {
-            try levelMonitor.start()
+            try frequencyMonitor.start()
             state = .monitoring
-            // Poll the level monitor and publish updates
-            levelTask = Task {
+            monitorTask = Task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(50))
-                    self.audioLevel = self.levelMonitor.level
+                    try? await Task.sleep(for: .milliseconds(100))
+                    self.ratePowers = self.frequencyMonitor.ratePowers
+                    self.rawPeak = self.frequencyMonitor.rawPeak
                 }
             }
         } catch {
@@ -60,19 +61,19 @@ final class MeasurementCoordinator: ObservableObject {
 
     /// Stop monitoring and go back to idle.
     func stopMonitoring() {
-        levelTask?.cancel()
-        levelTask = nil
-        levelMonitor.stop()
+        monitorTask?.cancel()
+        monitorTask = nil
+        frequencyMonitor.stop()
         state = .idle
-        audioLevel = 0
+        ratePowers = [:]
+        rawPeak = 0
     }
 
     /// Start a measurement: stop monitor, record, analyze, display result.
     func startMeasurement() {
-        // Stop the level monitor — capture will start its own engine
-        levelTask?.cancel()
-        levelTask = nil
-        levelMonitor.stop()
+        monitorTask?.cancel()
+        monitorTask = nil
+        frequencyMonitor.stop()
 
         recordingTask?.cancel()
         recordingTask = Task {
@@ -84,11 +85,12 @@ final class MeasurementCoordinator: ObservableObject {
     func cancelMeasurement() {
         recordingTask?.cancel()
         recordingTask = nil
-        levelTask?.cancel()
-        levelTask = nil
-        levelMonitor.stop()
+        monitorTask?.cancel()
+        monitorTask = nil
+        frequencyMonitor.stop()
         state = .idle
-        audioLevel = 0
+        ratePowers = [:]
+        rawPeak = 0
     }
 
     private func performMeasurement() async {
