@@ -139,6 +139,7 @@ final class MeasurementCoordinator: ObservableObject {
 
             // Build diagnostic text
             let diagText = """
+            Audio: \(captureService.lastConfigInfo)
             Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
             Filtered peak: \(String(format: "%.4f", diagnostics.filteredPeakAmplitude))
             Envelope peak: \(String(format: "%.6f", diagnostics.envelopePeakAmplitude))

@@ -1,10 +1,63 @@
 import AVFoundation
 import WatchBeatCore
 
-/// Wraps AVAudioEngine to capture raw audio for the DSP pipeline.
+/// Configures the audio session optimally for recording watch ticks.
 ///
-/// Configures AVAudioSession with `.measurement` mode to disable automatic gain control,
-/// noise suppression, and other voice-processing DSP that would corrupt the signal.
+/// - Selects the bottom microphone explicitly (`.lower` orientation data source)
+/// - Sets input gain to maximum for quiet mechanical/quartz signals
+/// - Uses `.measurement` mode to disable AGC, noise suppression, and echo cancellation
+/// - Sets omnidirectional polar pattern for contact-based vibration pickup
+enum AudioSessionConfigurator {
+
+    /// Configure the audio session and return a description of what was set up.
+    @discardableResult
+    static func configure() throws -> String {
+        let session = AVAudioSession.sharedInstance()
+
+        // Set category and mode before selecting input
+        try session.setCategory(.record, mode: .measurement, options: [])
+        try session.setActive(true)
+
+        var info = "Mode: measurement"
+
+        // Select the built-in microphone
+        if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+            // Prefer the bottom mic (`.lower` orientation)
+            if let bottomSource = builtInMic.dataSources?.first(where: { $0.orientation == .bottom }) {
+                try builtInMic.setPreferredDataSource(bottomSource)
+                info += ", Mic: bottom"
+
+                // Set omnidirectional polar pattern if available
+                if let patterns = bottomSource.supportedPolarPatterns, patterns.contains(.omnidirectional) {
+                    try bottomSource.setPreferredPolarPattern(.omnidirectional)
+                    info += " (omni)"
+                }
+            } else if let anySource = builtInMic.dataSources?.first {
+                // Fallback: use whatever data source is available
+                try builtInMic.setPreferredDataSource(anySource)
+                info += ", Mic: \(anySource.orientation?.rawValue ?? "default")"
+            }
+
+            try session.setPreferredInput(builtInMic)
+        } else {
+            info += ", Mic: system default"
+        }
+
+        // Maximize input gain for quiet signals
+        if session.isInputGainSettable {
+            try session.setInputGain(1.0)
+            info += ", Gain: max"
+        } else {
+            info += ", Gain: not settable"
+        }
+
+        info += ", Rate: \(Int(session.sampleRate)) Hz"
+
+        return info
+    }
+}
+
+/// Wraps AVAudioEngine to capture raw audio for the DSP pipeline.
 final class AudioCaptureService: @unchecked Sendable {
 
     enum CaptureError: Error, LocalizedError {
@@ -30,6 +83,9 @@ final class AudioCaptureService: @unchecked Sendable {
         }
     }
 
+    /// Description of the last audio configuration applied.
+    private(set) var lastConfigInfo: String = ""
+
     /// Request microphone permission. Returns true if granted.
     func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -39,16 +95,10 @@ final class AudioCaptureService: @unchecked Sendable {
         }
     }
 
-    /// Capture audio for the specified duration and return a buffer suitable for the DSP pipeline.
-    ///
-    /// - Parameter duration: Recording duration in seconds.
-    /// - Returns: An `AudioBuffer` with Float samples at the hardware sample rate.
+    /// Capture audio for the specified duration.
     func capture(duration: Double) async throws -> WatchBeatCore.AudioBuffer {
-        // Configure audio session for measurement (no AGC, no noise suppression)
-        let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.record, mode: .measurement, options: [])
-            try session.setActive(true)
+            lastConfigInfo = try AudioSessionConfigurator.configure()
         } catch {
             throw CaptureError.sessionConfigurationFailed(error)
         }
@@ -65,8 +115,6 @@ final class AudioCaptureService: @unchecked Sendable {
         }
 
         let expectedSamples = Int(duration * sampleRate)
-
-        // Use an actor to safely collect samples from the audio callback
         let collector = SampleCollector(expectedSamples: expectedSamples)
         let bufferSize: AVAudioFrameCount = 4096
 
@@ -86,7 +134,6 @@ final class AudioCaptureService: @unchecked Sendable {
             throw CaptureError.engineStartFailed(error)
         }
 
-        // Wait for samples to accumulate, with a timeout
         let timeoutSeconds = duration + 5.0
         let deadline = ContinuousClock.now + .seconds(timeoutSeconds)
 
@@ -120,12 +167,12 @@ final class AudioLevelMonitor: @unchecked Sendable {
     private var engine: AVAudioEngine?
     /// Current peak amplitude (0...1), updated ~20x/sec.
     @MainActor var level: Float = 0
+    /// Description of audio configuration.
+    private(set) var configInfo: String = ""
 
     /// Start monitoring audio level. Call `stop()` when done.
     func start() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement, options: [])
-        try session.setActive(true)
+        configInfo = try AudioSessionConfigurator.configure()
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
