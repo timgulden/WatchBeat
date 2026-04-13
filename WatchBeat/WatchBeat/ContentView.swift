@@ -74,10 +74,16 @@ struct ContentView: View {
             }
 
             Button(action: { coordinator.startMeasurement() }) {
-                Text("Measure (30s)")
-                    .font(.title2.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding()
+                VStack(spacing: 4) {
+                    Text("Measure (30s)")
+                        .font(.title2.bold())
+                    if let rate = coordinator.selectedRate {
+                        Text("at \(rate.rawValue) bph")
+                            .font(.caption)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)

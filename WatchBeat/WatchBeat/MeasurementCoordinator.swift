@@ -148,7 +148,10 @@ final class MeasurementCoordinator: ObservableObject {
                 .map { "\($0.rate.rawValue)bph: \(String(format: "%.1f", $0.magnitude))" }
                 .joined(separator: ", ")
 
+            let rateMode = rateOverride != nil ? "Manual: \(rateOverride!.rawValue) bph" : "Auto-detect"
+
             let diagText = """
+            Rate mode: \(rateMode)
             Audio: \(captureService.lastConfigInfo)
             Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
             Period: \(String(format: "%.4f", diagnostics.periodEstimate.measuredHz)) Hz
