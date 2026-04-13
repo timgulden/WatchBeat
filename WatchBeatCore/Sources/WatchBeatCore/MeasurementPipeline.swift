@@ -55,16 +55,27 @@ public struct MeasurementPipeline {
 
         rateScores.sort { $0.magnitude > $1.magnitude }
 
-        // Step 3: Try all 7 rates with guided tick extraction.
-        // The FFT narrows the field, but the real test is whether the rate produces
-        // regularly-spaced ticks with good regression fit. This handles cases where
-        // FFT scores are ambiguous (e.g., handling noise near 1 Hz, or harmonics).
+        // Step 3: If the envelope FFT has a clear winner (>30% above second place),
+        // trust it. Otherwise, try all rates and let guided extraction decide.
+        let topMag = rateScores.first?.magnitude ?? 0
+        let secondMag = rateScores.count > 1 ? rateScores[1].magnitude : 0
+        let fftIsClear = topMag > 0 && secondMag > 0 && (topMag / secondMag) > 1.3
+
+        let candidateRates: [StandardBeatRate]
+        if fftIsClear {
+            // FFT has a clear winner — just validate with guided extraction
+            candidateRates = [rateScores.first!.rate]
+        } else {
+            // FFT is ambiguous — try all rates
+            candidateRates = StandardBeatRate.allCases
+        }
+
         var bestResult: MeasurementResult?
         var bestTickResult: TickExtractionResult?
         var bestScore: Double = -1
-        var bestRate = StandardBeatRate.bph28800
+        var bestRate = rateScores.first?.rate ?? StandardBeatRate.bph28800
 
-        for rate in StandardBeatRate.allCases {
+        for rate in candidateRates {
             let measuredHz = interpolateFFTPeak(
                 magnitudes: magnitudes, freqResolution: freqResolution, nearHz: rate.hz
             )
