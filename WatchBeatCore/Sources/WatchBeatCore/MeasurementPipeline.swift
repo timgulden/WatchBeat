@@ -45,10 +45,7 @@ public struct MeasurementPipeline {
         let magnitudes = computeFFTMagnitudes(samples: envelope.samples, fftLength: envFftLength)
         let freqResolution = envelope.sampleRate / Double(envFftLength)
 
-        // Step 2: Score each standard rate by FFT magnitude at its fundamental.
-        // To distinguish harmonically related rates (e.g., 4 Hz vs 8 Hz), also
-        // check for energy at sub-harmonics: the true fundamental has energy at
-        // freq/2, freq/3 etc. that a harmonic alias does not.
+        // Step 2: Score each standard rate by envelope FFT magnitude.
         var rateScores: [(rate: StandardBeatRate, magnitude: Float)] = []
 
         for rate in StandardBeatRate.allCases {
@@ -56,56 +53,82 @@ public struct MeasurementPipeline {
             rateScores.append((rate, fundMag))
         }
 
-        // Sort by fundamental magnitude descending
         rateScores.sort { $0.magnitude > $1.magnitude }
 
-        // Resolve harmonic ambiguity: when two rates are in a 2:1 ratio and have
-        // similar fundamental magnitudes, the LOWER rate is the true one — because
-        // a pulse train at freq F has energy at 2F, but a pulse train at 2F does NOT
-        // have energy at F. Check if the top scorer has a sub-harmonic with real energy.
-        var bestRate = rateScores.first?.rate ?? .bph28800
+        // Step 3: Try all 7 rates with guided tick extraction.
+        // The FFT narrows the field, but the real test is whether the rate produces
+        // regularly-spaced ticks with good regression fit. This handles cases where
+        // FFT scores are ambiguous (e.g., handling noise near 1 Hz, or harmonics).
+        var bestResult: MeasurementResult?
+        var bestTickResult: TickExtractionResult?
+        var bestScore: Double = -1
+        var bestRate = StandardBeatRate.bph28800
 
-        // Check if any lower-frequency rate has energy at the best rate's frequency
-        // (meaning best rate might be a harmonic, not the fundamental)
-        for candidate in rateScores {
-            if candidate.rate == bestRate { continue }
-            let ratio = bestRate.hz / candidate.rate.hz
-            // candidate is a sub-harmonic of bestRate (e.g., candidate=4Hz, best=8Hz)
-            let intRatio = Int(round(ratio))
-            if ratio > 1.5 && ratio < 10.5 && abs(candidate.rate.hz * Double(intRatio) - bestRate.hz) < 0.5 {
-                // Check if candidate's fundamental has real energy (above noise)
-                let candidateMag = candidate.magnitude
-                let bestMag = rateScores.first!.magnitude
-                // If the sub-harmonic has >30% of the "harmonic"'s energy, it's the true rate
-                if candidateMag > bestMag * 0.3 {
-                    bestRate = candidate.rate
-                    break
-                }
+        for rate in StandardBeatRate.allCases {
+            let measuredHz = interpolateFFTPeak(
+                magnitudes: magnitudes, freqResolution: freqResolution, nearHz: rate.hz
+            )
+
+            let tickResult = extractTicks(
+                samples: samples, sampleRate: sampleRate,
+                rate: rate, measuredHz: measuredHz
+            )
+
+            // Score: three factors that together identify the correct rate.
+            // 1. Recovery rate: fraction of expected ticks that were confirmed.
+            // 2. Residual quality: how well tick positions fit a straight line.
+            // 3. Period consistency: regression slope must match the candidate's
+            //    expected period. A wrong rate might find real ticks (low residuals)
+            //    but the measured period will be wrong for that rate.
+            let duration = Double(n) / sampleRate
+            let expectedTicks = duration * rate.hz
+            let recoveryRate = min(1.0, Double(tickResult.confirmedCount) / max(1.0, expectedTicks))
+            let residualQuality = tickResult.residualStd > 0 && tickResult.residualStd < .infinity
+                ? exp(-tickResult.residualStd / (rate.nominalPeriodSeconds * 0.05))
+                : 0.0
+
+            // Period consistency: penalize if measured period is far from nominal
+            let periodConsistency: Double
+            if let measuredPeriod = tickResult.measuredPeriod {
+                let periodDeviation = abs(measuredPeriod - rate.nominalPeriodSeconds) / rate.nominalPeriodSeconds
+                // Allow up to ~1% deviation (≈864 s/day); heavily penalize beyond that
+                periodConsistency = exp(-periodDeviation / 0.01)
+            } else {
+                periodConsistency = 0.0
+            }
+
+            // Also factor in envelope FFT magnitude as a tiebreaker
+            let envMag = rateScores.first(where: { $0.rate == rate })?.magnitude ?? 0
+            let maxEnvMag = rateScores.first?.magnitude ?? 1
+            let envBoost = maxEnvMag > 0 ? Double(envMag / maxEnvMag) : 0
+
+            let score = recoveryRate * residualQuality * periodConsistency * (0.5 + 0.5 * envBoost)
+
+            if score > bestScore {
+                bestScore = score
+                bestRate = rate
+                bestTickResult = tickResult
             }
         }
 
-        // Measure precise frequency via FFT peak interpolation
-        let measuredHz = interpolateFFTPeak(
-            magnitudes: magnitudes, freqResolution: freqResolution, nearHz: bestRate.hz
+        let tickResult = bestTickResult ?? TickExtractionResult(
+            confirmedCount: 0, qualityScore: 0, beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity
         )
 
-        let confidence = computeConfidence(rateScores: rateScores, bestRate: bestRate)
-
-        // Step 3: Guided tick extraction on the raw signal
-        let tickResult = extractTicks(
-            samples: samples, sampleRate: sampleRate,
-            rate: bestRate, measuredHz: measuredHz
-        )
-
-        // Step 4: Rate error from tick regression (precise) or FFT (fallback)
+        // Step 4: Rate error from tick regression
         let nominalPeriod = bestRate.nominalPeriodSeconds
         let rateError: Double
         if let measuredPeriod = tickResult.measuredPeriod {
             rateError = (nominalPeriod - measuredPeriod) / nominalPeriod * 86400.0
         } else {
+            let measuredHz = interpolateFFTPeak(
+                magnitudes: magnitudes, freqResolution: freqResolution, nearHz: bestRate.hz
+            )
             let fftPeriod = measuredHz > 0 ? 1.0 / measuredHz : nominalPeriod
             rateError = (nominalPeriod - fftPeriod) / nominalPeriod * 86400.0
         }
+
+        let confidence = computeConfidence(rateScores: rateScores, bestRate: bestRate)
 
         let result = MeasurementResult(
             snappedRate: bestRate,
@@ -116,8 +139,9 @@ public struct MeasurementPipeline {
             tickCount: tickResult.confirmedCount
         )
 
+        let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz
         let periodEstimate = PeriodEstimate(
-            measuredHz: measuredHz, snappedRate: bestRate, confidence: confidence
+            measuredHz: bestMeasuredHz, snappedRate: bestRate, confidence: confidence
         )
 
         let diagnostics = PipelineDiagnostics(
@@ -282,6 +306,8 @@ public struct MeasurementPipeline {
         let beatErrorMs: Double?
         let amplitudeProxy: Double
         let measuredPeriod: Double?
+        /// Regression residual std dev in seconds. Low = ticks fit the rate well.
+        let residualStd: Double
     }
 
     /// Divide the raw signal into beat-length windows and find energy peaks.
@@ -295,7 +321,7 @@ public struct MeasurementPipeline {
 
         guard periodSamples > 10 && periodSamples < n / 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
         }
 
         // Squared signal for energy measurement
@@ -360,7 +386,7 @@ public struct MeasurementPipeline {
 
         guard tickEnergies.count >= 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
         }
 
         // Confirm ticks: energy must exceed gap energy
@@ -375,7 +401,7 @@ public struct MeasurementPipeline {
 
         guard confirmed.count >= 3 else {
             return TickExtractionResult(confirmedCount: tickEnergies.count, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
         }
 
         // Quality from SNR
@@ -411,7 +437,8 @@ public struct MeasurementPipeline {
             qualityScore: quality,
             beatErrorMs: beatError,
             amplitudeProxy: Double(medianTick),
-            measuredPeriod: regression.slope
+            measuredPeriod: regression.slope,
+            residualStd: regression.residualStd
         )
     }
 
@@ -438,6 +465,7 @@ public struct MeasurementPipeline {
     private struct RegressionResult {
         let slope: Double?
         let intercept: Double?
+        let residualStd: Double
     }
 
     private func linearRegression(times: [Double], indices: [Int]) -> RegressionResult {
@@ -450,10 +478,23 @@ public struct MeasurementPipeline {
             count += 1
         }
         let denom = count * sumXX - sumX * sumX
-        guard abs(denom) > 1e-20 && count >= 3 else { return RegressionResult(slope: nil, intercept: nil) }
+        guard abs(denom) > 1e-20 && count >= 3 else {
+            return RegressionResult(slope: nil, intercept: nil, residualStd: .infinity)
+        }
         let slope = (count * sumXY - sumX * sumY) / denom
         let intercept = (sumY - slope * sumX) / count
-        return RegressionResult(slope: slope, intercept: intercept)
+
+        // Compute residual std dev
+        var sumSqRes: Double = 0
+        for i in indices {
+            guard i < times.count else { continue }
+            let predicted = slope * Double(i) + intercept
+            let residual = times[i] - predicted
+            sumSqRes += residual * residual
+        }
+        let residualStd = count > 2 ? sqrt(sumSqRes / (count - 2)) : .infinity
+
+        return RegressionResult(slope: slope, intercept: intercept, residualStd: residualStd)
     }
 
     private func sortedMedian(_ values: [Float]) -> Float {
