@@ -29,6 +29,9 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var state: State = .idle
     @Published var audioLevel: Float = 0
 
+    /// User-selected beat rate, or nil for auto-detect.
+    @Published var selectedRate: StandardBeatRate? = nil
+
     /// Capture duration in seconds.
     var captureDuration: Double = 30.0
 
@@ -128,8 +131,9 @@ final class MeasurementCoordinator: ObservableObject {
             // Analyze
             state = .analyzing
 
+            let rateOverride = self.selectedRate
             let (result, diagnostics) = await Task.detached { [pipeline] in
-                pipeline.measureWithDiagnostics(buffer)
+                pipeline.measureWithDiagnostics(buffer, knownRate: rateOverride)
             }.value
 
             guard !Task.isCancelled else {

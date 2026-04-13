@@ -25,12 +25,15 @@ public struct MeasurementPipeline {
 
     public init() {}
 
-    public func measure(_ input: AudioBuffer) -> MeasurementResult {
-        let (result, _) = measureWithDiagnostics(input)
+    /// Run the pipeline with optional manual rate override.
+    /// - Parameter knownRate: If provided, skip rate detection and use this rate directly.
+    public func measure(_ input: AudioBuffer, knownRate: StandardBeatRate? = nil) -> MeasurementResult {
+        let (result, _) = measureWithDiagnostics(input, knownRate: knownRate)
         return result
     }
 
-    public func measureWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
+    /// Run the pipeline with diagnostics and optional manual rate override.
+    public func measureWithDiagnostics(_ input: AudioBuffer, knownRate: StandardBeatRate? = nil) -> (MeasurementResult, PipelineDiagnostics) {
         let samples = input.samples
         let sampleRate = input.sampleRate
         let n = samples.count
@@ -55,25 +58,29 @@ public struct MeasurementPipeline {
 
         rateScores.sort { $0.magnitude > $1.magnitude }
 
-        // Step 3: If the envelope FFT has a clear winner (>30% above second place),
-        // trust it. Otherwise, try all rates and let guided extraction decide.
-        let topMag = rateScores.first?.magnitude ?? 0
-        let secondMag = rateScores.count > 1 ? rateScores[1].magnitude : 0
-        let fftIsClear = topMag > 0 && secondMag > 0 && (topMag / secondMag) > 1.3
-
+        // Step 3: Determine candidate rates.
+        // If the caller specified a known rate, use it directly.
+        // If the envelope FFT has a clear winner (>30% above second place), trust it.
+        // Otherwise, try all rates and let guided extraction decide.
         let candidateRates: [StandardBeatRate]
-        if fftIsClear {
-            // FFT has a clear winner — just validate with guided extraction
-            candidateRates = [rateScores.first!.rate]
+        if let known = knownRate {
+            candidateRates = [known]
         } else {
-            // FFT is ambiguous — try all rates
-            candidateRates = StandardBeatRate.allCases
+            let topMag = rateScores.first?.magnitude ?? 0
+            let secondMag = rateScores.count > 1 ? rateScores[1].magnitude : 0
+            let fftIsClear = topMag > 0 && secondMag > 0 && (topMag / secondMag) > 1.3
+
+            if fftIsClear {
+                candidateRates = [rateScores.first!.rate]
+            } else {
+                candidateRates = StandardBeatRate.allCases
+            }
         }
 
         var bestResult: MeasurementResult?
         var bestTickResult: TickExtractionResult?
         var bestScore: Double = -1
-        var bestRate = rateScores.first?.rate ?? StandardBeatRate.bph28800
+        var bestRate = knownRate ?? rateScores.first?.rate ?? StandardBeatRate.bph28800
 
         for rate in candidateRates {
             let measuredHz = interpolateFFTPeak(

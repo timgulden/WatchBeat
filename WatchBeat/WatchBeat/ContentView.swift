@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchBeatCore
 
 struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
@@ -59,6 +60,9 @@ struct ContentView: View {
             Text("Position your watch against the mic")
                 .font(.headline)
 
+            // Rate selector
+            ratePicker
+
             // Level meter
             VStack(spacing: 8) {
                 LevelMeterView(level: coordinator.audioLevel)
@@ -68,11 +72,6 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            Text("Adjust until you see activity, then tap Measure.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
 
             Button(action: { coordinator.startMeasurement() }) {
                 Text("Measure (30s)")
@@ -88,6 +87,31 @@ struct ContentView: View {
             }
             .foregroundStyle(.red)
         }
+    }
+
+    // MARK: - Rate picker
+
+    private var ratePicker: some View {
+        HStack {
+            Text("Beat rate:")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Picker("Beat rate", selection: $coordinator.selectedRate) {
+                Text("Auto-detect").tag(StandardBeatRate?.none)
+                ForEach(StandardBeatRate.allCases, id: \.self) { rate in
+                    Text(rateLabel(rate)).tag(StandardBeatRate?.some(rate))
+                }
+            }
+            .pickerStyle(.menu)
+        }
+    }
+
+    private func rateLabel(_ rate: StandardBeatRate) -> String {
+        let hz = rate.hz == floor(rate.hz) ? "\(Int(rate.hz))" : String(format: "%.1f", rate.hz)
+        if rate.isQuartz {
+            return "\(rate.rawValue) bph / \(hz) Hz (quartz)"
+        }
+        return "\(rate.rawValue) bph / \(hz) Hz"
     }
 
     private func levelDescription(_ level: Float) -> String {
