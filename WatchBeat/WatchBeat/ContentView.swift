@@ -5,6 +5,7 @@ struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
 
     var body: some View {
+        NavigationStack {
         VStack(spacing: 24) {
             Text("WatchBeat")
                 .font(.largeTitle.bold())
@@ -32,6 +33,7 @@ struct ContentView: View {
             Spacer()
         }
         .padding()
+        } // NavigationStack
     }
 
     // MARK: - Idle
@@ -98,43 +100,26 @@ struct ContentView: View {
     // MARK: - Rate picker
 
     private var ratePicker: some View {
-        Menu {
-            Button {
-                coordinator.selectedRate = nil
-            } label: {
-                if coordinator.selectedRate == nil {
-                    Label("Auto-detect", systemImage: "checkmark")
-                } else {
-                    Text("Auto-detect")
-                }
-            }
-            ForEach(StandardBeatRate.allCases, id: \.self) { rate in
-                Button {
-                    coordinator.selectedRate = rate
-                } label: {
-                    if coordinator.selectedRate == rate {
-                        Label(rateLabel(rate), systemImage: "checkmark")
-                    } else {
-                        Text(rateLabel(rate))
-                    }
-                }
-            }
+        NavigationLink {
+            RateSelectionView(selectedRate: $coordinator.selectedRate)
         } label: {
             HStack {
                 Text("Beat rate:")
                     .foregroundStyle(.secondary)
+                Spacer()
                 Text(coordinator.selectedRate.map { rateLabel($0) } ?? "Auto-detect")
                     .bold()
-                Image(systemName: "chevron.up.chevron.down")
+                Image(systemName: "chevron.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .font(.subheadline)
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
             .background(Color(.systemGray6))
             .cornerRadius(10)
         }
+        .buttonStyle(.plain)
     }
 
     private func rateLabel(_ rate: StandardBeatRate) -> String {
@@ -296,6 +281,81 @@ struct LevelMeterView: View {
         } else {
             return .green
         }
+    }
+}
+
+// MARK: - Rate Selection
+
+struct RateSelectionView: View {
+    @Binding var selectedRate: StandardBeatRate?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Button {
+                selectedRate = nil
+                dismiss()
+            } label: {
+                HStack {
+                    Text("Auto-detect")
+                    Spacer()
+                    if selectedRate == nil {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+
+            Section("Mechanical") {
+                ForEach(StandardBeatRate.allCases.filter { !$0.isQuartz }, id: \.self) { rate in
+                    Button {
+                        selectedRate = rate
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text("\(rate.rawValue) bph")
+                                    .font(.body)
+                                Text("\(Int(rate.hz)) Hz")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if selectedRate == rate {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section("Quartz") {
+                ForEach(StandardBeatRate.allCases.filter { $0.isQuartz }, id: \.self) { rate in
+                    Button {
+                        selectedRate = rate
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text("\(rate.rawValue) bph")
+                                    .font(.body)
+                                Text("\(Int(rate.hz)) Hz")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if selectedRate == rate {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Beat Rate")
+        .foregroundStyle(.primary)
     }
 }
 
