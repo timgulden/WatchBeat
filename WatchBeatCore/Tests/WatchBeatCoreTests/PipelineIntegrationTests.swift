@@ -60,6 +60,83 @@ final class PipelineIntegrationTests: XCTestCase {
                        tolerance: 1.0, minQuality: 0.8)
     }
 
+    // MARK: - Dropout robustness
+
+    func testPipeline28800With20PercentDropouts() {
+        let signal = generateSignalWithDropouts(
+            beatRate: .bph28800, injectedError: 5.0, dropoutFraction: 0.20, seed: 42
+        )
+        let result = pipeline.measure(signal)
+
+        XCTAssertEqual(result.snappedRate, .bph28800, "Wrong rate with 20% dropouts")
+        XCTAssertEqual(result.rateErrorSecondsPerDay, 5.0, accuracy: 1.0,
+                       "Rate error \(result.rateErrorSecondsPerDay) should be ~5.0 with 20% dropouts")
+        XCTAssertGreaterThan(result.tickCount, 100,
+                             "Should still find >100 ticks with 20% dropout (expected ~192)")
+    }
+
+    func testPipeline28800With40PercentDropouts() {
+        let signal = generateSignalWithDropouts(
+            beatRate: .bph28800, injectedError: 5.0, dropoutFraction: 0.40, seed: 99
+        )
+        let result = pipeline.measure(signal)
+
+        XCTAssertEqual(result.snappedRate, .bph28800, "Wrong rate with 40% dropouts")
+        XCTAssertEqual(result.rateErrorSecondsPerDay, 5.0, accuracy: 2.0,
+                       "Rate error \(result.rateErrorSecondsPerDay) should be ~5.0 with 40% dropouts")
+        XCTAssertGreaterThan(result.tickCount, 50,
+                             "Should still find >50 ticks with 40% dropout")
+    }
+
+    func testPipeline21600With20PercentDropouts() {
+        let signal = generateSignalWithDropouts(
+            beatRate: .bph21600, injectedError: -3.0, dropoutFraction: 0.20, seed: 77
+        )
+        let result = pipeline.measure(signal)
+
+        XCTAssertEqual(result.snappedRate, .bph21600, "Wrong rate with 20% dropouts")
+        XCTAssertEqual(result.rateErrorSecondsPerDay, -3.0, accuracy: 1.5,
+                       "Rate error \(result.rateErrorSecondsPerDay) should be ~-3.0 with 20% dropouts")
+    }
+
+    /// Generate a synthetic signal and zero out a fraction of the ticks to simulate dropouts.
+    private func generateSignalWithDropouts(
+        beatRate: StandardBeatRate,
+        injectedError: Double,
+        dropoutFraction: Double,
+        seed: UInt64
+    ) -> AudioBuffer {
+        let params = SyntheticTickParameters(
+            beatRate: beatRate,
+            durationSeconds: 30.0,
+            sampleRate: 48000.0,
+            rateErrorSecondsPerDay: injectedError,
+            snrDb: 40.0,
+            seed: seed
+        )
+        let signal = generator.generate(parameters: params)
+        var samples = signal.buffer.samples
+        let sampleRate = signal.buffer.sampleRate
+
+        // Zero out a random subset of ticks
+        var rng = SeededDropoutRNG(seed: seed &+ 12345)
+        let tickDurationSamples = Int(sampleRate * 0.006) // ~6ms window around each tick
+
+        for tickTime in signal.tickTimesSeconds {
+            if rng.nextDouble() < dropoutFraction {
+                // Zero out this tick
+                let centerSample = Int(tickTime * sampleRate)
+                let start = max(0, centerSample - tickDurationSamples / 2)
+                let end = min(samples.count, centerSample + tickDurationSamples / 2)
+                for i in start..<end {
+                    samples[i] = 0
+                }
+            }
+        }
+
+        return AudioBuffer(samples: samples, sampleRate: sampleRate)
+    }
+
     // MARK: - Full pipeline via MeasurementPipeline entry point
 
     func testMeasurementPipelineEntryPoint() {
@@ -108,5 +185,22 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(result.qualityScore, minQuality,
                              "\(beatRate): quality \(result.qualityScore) < \(minQuality)",
                              file: file, line: line)
+    }
+}
+
+/// Simple deterministic RNG for dropout selection in tests.
+private struct SeededDropoutRNG {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func nextDouble() -> Double {
+        // xorshift64
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return Double(state) / Double(UInt64.max)
     }
 }
