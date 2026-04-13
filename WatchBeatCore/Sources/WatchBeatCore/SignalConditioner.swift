@@ -22,14 +22,14 @@ public struct SignalConditioner {
     /// - Parameter input: Raw audio from the microphone.
     /// - Returns: Bandpass-filtered signal and decimated envelope.
     public func process(_ input: AudioBuffer) -> ConditionedSignal {
-        // Stage 1: Bandpass filter (500 Hz – 12 kHz, 4th-order Butterworth)
-        // Lower cutoff at 500 Hz to capture quartz stepper motor pulses,
-        // which are lower in frequency than mechanical escapement ticks.
-        // Upper cutoff at 12 kHz to capture the full escapement energy band.
+        // Stage 1: Bandpass filter (200 Hz – 12 kHz, 4th-order Butterworth)
+        // Lower cutoff at 200 Hz to capture quartz stepper motor pulses
+        // (energy often in 100-500 Hz range) while still rejecting room rumble.
+        // Upper cutoff at 12 kHz to capture the full mechanical escapement band.
         let filtered = bandpassFilter(
             input.samples,
             sampleRate: input.sampleRate,
-            lowCutoff: 500.0,
+            lowCutoff: 200.0,
             highCutoff: 12000.0
         )
 
