@@ -1,7 +1,7 @@
 import Foundation
 
 /// A simple container for raw audio samples and their sample rate.
-public struct AudioBuffer {
+public struct AudioBuffer: Sendable {
     public let samples: [Float]
     public let sampleRate: Double
 
