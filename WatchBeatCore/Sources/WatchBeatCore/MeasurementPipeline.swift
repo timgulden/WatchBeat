@@ -328,7 +328,8 @@ public struct MeasurementPipeline {
         let residualStd: Double
     }
 
-    /// Divide the raw signal into beat-length windows and find energy peaks.
+    /// Divide the raw signal into beat-length windows, align using median peak
+    /// position, and find energy peaks in each window.
     private func extractTicks(
         samples: [Float], sampleRate: Double,
         rate: StandardBeatRate, measuredHz: Double
@@ -346,26 +347,52 @@ public struct MeasurementPipeline {
         var squared = [Float](repeating: 0, count: n)
         vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(n))
 
-        // Tick search window: 40% of beat period, centered on expected position.
-        // Must be wide enough for the tick peak to drift as rate error accumulates,
-        // but narrow enough to not overlap with adjacent ticks.
+        // Pass 1: Divide into windows starting from sample 0, find peak offset in each.
+        // This gives us the raw peak position within each period-length window.
+        let numWindows = n / periodSamples
+        guard numWindows >= 3 else {
+            return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
+        }
+
+        var peakOffsets = [Int](repeating: 0, count: numWindows)
+        var peakEnergies = [Float](repeating: 0, count: numWindows)
+
+        for w in 0..<numWindows {
+            let wStart = w * periodSamples
+            var bestIdx = 0
+            var bestVal: Float = 0
+            for i in 0..<periodSamples {
+                if squared[wStart + i] > bestVal {
+                    bestVal = squared[wStart + i]
+                    bestIdx = i
+                }
+            }
+            peakOffsets[w] = bestIdx
+            peakEnergies[w] = bestVal
+        }
+
+        // Median peak offset — this is where ticks naturally fall within each window.
+        // Robust to noise: even if some windows have noise peaks at random positions,
+        // the median reflects the true tick position.
+        let medianOffset = sortedMedianInt(peakOffsets)
+
+        // Pass 2: Re-window centered on the median offset, with a search window
+        // of 40% of the period for the peak to drift within.
         let tickWindow = max(10, Int(Double(periodSamples) * 0.4))
         let halfTick = tickWindow / 2
 
-        // Find first tick: strongest energy peak in first 2 periods
-        let firstTickPos = findStrongestPeak(squared: squared,
-                                              searchEnd: min(n, periodSamples * 2),
-                                              windowSize: tickWindow)
-
-        // Walk through expected positions, measure energy and find precise peak
         var tickEnergies: [Float] = []
         var gapEnergies: [Float] = []
         var peakTimes: [Double] = []
 
-        var pos = firstTickPos
-        while pos + halfTick < n && pos >= halfTick {
-            // Tick energy
-            let wStart = pos - halfTick
+        for w in 0..<numWindows {
+            let windowCenter = w * periodSamples + medianOffset
+            guard windowCenter >= halfTick && windowCenter + halfTick < n else { continue }
+
+            let wStart = windowCenter - halfTick
+
+            // Tick energy in the search window
             var energy: Float = 0
             vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + wStart },
                      1, &energy, vDSP_Length(tickWindow))
@@ -391,15 +418,13 @@ public struct MeasurementPipeline {
             }
 
             // Gap energy: midpoint between this tick and next
-            let gapPos = pos + periodSamples / 2
-            if gapPos + halfTick < n && gapPos >= halfTick {
+            let gapCenter = windowCenter + periodSamples / 2
+            if gapCenter >= halfTick && gapCenter + halfTick < n {
                 var gapE: Float = 0
-                vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + gapPos - halfTick },
+                vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + gapCenter - halfTick },
                          1, &gapE, vDSP_Length(tickWindow))
                 gapEnergies.append(gapE)
             }
-
-            pos += periodSamples
         }
 
         guard tickEnergies.count >= 3 else {
@@ -423,7 +448,7 @@ public struct MeasurementPipeline {
         }
 
         // Quality from SNR
-        let medianTick = sortedMedian(tickEnergies)
+        let medianTick = sortedMedian(tickEnergies.map { $0 })
         let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
         let quality = min(1.0, max(0.0, 1.0 - exp(-snr / 5.0)))
 
@@ -462,22 +487,10 @@ public struct MeasurementPipeline {
 
     // MARK: - Helpers
 
-    /// Find the sample position of the strongest energy peak in squared[0..<searchEnd].
-    private func findStrongestPeak(squared: [Float], searchEnd: Int, windowSize: Int) -> Int {
-        let half = windowSize / 2
-        var bestPos = half
-        var bestEnergy: Float = 0
-        // Scan every sample for precise alignment
-        for pos in half..<(searchEnd - half) {
-            var energy: Float = 0
-            vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + pos - half },
-                     1, &energy, vDSP_Length(windowSize))
-            if energy > bestEnergy {
-                bestEnergy = energy
-                bestPos = pos
-            }
-        }
-        return bestPos
+    private func sortedMedianInt(_ values: [Int]) -> Int {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     private struct RegressionResult {
