@@ -91,11 +91,6 @@ final class RateAnalyzerTests: XCTestCase {
         }
     }
 
-    func testBeatErrorIsNilForQuartz() {
-        let result = analyzeRate(beatRate: .bph3600)
-        XCTAssertNil(result.beatErrorMilliseconds, "Quartz should have nil beat error")
-    }
-
     func testZeroBeatError() {
         let result = analyzeRate(beatRate: .bph28800, beatErrorMilliseconds: 0.0, snrDb: 40.0)
         if let be = result.beatErrorMilliseconds {

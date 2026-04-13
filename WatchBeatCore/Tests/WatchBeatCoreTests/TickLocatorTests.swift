@@ -141,13 +141,4 @@ final class TickLocatorTests: XCTestCase {
         XCTAssertEqual(locations.tickTimesSeconds.count, locations.correlationMagnitudes.count)
     }
 
-    // MARK: - Quartz
-
-    func testQuartzTickDetection() {
-        let (locations, groundTruth, _) = locateTicks(beatRate: .bph3600, durationSeconds: 10.0)
-        // 1 Hz over 10 seconds = 10 ticks
-        XCTAssertEqual(Double(locations.tickTimesSeconds.count), Double(groundTruth.count),
-                       accuracy: 3,
-                       "Quartz: expected ~\(groundTruth.count), got \(locations.tickTimesSeconds.count)")
-    }
 }

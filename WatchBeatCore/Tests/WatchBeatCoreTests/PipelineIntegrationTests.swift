@@ -40,20 +40,6 @@ final class PipelineIntegrationTests: XCTestCase {
                        tolerance: 1.0, minQuality: 0.5)
     }
 
-    func testPipelineQuartzHighSNR() {
-        // Quartz (1 Hz) is the hardest case: only 30 ticks in 30s, and higher-rate
-        // candidates can find the same ticks in a subset of their windows.
-        // For now, verify the pipeline doesn't crash and produces a result.
-        // Accurate quartz detection is a future refinement per the spec.
-        let params = SyntheticTickParameters(
-            beatRate: .bph3600, durationSeconds: 30.0, sampleRate: 48000.0,
-            rateErrorSecondsPerDay: 5.0, snrDb: 40.0
-        )
-        let signal = generator.generate(parameters: params)
-        let result = pipeline.measure(signal.buffer)
-        XCTAssertGreaterThan(result.tickCount, 0, "Should find some ticks")
-    }
-
     // MARK: - Moderate SNR (20 dB): rate error within ±2 s/day
 
     func testPipeline28800ModerateSNR() {

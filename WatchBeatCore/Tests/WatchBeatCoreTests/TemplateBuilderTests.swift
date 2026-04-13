@@ -38,18 +38,18 @@ final class TemplateBuilderTests: XCTestCase {
         XCTAssertEqual(template.spansBeats, 2)
     }
 
-    func testTemplateLengthMatchesOneBeatForQuartz() {
-        let (template, estimate) = buildTemplate(beatRate: .bph3600)
-        let expectedLength = Int(round(48000.0 / estimate.measuredHz))
+    func testTemplateLengthMatchesTwoBeatsFor14400() {
+        let (template, estimate) = buildTemplate(beatRate: .bph14400)
+        let expectedLength = Int(round(2.0 * 48000.0 / estimate.measuredHz))
         XCTAssertEqual(template.samples.count, expectedLength, accuracy: 1,
-                       "Quartz template should span 1 beat")
-        XCTAssertEqual(template.spansBeats, 1)
+                       "14400 bph template should span 2 beats")
+        XCTAssertEqual(template.spansBeats, 2)
     }
 
     func testTemplateLengthAllRates() {
         for rate in StandardBeatRate.allCases {
             let (template, estimate) = buildTemplate(beatRate: rate)
-            let beatsPerTemplate = rate.isQuartz ? 1 : 2
+            let beatsPerTemplate = 2
             let expectedLength = Int(round(Double(beatsPerTemplate) * 48000.0 / estimate.measuredHz))
             XCTAssertEqual(template.samples.count, expectedLength, accuracy: 1,
                            "\(rate): template length \(template.samples.count) != expected \(expectedLength)")

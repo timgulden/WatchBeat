@@ -117,10 +117,10 @@ final class SyntheticGeneratorTests: XCTestCase {
         }
     }
 
-    func testQuartzNoBeatError() {
-        // Even if beat error param is set, quartz ticks should be regular
+    func testSlowRateNoBeatErrorAsymmetry() {
+        // Verify beat error asymmetry works correctly for a slow mechanical rate
         let params = SyntheticTickParameters(
-            beatRate: .bph3600,
+            beatRate: .bph14400,
             durationSeconds: 5.0,
             rateErrorSecondsPerDay: 0.0,
             beatErrorMilliseconds: 2.0,
@@ -128,12 +128,14 @@ final class SyntheticGeneratorTests: XCTestCase {
             snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
-        let expectedPeriod = 1.0
+        let nominalPeriod = 1.0 / 4.0 // 14400 bph = 4 Hz
+        let shift = 2.0 / 1000.0 / 2.0
 
-        for i in 1..<signal.tickTimesSeconds.count {
-            let interval = signal.tickTimesSeconds[i] - signal.tickTimesSeconds[i - 1]
-            XCTAssertEqual(interval, expectedPeriod, accuracy: 1e-12,
-                           "Quartz tick \(i) should have no beat error asymmetry")
+        for i in 0..<signal.tickTimesSeconds.count {
+            let idealTime = Double(i) * nominalPeriod
+            let expectedShift = (i % 2 == 0) ? shift : -shift
+            XCTAssertEqual(signal.tickTimesSeconds[i], idealTime + expectedShift, accuracy: 1e-12,
+                           "Tick \(i) beat error offset wrong")
         }
     }
 
@@ -195,20 +197,20 @@ final class SyntheticGeneratorTests: XCTestCase {
     func testSignalIsQuietBetweenTicks() {
         // With high SNR and low beat rate, there should be silence between ticks
         let params = SyntheticTickParameters(
-            beatRate: .bph3600,
+            beatRate: .bph14400,
             durationSeconds: 3.0,
-            snrDb: 100.0,
-            tickShape: .syntheticQuartz
+            snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
 
-        // Check a region far from any tick (e.g., at t=0.5 s, between tick 0 at 0s and tick 1 at 1s)
-        let midSample = Int(0.5 * params.sampleRate)
-        let window = 100
+        // Check a region far from any tick (midway between two ticks for 14400 bph = 4 Hz, period 0.25s)
+        // Pick t=0.125s which is halfway between tick at 0s and tick at 0.25s
+        let midSample = Int(0.125 * params.sampleRate)
+        let window = 50
         let quietEnergy = signal.buffer.samples[(midSample - window)..<(midSample + window)]
             .map { $0 * $0 }
             .reduce(0, +)
-        XCTAssertEqual(quietEnergy, 0.0, accuracy: 1e-20, "Should be silent between quartz ticks")
+        XCTAssertEqual(quietEnergy, 0.0, accuracy: 1e-10, "Should be silent between ticks")
     }
 
     // MARK: - Noise
@@ -260,16 +262,15 @@ final class SyntheticGeneratorTests: XCTestCase {
 
     // MARK: - Quartz tick shape
 
-    func testQuartzTickShape() {
+    func testLowBeatRateTickShape() {
         let params = SyntheticTickParameters(
-            beatRate: .bph3600,
+            beatRate: .bph14400,
             durationSeconds: 3.0,
-            snrDb: 100.0,
-            tickShape: .syntheticQuartz
+            snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
-        // Should have 3 ticks (at 0, 1, 2 seconds)
-        XCTAssertEqual(signal.tickTimesSeconds.count, 3)
+        // 14400 bph = 4 Hz, 3 seconds -> 12 ticks
+        XCTAssertEqual(signal.tickTimesSeconds.count, 12)
         XCTAssertEqual(signal.buffer.samples.count, Int(3.0 * 48000.0))
     }
 }
