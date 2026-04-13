@@ -5,23 +5,23 @@ import Accelerate
 public struct TickLocations: Sendable {
     /// Sub-sample-precise tick times in seconds.
     public let tickTimesSeconds: [Double]
-    /// Peak cross-correlation magnitude at each detected tick.
+    /// Peak energy magnitude at each detected tick.
     public let correlationMagnitudes: [Float]
 }
 
-/// Cross-correlates the tick template against the raw signal to locate individual ticks
-/// with sub-sample precision.
+/// Locates individual ticks in the filtered signal with sub-sample precision.
+///
+/// Uses a two-pass approach:
+/// 1. Coarse pass: find energy peaks in the squared signal at expected beat spacing.
+/// 2. Refinement: parabolic interpolation for sub-sample precision.
+///
+/// By detecting energy peaks directly (rather than pair-template correlation),
+/// every individual tick and tock is found, preserving beat error asymmetry.
 public struct TickLocator {
 
     public init() {}
 
-    /// Locate ticks in the filtered signal using the template.
-    ///
-    /// - Parameters:
-    ///   - filtered: Bandpass-filtered signal at full sample rate.
-    ///   - template: Averaged tick template from TemplateBuilder.
-    ///   - periodEstimate: Period estimate to determine expected tick spacing.
-    /// - Returns: Located tick times and their correlation magnitudes.
+    /// Locate ticks in the filtered signal.
     public func locate(
         filtered: AudioBuffer,
         template: TickTemplate,
@@ -29,103 +29,102 @@ public struct TickLocator {
     ) -> TickLocations {
         let signal = filtered.samples
         let sampleRate = filtered.sampleRate
-        let templateSamples = template.samples
-        let templateLen = templateSamples.count
+        let n = signal.count
 
-        guard signal.count > templateLen else {
+        let beatPeriodSamples = sampleRate / periodEstimate.measuredHz
+        guard beatPeriodSamples > 2 && n > Int(beatPeriodSamples) * 2 else {
             return TickLocations(tickTimesSeconds: [], correlationMagnitudes: [])
         }
 
-        // Cross-correlate template against the signal
-        let corrLen = signal.count - templateLen + 1
-        var correlation = [Float](repeating: 0, count: corrLen)
+        // Compute smoothed energy envelope for tick detection.
+        // Square the signal and smooth with a short window (~1ms) to get
+        // a clean energy profile where each tick appears as a distinct peak.
+        var squaredSignal = [Float](repeating: 0, count: n)
+        vDSP_vsq(signal, 1, &squaredSignal, 1, vDSP_Length(n))
 
-        // vDSP_conv computes correlation (note: it reverses the filter kernel,
-        // but since we want correlation with the template as-is, we pass the
-        // template reversed so vDSP_conv effectively does correlation)
-        var reversedTemplate = [Float](repeating: 0, count: templateLen)
-        for i in 0..<templateLen {
-            reversedTemplate[i] = templateSamples[templateLen - 1 - i]
+        let smoothWindow = max(3, Int(sampleRate * 0.001)) | 1 // ~1ms, ensure odd
+        let halfSmooth = smoothWindow / 2
+        let energyLen = n - smoothWindow + 1
+
+        guard energyLen > 0 else {
+            return TickLocations(tickTimesSeconds: [], correlationMagnitudes: [])
         }
 
-        vDSP_conv(signal, 1, reversedTemplate, 1, &correlation, 1,
-                  vDSP_Length(corrLen), vDSP_Length(templateLen))
+        // Compute moving-average energy
+        var energy = [Float](repeating: 0, count: energyLen)
+        for i in 0..<energyLen {
+            var sum: Float = 0
+            vDSP_sve(squaredSignal.withUnsafeBufferPointer { $0.baseAddress! + i },
+                     1, &sum, vDSP_Length(smoothWindow))
+            energy[i] = sum
+        }
 
-        // Find peaks at expected tick spacing
-        // For mechanical watches, the template spans 2 beats (tick+tock pair),
-        // but correlation peaks appear at every single beat because each beat
-        // matches part of the template. So we search at 1-beat spacing.
-        let beatPeriodSamples = sampleRate / periodEstimate.measuredHz
-        let tolerance = 0.25 // ±25% tolerance on expected spacing
+        // Establish threshold: energy peaks must be well above the noise floor
+        let sortedEnergy = energy.sorted()
+        let medianEnergy = sortedEnergy[sortedEnergy.count / 2]
+        let maxEnergy = sortedEnergy.last ?? 0
+        let threshold = medianEnergy + 0.15 * (maxEnergy - medianEnergy)
 
+        // Find peaks at expected beat spacing
+        let tolerance = 0.3 // ±30% to accommodate beat error
         let minSpacing = Int(beatPeriodSamples * (1.0 - tolerance))
         let maxSpacing = Int(beatPeriodSamples * (1.0 + tolerance))
 
-        // Find all peaks using a greedy approach:
-        // Start from the beginning, find the highest correlation within
-        // the first expected-period window, then search for subsequent peaks.
         var peakIndices: [Int] = []
         var peakMagnitudes: [Float] = []
 
-        // Establish a threshold: median + some factor of the range
-        let sortedCorr = correlation.sorted()
-        let medianCorr = sortedCorr[sortedCorr.count / 2]
-        let maxCorr = sortedCorr.last ?? 0
-        let threshold = medianCorr + 0.2 * (maxCorr - medianCorr)
-
-        // Find the first strong peak
+        // Find first strong energy peak
         var searchStart = 0
-        if let firstPeak = findLocalMax(in: correlation, from: searchStart,
-                                         to: min(corrLen, Int(beatPeriodSamples * 2)),
-                                         threshold: threshold) {
+        if let firstPeak = findEnergyPeak(in: energy, from: 0,
+                                           to: min(energyLen, Int(beatPeriodSamples * 2)),
+                                           threshold: threshold) {
             peakIndices.append(firstPeak)
-            peakMagnitudes.append(correlation[firstPeak])
+            peakMagnitudes.append(energy[firstPeak])
             searchStart = firstPeak
         } else {
             return TickLocations(tickTimesSeconds: [], correlationMagnitudes: [])
         }
 
-        // Find subsequent peaks at expected spacing
-        while searchStart + minSpacing < corrLen {
+        // Find subsequent peaks at beat spacing
+        while searchStart + minSpacing < energyLen {
             let windowStart = searchStart + minSpacing
-            let windowEnd = min(corrLen, searchStart + maxSpacing + 1)
+            let windowEnd = min(energyLen, searchStart + maxSpacing + 1)
 
-            if let peak = findLocalMax(in: correlation, from: windowStart,
-                                        to: windowEnd, threshold: threshold) {
+            if let peak = findEnergyPeak(in: energy, from: windowStart,
+                                          to: windowEnd, threshold: threshold) {
                 peakIndices.append(peak)
-                peakMagnitudes.append(correlation[peak])
+                peakMagnitudes.append(energy[peak])
                 searchStart = peak
             } else {
-                // No peak found in this window — skip ahead
                 searchStart += Int(beatPeriodSamples)
             }
         }
 
-        // Sub-sample refinement via parabolic interpolation
+        // Sub-sample refinement via parabolic interpolation on energy
         var tickTimes: [Double] = []
         var refinedMagnitudes: [Float] = []
 
         for (i, peakIdx) in peakIndices.enumerated() {
+            // The energy index is offset by halfSmooth from the signal index
+            let signalIdx = peakIdx + halfSmooth
+
             let refinedSample: Double
-            if peakIdx > 0 && peakIdx < corrLen - 1 {
-                let alpha = correlation[peakIdx - 1]
-                let beta = correlation[peakIdx]
-                let gamma = correlation[peakIdx + 1]
+            if peakIdx > 0 && peakIdx < energyLen - 1 {
+                let alpha = energy[peakIdx - 1]
+                let beta = energy[peakIdx]
+                let gamma = energy[peakIdx + 1]
                 let denom = alpha - 2.0 * beta + gamma
                 if abs(denom) > 1e-10 {
                     let offset = 0.5 * (alpha - gamma) / denom
-                    refinedSample = Double(peakIdx) + Double(offset)
+                    refinedSample = Double(signalIdx) + Double(offset)
                 } else {
-                    refinedSample = Double(peakIdx)
+                    refinedSample = Double(signalIdx)
                 }
             } else {
-                refinedSample = Double(peakIdx)
+                refinedSample = Double(signalIdx)
             }
 
-            // The correlation peak corresponds to the start of the template alignment.
-            // Tick time is at the center of the template's first beat.
-            let tickTime = refinedSample / sampleRate
-            tickTimes.append(tickTime)
+            tickTimes.append(refinedSample / sampleRate)
             refinedMagnitudes.append(peakMagnitudes[i])
         }
 
@@ -134,14 +133,14 @@ public struct TickLocator {
 
     // MARK: - Helpers
 
-    /// Find the index of the maximum value in correlation[from..<to] that exceeds threshold.
-    private func findLocalMax(in correlation: [Float], from: Int, to: Int, threshold: Float) -> Int? {
-        guard from < to && from >= 0 && to <= correlation.count else { return nil }
+    /// Find the index of the maximum value in energy[from..<to] that exceeds threshold.
+    private func findEnergyPeak(in energy: [Float], from: Int, to: Int, threshold: Float) -> Int? {
+        guard from < to && from >= 0 && to <= energy.count else { return nil }
         var bestIdx = from
-        var bestVal = correlation[from]
+        var bestVal = energy[from]
         for i in (from + 1)..<to {
-            if correlation[i] > bestVal {
-                bestVal = correlation[i]
+            if energy[i] > bestVal {
+                bestVal = energy[i]
                 bestIdx = i
             }
         }

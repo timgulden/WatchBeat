@@ -83,15 +83,11 @@ final class RateAnalyzerTests: XCTestCase {
     // MARK: - Beat error
 
     func testRecoversBeatError() {
-        // NOTE: Beat error recovery is limited by the tick-pair template correlation,
-        // which smooths out tick/tock timing asymmetry. Accurate beat error measurement
-        // will require single-beat sub-template refinement (future improvement).
-        // For now, verify that beat error is non-nil for mechanical and in a reasonable range.
         let result = analyzeRate(beatRate: .bph28800, beatErrorMilliseconds: 2.0, snrDb: 40.0)
         XCTAssertNotNil(result.beatErrorMilliseconds)
         if let be = result.beatErrorMilliseconds {
-            XCTAssertGreaterThanOrEqual(be, 0, "Beat error should be non-negative")
-            XCTAssertLessThan(be, 10.0, "Beat error should be in a reasonable range")
+            XCTAssertEqual(be, 2.0, accuracy: 0.5,
+                           "Recovered beat error \(be) ms should be ~2.0 ms")
         }
     }
 

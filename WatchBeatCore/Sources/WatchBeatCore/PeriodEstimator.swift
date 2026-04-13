@@ -33,23 +33,46 @@ public struct PeriodEstimator {
             return PeriodEstimate(measuredHz: 0, snappedRate: .bph28800, confidence: 0)
         }
 
-        // Score each standard beat rate by autocorrelation at its period
-        var bestRate = StandardBeatRate.bph28800
-        var bestCorr: Float = -.greatestFiniteMagnitude
+        // Score each standard beat rate by autocorrelation at its period.
+        // Store all scores so we can apply sub-harmonic preference.
+        var rateScores: [(rate: StandardBeatRate, corr: Float)] = []
 
         for rate in StandardBeatRate.allCases {
             let lagSamples = Int(round(sampleRate / rate.hz))
             guard lagSamples > 0 && lagSamples < n / 2 else { continue }
 
-            // Compute normalized autocorrelation at this lag
             let overlap = n - lagSamples
             var corr: Float = 0
             vDSP_dotpr(centered, 1, Array(centered[lagSamples...]), 1, &corr, vDSP_Length(overlap))
             let normalizedCorr = corr / zeroPower
+            rateScores.append((rate, normalizedCorr))
+        }
 
-            if normalizedCorr > bestCorr {
-                bestCorr = normalizedCorr
-                bestRate = rate
+        // Sort by correlation strength (descending)
+        rateScores.sort { $0.corr > $1.corr }
+
+        // Sub-harmonic preference: if the best rate is a sub-harmonic of another
+        // standard rate (e.g., 4 Hz is a sub-harmonic of 8 Hz), and the higher rate
+        // also has strong autocorrelation (>80% of the sub-harmonic's score), prefer
+        // the higher rate. This handles beat error creating a 2-beat pattern that
+        // makes the pair frequency score higher than the true beat frequency.
+        var bestRate = rateScores.first?.rate ?? .bph28800
+        var bestCorr = rateScores.first?.corr ?? 0
+
+        if let topScore = rateScores.first {
+            for candidate in rateScores {
+                // Check if candidate is a higher harmonic of the current best
+                let ratio = candidate.rate.hz / topScore.rate.hz
+                if ratio > 1.5 && ratio < 2.5 {
+                    // candidate is roughly 2x the best rate's frequency
+                    // Prefer the higher rate if its correlation is still strong
+                    let relativeStrength = candidate.corr / topScore.corr
+                    if relativeStrength > 0.7 {
+                        bestRate = candidate.rate
+                        bestCorr = candidate.corr
+                        break
+                    }
+                }
             }
         }
 
