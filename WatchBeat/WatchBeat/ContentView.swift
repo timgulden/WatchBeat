@@ -92,17 +92,42 @@ struct ContentView: View {
     // MARK: - Rate picker
 
     private var ratePicker: some View {
-        HStack {
-            Text("Beat rate:")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Picker("Beat rate", selection: $coordinator.selectedRate) {
-                Text("Auto-detect").tag(nil as StandardBeatRate?)
-                ForEach(StandardBeatRate.allCases, id: \.self) { rate in
-                    Text(rateLabel(rate)).tag(rate as StandardBeatRate?)
+        Menu {
+            Button {
+                coordinator.selectedRate = nil
+            } label: {
+                if coordinator.selectedRate == nil {
+                    Label("Auto-detect", systemImage: "checkmark")
+                } else {
+                    Text("Auto-detect")
                 }
             }
-            .pickerStyle(.menu)
+            ForEach(StandardBeatRate.allCases, id: \.self) { rate in
+                Button {
+                    coordinator.selectedRate = rate
+                } label: {
+                    if coordinator.selectedRate == rate {
+                        Label(rateLabel(rate), systemImage: "checkmark")
+                    } else {
+                        Text(rateLabel(rate))
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text("Beat rate:")
+                    .foregroundStyle(.secondary)
+                Text(coordinator.selectedRate.map { rateLabel($0) } ?? "Auto-detect")
+                    .bold()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(.systemGray6))
+            .cornerRadius(10)
         }
     }
 
