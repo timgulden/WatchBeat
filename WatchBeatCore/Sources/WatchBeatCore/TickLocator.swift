@@ -59,11 +59,20 @@ public struct TickLocator {
             energy[i] = sum
         }
 
-        // Establish threshold: energy peaks must be well above the noise floor
+        // Establish threshold using percentiles rather than max.
+        // Max energy can be dominated by a single handling-noise spike,
+        // making the threshold unreachable for real tick peaks.
+        // Use the 98th percentile as the "reference high" and set the
+        // threshold just above the noise floor (75th percentile).
         let sortedEnergy = energy.sorted()
-        let medianEnergy = sortedEnergy[sortedEnergy.count / 2]
-        let maxEnergy = sortedEnergy.last ?? 0
-        let threshold = medianEnergy + 0.15 * (maxEnergy - medianEnergy)
+        let p50 = sortedEnergy[sortedEnergy.count / 2]
+        let p75 = sortedEnergy[sortedEnergy.count * 3 / 4]
+        let p98 = sortedEnergy[min(sortedEnergy.count - 1, sortedEnergy.count * 98 / 100)]
+        // Threshold: halfway between the noise floor (p50) and the tick energy level (p98)
+        // This is much more robust than using max, which can be a single spike
+        let threshold = p50 + 0.3 * (p98 - p50)
+        // Ensure threshold is at least slightly above the 75th percentile
+        let effectiveThreshold = max(threshold, p75 * 1.2)
 
         // Find peaks at expected beat spacing
         let tolerance = 0.3 // ±30% to accommodate beat error
@@ -77,7 +86,7 @@ public struct TickLocator {
         var searchStart = 0
         if let firstPeak = findEnergyPeak(in: energy, from: 0,
                                            to: min(energyLen, Int(beatPeriodSamples * 2)),
-                                           threshold: threshold) {
+                                           threshold: effectiveThreshold) {
             peakIndices.append(firstPeak)
             peakMagnitudes.append(energy[firstPeak])
             searchStart = firstPeak
