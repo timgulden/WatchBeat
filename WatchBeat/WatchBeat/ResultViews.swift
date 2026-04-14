@@ -212,10 +212,6 @@ struct QualityBadgeView: View {
 
             Text("\(percent)%")
                 .font(.subheadline.bold().monospacedDigit())
-
-            Text("quality")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

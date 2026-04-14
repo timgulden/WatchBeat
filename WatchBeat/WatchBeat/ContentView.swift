@@ -142,7 +142,7 @@ struct ContentView: View {
     // MARK: - Result
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 0) {
             // Rate and quality — tight to the title
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -160,11 +160,12 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .padding(.top, -8)
 
-            // Rate error dial with beat error
+            // Rate error dial with beat error — 20% bigger
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                .frame(height: 280)
-                .padding(.top, -8)
+                .frame(height: 330)
+                .padding(.top, -12)
 
             // Timegraph
             VStack(alignment: .leading, spacing: 3) {
