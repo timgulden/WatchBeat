@@ -248,7 +248,7 @@ struct ContentView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.bottom, 20)
+            .padding(.bottom, 120)
         }
         .padding(.top, 80) // clear the WatchBeat title
         .padding(.horizontal, 20)
