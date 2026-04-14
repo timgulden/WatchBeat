@@ -197,7 +197,13 @@ final class MeasurementCoordinator: ObservableObject {
 
         deadlineTask.cancel()
 
-        // Final analysis on the most recent data — the best window may be right at the end
+        // CRITICAL: Stop the timer task FIRST so it can't overwrite state
+        monitorTask?.cancel()
+        monitorTask = nil
+        // Give it a moment to actually stop
+        try? await Task.sleep(for: .milliseconds(300))
+
+        // Final analysis on the most recent data
         if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
             let (result, diagnostics) = await Task.detached { [pipeline] in
                 pipeline.measureWithDiagnostics(buffer)
@@ -211,9 +217,7 @@ final class MeasurementCoordinator: ObservableObject {
             saveRawAudio(buffer, result: bestResult?.0 ?? result)
         }
 
-        // Stop timer and recording
-        monitorTask?.cancel()
-        monitorTask = nil
+        // Stop recording
         captureService.stopRecording()
 
         guard !Task.isCancelled else {
