@@ -197,11 +197,18 @@ final class MeasurementCoordinator: ObservableObject {
 
         deadlineTask.cancel()
 
-        // Save audio BEFORE stopping the engine
-        var savedBuffer: WatchBeatCore.AudioBuffer?
-        if let best = bestResult {
-            savedBuffer = await captureService.getRecentAudio(duration: analysisWindow)
-            if let buf = savedBuffer { saveRawAudio(buf, result: best.0) }
+        // Final analysis on the most recent data — the best window may be right at the end
+        if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
+            let (result, diagnostics) = await Task.detached { [pipeline] in
+                pipeline.measureWithDiagnostics(buffer)
+            }.value
+
+            let quality = result.qualityScore
+            if quality > bestQuality {
+                bestResult = (result, diagnostics)
+            }
+
+            saveRawAudio(buffer, result: bestResult?.0 ?? result)
         }
 
         // Stop timer and recording
