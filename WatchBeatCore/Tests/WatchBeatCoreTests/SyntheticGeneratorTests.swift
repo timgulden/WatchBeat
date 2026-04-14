@@ -120,7 +120,7 @@ final class SyntheticGeneratorTests: XCTestCase {
     func testSlowRateNoBeatErrorAsymmetry() {
         // Verify beat error asymmetry works correctly for a slow mechanical rate
         let params = SyntheticTickParameters(
-            beatRate: .bph14400,
+            beatRate: .bph19800,
             durationSeconds: 5.0,
             rateErrorSecondsPerDay: 0.0,
             beatErrorMilliseconds: 2.0,
@@ -128,7 +128,7 @@ final class SyntheticGeneratorTests: XCTestCase {
             snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
-        let nominalPeriod = 1.0 / 4.0 // 14400 bph = 4 Hz
+        let nominalPeriod = 1.0 / 5.5 // 19800 bph = 5.5 beats/sec
         let shift = 2.0 / 1000.0 / 2.0
 
         for i in 0..<signal.tickTimesSeconds.count {
@@ -197,15 +197,15 @@ final class SyntheticGeneratorTests: XCTestCase {
     func testSignalIsQuietBetweenTicks() {
         // With high SNR and low beat rate, there should be silence between ticks
         let params = SyntheticTickParameters(
-            beatRate: .bph14400,
+            beatRate: .bph19800,
             durationSeconds: 3.0,
             snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
 
-        // Check a region far from any tick (midway between two ticks for 14400 bph = 4 Hz, period 0.25s)
-        // Pick t=0.125s which is halfway between tick at 0s and tick at 0.25s
-        let midSample = Int(0.125 * params.sampleRate)
+        // Check a region far from any tick (midway between two ticks for 19800 bph = 5.5 Hz, period ~0.182s)
+        // Pick t=0.091s which is halfway between tick at 0s and tick at 0.182s
+        let midSample = Int(0.091 * params.sampleRate)
         let window = 50
         let quietEnergy = signal.buffer.samples[(midSample - window)..<(midSample + window)]
             .map { $0 * $0 }
@@ -264,13 +264,13 @@ final class SyntheticGeneratorTests: XCTestCase {
 
     func testLowBeatRateTickShape() {
         let params = SyntheticTickParameters(
-            beatRate: .bph14400,
+            beatRate: .bph19800,
             durationSeconds: 3.0,
             snrDb: 100.0
         )
         let signal = generator.generate(parameters: params)
-        // 14400 bph = 4 Hz, 3 seconds -> 12 ticks
-        XCTAssertEqual(signal.tickTimesSeconds.count, 12)
+        // 19800 bph = 5.5 beats/sec, 3 seconds -> 17 ticks (0, 0.182, ..., 2.909)
+        XCTAssertEqual(signal.tickTimesSeconds.count, 17)
         XCTAssertEqual(signal.buffer.samples.count, Int(3.0 * 48000.0))
     }
 }

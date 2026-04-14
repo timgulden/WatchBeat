@@ -196,7 +196,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(data.rateBPH) bph")
                         .font(.subheadline.bold())
-                    Text("\(Int(Double(data.rateBPH) / 3600.0)) Hz")
+                    Text("\(formatOscHz(Double(data.rateBPH) / 3600.0 / 2.0)) Hz")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -292,6 +292,14 @@ struct ContentView: View {
     }
 }
 
+/// Format oscillation Hz for display — shows decimal for non-integer values like 2.75.
+private func formatOscHz(_ hz: Double) -> String {
+    if hz == hz.rounded() { return "\(Int(hz))" }
+    let oneDecimal = String(format: "%.1f", hz)
+    if Double(oneDecimal) == hz { return oneDecimal }
+    return String(format: "%.2f", hz)
+}
+
 // MARK: - Frequency Bars
 
 struct FrequencyBarsView: View {
@@ -322,7 +330,7 @@ struct FrequencyBarsView: View {
                             .frame(height: max(2, normalizedHeight * barAreaHeight))
 
                         // Label always at the bottom
-                        Text("\(Int(rate.hz)) Hz")
+                        Text("\(formatOscHz(rate.oscillationHz)) Hz")
                             .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
                             .foregroundStyle(isStrongest ? .primary : .secondary)
                             .frame(height: labelHeight)

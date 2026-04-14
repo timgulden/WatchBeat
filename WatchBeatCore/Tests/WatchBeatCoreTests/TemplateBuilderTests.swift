@@ -39,7 +39,7 @@ final class TemplateBuilderTests: XCTestCase {
     }
 
     func testTemplateLengthMatchesTwoBeatsFor14400() {
-        let (template, estimate) = buildTemplate(beatRate: .bph14400)
+        let (template, estimate) = buildTemplate(beatRate: .bph19800)
         let expectedLength = Int(round(2.0 * 48000.0 / estimate.measuredHz))
         XCTAssertEqual(template.samples.count, expectedLength, accuracy: 1,
                        "14400 bph template should span 2 beats")

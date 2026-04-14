@@ -26,7 +26,7 @@ final class PipelineIntegrationTests: XCTestCase {
     }
 
     func testPipeline14400HighSNR() {
-        assertPipeline(beatRate: .bph14400, snrDb: 40.0, injectedError: 5.0,
+        assertPipeline(beatRate: .bph19800, snrDb: 40.0, injectedError: 5.0,
                        tolerance: 2.0, minQuality: 0.5)
     }
 

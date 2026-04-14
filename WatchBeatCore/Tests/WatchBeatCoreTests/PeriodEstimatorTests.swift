@@ -114,10 +114,10 @@ final class PeriodEstimatorTests: XCTestCase {
 
     // MARK: - Each mechanical rate individually
 
-    func testDetects14400bph() {
-        let result = estimateRate(beatRate: .bph14400)
-        XCTAssertEqual(result.snappedRate, .bph14400)
-        XCTAssertEqual(result.measuredHz, 4.0, accuracy: 0.1)
+    func testDetects19800bph() {
+        let result = estimateRate(beatRate: .bph19800)
+        XCTAssertEqual(result.snappedRate, .bph19800)
+        XCTAssertEqual(result.measuredHz, 5.5, accuracy: 0.1)
     }
 
     func testDetects18000bph() {
