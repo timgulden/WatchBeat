@@ -166,7 +166,7 @@ struct ContentView: View {
                 .frame(width: w - 40, height: barsHeight)
                 .position(x: w / 2, y: barsTop + barsHeight / 2)
 
-            // Quality + progress below bars, above where button was
+            // Quality display + best-so-far progress bar
             VStack(spacing: 6) {
                 HStack {
                     Text("Quality:")
@@ -175,10 +175,17 @@ struct ContentView: View {
                         .font(.title2.bold().monospacedDigit())
                         .foregroundStyle(qualityColor(liveQuality))
                 }
-                ProgressView(value: min(Double(liveQuality), 80), total: 80)
+                // Bar shows best quality collected so far
+                let best = coordinator.bestQualitySoFar
+                ProgressView(value: min(Double(best), 80), total: 80)
                     .progressViewStyle(.linear)
-                    .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
+                    .tint(best >= 80 ? .green : best >= 50 ? .green.opacity(0.7) : best >= 30 ? .orange : .red)
                     .frame(width: w - 40)
+                if best > 0 && best != liveQuality {
+                    Text("Best: \(best)%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .position(x: w / 2, y: buttonCenterY - 10)
 

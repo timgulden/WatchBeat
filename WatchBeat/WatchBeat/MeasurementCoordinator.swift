@@ -41,8 +41,10 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
 
-    /// Current live quality percentage during recording (class property so timer task can read it).
+    /// Current live quality percentage during recording.
     private var liveQuality: Int = 0
+    /// Best quality seen so far during this recording session.
+    private(set) var bestQualitySoFar: Int = 0
 
     /// Analysis window duration in seconds.
     let analysisWindow: Double = 15.0
@@ -133,6 +135,7 @@ final class MeasurementCoordinator: ObservableObject {
 
         state = .recording(elapsed: 0, liveQuality: 0)
         liveQuality = 0
+        bestQualitySoFar = 0
 
         let startTime = ContinuousClock.now
         var bestResult: (MeasurementResult, PipelineDiagnostics)?
@@ -169,6 +172,7 @@ final class MeasurementCoordinator: ObservableObject {
 
                 let quality = result.qualityScore
                 liveQuality = Int(quality * 100)
+                bestQualitySoFar = max(bestQualitySoFar, liveQuality)
 
                 if quality > bestQuality {
                     bestQuality = quality
