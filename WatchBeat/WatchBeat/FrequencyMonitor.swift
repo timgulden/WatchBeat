@@ -55,13 +55,20 @@ final class FrequencyMonitor: @unchecked Sendable {
         rollingBuffer = []
     }
 
-    /// Feed external samples into the monitor (e.g., from the capture service during recording).
-    /// Call this instead of start() when another component owns the audio engine.
+    /// Switch to external feed mode, preserving the existing buffer so there's
+    /// no gap in the frequency bars when transitioning from listening to recording.
     func initializeForExternalFeed(sampleRate: Double) {
-        self.sampleRate = sampleRate
-        rollingBufferSize = Int(rollingBufferDuration * sampleRate)
-        rollingBuffer = [Float](repeating: 0, count: rollingBufferSize)
-        samplesAccumulated = 0
+        // Only reset if sample rate changed or buffer not yet initialized
+        if self.sampleRate != sampleRate || rollingBuffer.isEmpty {
+            self.sampleRate = sampleRate
+            rollingBufferSize = Int(rollingBufferDuration * sampleRate)
+            rollingBuffer = [Float](repeating: 0, count: rollingBufferSize)
+            samplesAccumulated = 0
+        }
+        // Stop the engine (external source will call feedSamples) but keep the buffer
+        engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine = nil
         analysisCooldown = 0
     }
 
