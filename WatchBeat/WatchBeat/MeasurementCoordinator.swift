@@ -43,8 +43,10 @@ final class MeasurementCoordinator: ObservableObject {
 
     /// Analysis window duration in seconds.
     let analysisWindow: Double = 15.0
-    /// Minimum quality to auto-accept a result.
-    let qualityThreshold: Double = 0.60
+    /// Minimum quality to auto-accept a result (great).
+    let qualityThreshold: Double = 0.80
+    /// Minimum quality to show results (below this = try again).
+    let minimumDisplayQuality: Double = 0.30
     /// How often to run analysis during recording (seconds).
     let analysisInterval: Double = 3.0
     /// Maximum recording time before giving up.
@@ -189,8 +191,8 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Save the best audio and show result
-        if let (result, diagnostics) = bestResult {
+        // Show result if quality meets minimum threshold, otherwise show error
+        if let (result, diagnostics) = bestResult, result.qualityScore >= minimumDisplayQuality {
             // Save the most recent audio
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
                 saveRawAudio(buffer, result: result)
@@ -228,7 +230,7 @@ final class MeasurementCoordinator: ObservableObject {
             )
             state = .result(displayData)
         } else {
-            state = .error("Could not get a usable measurement. Try in a quieter environment with firmer contact.")
+            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.")
         }
     }
 

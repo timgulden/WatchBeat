@@ -106,15 +106,15 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Text("\(liveQuality)%")
                         .font(.title2.bold().monospacedDigit())
-                        .foregroundStyle(liveQuality >= 50 ? .green : liveQuality > 0 ? .orange : .secondary)
+                        .foregroundStyle(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green : liveQuality >= 30 ? .orange : liveQuality > 0 ? .red : .secondary)
                 }
 
                 if elapsed < 15 {
                     Text("Collecting... \(Int(elapsed))s")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if liveQuality >= 50 {
-                    Text("Good signal! Finishing...")
+                } else if liveQuality >= 80 {
+                    Text("Great signal! Finishing...")
                         .font(.caption)
                         .foregroundStyle(.green)
                 } else if liveQuality > 0 {
@@ -128,9 +128,9 @@ struct ContentView: View {
                 }
             }
 
-            ProgressView(value: min(Double(liveQuality), 50), total: 50)
+            ProgressView(value: min(Double(liveQuality), 80), total: 80)
                 .progressViewStyle(.linear)
-                .tint(liveQuality >= 50 ? .green : .orange)
+                .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
 
             Button("Cancel") {
                 coordinator.cancelMeasurement()

@@ -220,8 +220,8 @@ struct QualityBadgeView: View {
     }
 
     private var qualityColor: Color {
-        if percent >= 70 { return .green }
-        if percent >= 40 { return .yellow }
+        if percent >= 50 { return .green }
+        if percent >= 30 { return .orange }
         return .red
     }
 }
