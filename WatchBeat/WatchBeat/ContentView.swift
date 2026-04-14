@@ -142,58 +142,60 @@ struct ContentView: View {
     // MARK: - Result
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                // Rate + quality on one line
-                HStack {
+        VStack(spacing: 6) {
+            // Rate and quality — tight to the title
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
                     Text("\(data.rateBPH) bph")
-                        .font(.subheadline)
+                        .font(.subheadline.bold())
+                    Text("\(Int(Double(data.rateBPH) / 3600.0)) Hz")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 1) {
+                    QualityBadgeView(percent: data.qualityPercent)
+                    Text("measurement quality")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Rate error dial with beat error — bigger now
+            RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
+                .frame(height: 250)
+
+            // Timegrapher plot
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("Timegrapher")
+                        .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     Spacer()
-                    QualityBadgeView(percent: data.qualityPercent)
-                }
-
-                // Rate error dial with beat error in the gap
-                RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                    .frame(height: 200)
-
-                // Timegrapher plot
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text("Timegrapher")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        HStack(spacing: 6) {
-                            Circle().fill(.blue).frame(width: 5, height: 5)
-                            Text("tick").font(.caption2).foregroundStyle(.secondary)
-                            Circle().fill(.cyan).frame(width: 5, height: 5)
-                            Text("tock").font(.caption2).foregroundStyle(.secondary)
-                        }
+                    HStack(spacing: 6) {
+                        Circle().fill(.blue).frame(width: 5, height: 5)
+                        Text("tick").font(.caption2).foregroundStyle(.secondary)
+                        Circle().fill(.cyan).frame(width: 5, height: 5)
+                        Text("tock").font(.caption2).foregroundStyle(.secondary)
                     }
-
-                    TimegrapherPlotView(
-                        residuals: data.tickResiduals,
-                        rateErrorPerDay: data.rateError
-                    )
-                    .frame(height: 130)
                 }
 
-                // Diagnostics
-                DisclosureGroup("Diagnostics") {
-                    Text(data.diagnosticText)
-                        .font(.caption.monospaced())
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .font(.caption)
-
-                Button(action: { coordinator.startMonitoring() }) {
-                    Text("Measure Again")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
+                TimegrapherPlotView(
+                    residuals: data.tickResiduals,
+                    rateErrorPerDay: data.rateError,
+                    beatRateHz: Double(data.rateBPH) / 3600.0
+                )
+                .frame(height: 130)
             }
+
+            Spacer(minLength: 4)
+
+            Button(action: { coordinator.startMonitoring() }) {
+                Text("Measure Again")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 
