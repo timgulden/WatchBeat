@@ -165,17 +165,9 @@ struct TimegraphView: View {
                     }
 
                     // Fixed Y scale: ±60 s/day over 15 seconds = ±10.4 ms.
-                    // This ensures the same visual slope always means the same s/day,
-                    // regardless of beat rate (the total drift in a fixed time window
-                    // depends only on s/day, not on beat rate).
-                    let fixedYWindowMs = 60.0 / 86400.0 * 15.0 * 1000.0 * 2.0  // ±60 s/day = 20.8ms total
-
-                    // But if the data exceeds this window, expand to fit
-                    let yMin = yValues.min() ?? 0
-                    let yMax = yValues.max() ?? 0
-                    let dataRange = yMax - yMin
-                    let yScale = max(fixedYWindowMs, dataRange * 1.3)
-                    let yCenter = (yMin + yMax) / 2
+                    // Never expands — values beyond ±60 wrap top-to-bottom.
+                    let yWindowMs = 60.0 / 86400.0 * 15.0 * 1000.0 * 2.0  // 20.8ms total
+                    let yCenter = (yValues.first ?? 0 + (yValues.last ?? 0)) / 2.0
 
                     // Center line
                     let centerY = h / 2.0
@@ -190,7 +182,14 @@ struct TimegraphView: View {
 
                     for (i, tick) in residuals.enumerated() {
                         let x = margin + (w - 2 * margin) * CGFloat(i) / CGFloat(max(n - 1, 1))
-                        let yNorm = (yValues[i] - yCenter) / yScale  // -0.5 to +0.5
+
+                        // Wrap within the fixed window
+                        var dev = yValues[i] - yCenter
+                        let halfWindow = yWindowMs / 2.0
+                        dev = dev.truncatingRemainder(dividingBy: yWindowMs)
+                        if dev > halfWindow { dev -= yWindowMs }
+                        if dev < -halfWindow { dev += yWindowMs }
+                        let yNorm = dev / yWindowMs  // -0.5 to +0.5
                         let y = centerY - CGFloat(yNorm) * (h - 2 * margin)
 
                         let color: Color = tick.isEven ? .blue : .cyan
