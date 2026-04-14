@@ -151,48 +151,52 @@ final class MeasurementCoordinator: ObservableObject {
             }
         }
 
-        // Wait for enough audio
-        while !Task.isCancelled {
-            let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed >= analysisWindow { break }
-            if elapsed > maxRecordingTime { break }
-            try? await Task.sleep(for: .milliseconds(500))
-        }
-
-        // Analysis loop
-        var done = false
-        while !Task.isCancelled && !done {
-            let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed > maxRecordingTime { break }
-
-            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
-                let (result, diagnostics) = await Task.detached { [pipeline] in
-                    pipeline.measureWithDiagnostics(buffer)
-                }.value
-
-                let quality = result.qualityScore
-                liveQuality = Int(quality * 100)
-                bestQualitySoFar = max(bestQualitySoFar, liveQuality)
-
-                if quality > bestQuality {
-                    bestQuality = quality
-                    bestResult = (result, diagnostics)
-                }
-
-                if quality >= qualityThreshold {
-                    done = true
-                }
+        // Race analysis loop against a hard deadline using TaskGroup.
+        // First task to finish wins; the other gets cancelled.
+        await withTaskGroup(of: Void.self) { group in
+            // Task 1: Hard deadline
+            group.addTask {
+                try? await Task.sleep(for: .seconds(self.maxRecordingTime))
             }
 
-            // Wait before next analysis, but check timeout every 500ms
-            if !done {
-                for _ in 0..<Int(analysisInterval * 2) {
-                    if Task.isCancelled { done = true; break }
-                    let e = (ContinuousClock.now - startTime).asSeconds
-                    if e > maxRecordingTime { done = true; break }
+            // Task 2: Analysis loop
+            group.addTask { @MainActor in
+                // Wait for enough audio
+                while !Task.isCancelled {
+                    let elapsed = (ContinuousClock.now - startTime).asSeconds
+                    if elapsed >= self.analysisWindow { break }
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+
+                // Run analysis every analysisInterval
+                while !Task.isCancelled {
+                    if let buffer = await self.captureService.getRecentAudio(duration: self.analysisWindow) {
+                        let (result, diagnostics) = await Task.detached { [pipeline = self.pipeline] in
+                            pipeline.measureWithDiagnostics(buffer)
+                        }.value
+
+                        let quality = result.qualityScore
+                        self.liveQuality = Int(quality * 100)
+                        self.bestQualitySoFar = max(self.bestQualitySoFar, self.liveQuality)
+
+                        if quality > bestQuality {
+                            bestQuality = quality
+                            bestResult = (result, diagnostics)
+                        }
+
+                        if quality >= self.qualityThreshold {
+                            return // Quality met — exit, which lets the group finish
+                        }
+                    }
+
+                    try? await Task.sleep(for: .seconds(self.analysisInterval))
+                }
             }
+
+            // Wait for whichever finishes first
+            await group.next()
+            // Cancel the other
+            group.cancelAll()
         }
 
         // Save audio BEFORE stopping the engine
