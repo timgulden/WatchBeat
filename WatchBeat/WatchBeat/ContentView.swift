@@ -5,131 +5,136 @@ struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text("WatchBeat")
-                .font(.largeTitle.bold())
-                .padding(.bottom, 4)
+        GeometryReader { geo in
+            let screenH = geo.size.height
+            // The headline text sits at 45% from the top
+            let headlineY = screenH * 0.45
 
-            switch coordinator.state {
-            case .idle:
-                idleView
-            case .monitoring:
-                monitoringView
-            case .recording(let elapsed, let liveQuality):
-                recordingView(elapsed: elapsed, liveQuality: liveQuality)
-            case .analyzing:
-                Spacer()
-                ProgressView("Analyzing...").font(.title3)
-                Spacer()
-            case .result(let data):
-                resultView(data: data)
-            case .error(let message):
-                errorView(message: message)
+            VStack(spacing: 0) {
+                Text("WatchBeat")
+                    .font(.largeTitle.bold())
+                    .padding(.top, 8)
+
+                switch coordinator.state {
+                case .idle:
+                    idleView(headlineY: headlineY)
+                case .monitoring:
+                    monitoringView(headlineY: headlineY)
+                case .recording(let elapsed, let liveQuality):
+                    recordingView(elapsed: elapsed, liveQuality: liveQuality, headlineY: headlineY)
+                case .analyzing:
+                    Spacer()
+                    ProgressView("Analyzing...").font(.title3)
+                    Spacer()
+                case .result(let data):
+                    resultView(data: data)
+                case .error(let message):
+                    errorView(message: message)
+                }
             }
+            .padding(.horizontal)
         }
-        .padding()
     }
 
     // MARK: - Idle
 
-    private var idleView: some View {
-        VStack(spacing: 0) {
-            // Image fills upper area
+    private func idleView(headlineY: CGFloat) -> some View {
+        VStack(spacing: 12) {
+            // Image centered between title and headline position
+            // Title is ~50pt from top. Headline is at headlineY.
+            // Image fills the gap.
             Image("WatchBeatMark")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .opacity(0.85)
-                .padding(.horizontal, 30)
-                .frame(maxHeight: .infinity)
+                .padding(.horizontal, 20)
+                .frame(height: headlineY - 100) // title ~50pt + spacing
 
-            // Instructions + button group — this block's position defines
-            // where the Measure button will be on the next screen.
-            VStack(spacing: 12) {
-                Text("Position your watch against the mic")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
+            Text("Position your watch against the mic")
+                .font(.headline)
+                .multilineTextAlignment(.center)
 
-                Text("Press your iPhone mic against the watch caseback, then tap Listen.")
-                    .multilineTextAlignment(.center)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Text("Press your iPhone mic against the watch caseback, then tap Listen.")
+                .multilineTextAlignment(.center)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                primaryButton("Listen") { coordinator.startMonitoring() }
-                    .padding(.top, 8)
-            }
-            .padding(.bottom, 40)
+            primaryButton("Listen") { coordinator.startMonitoring() }
+                .padding(.top, 4)
+
+            Spacer()
         }
     }
 
     // MARK: - Monitoring
 
-    private var monitoringView: some View {
-        VStack(spacing: 0) {
-            // Upper area — empty to match where the image was
-            Color.clear.frame(maxHeight: .infinity)
+    private func monitoringView(headlineY: CGFloat) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+                .frame(height: headlineY - 100)
 
-            // Same structure as idle: instructions + content + button
-            VStack(spacing: 12) {
-                Text("Position your watch against the mic")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
+            Text("Position your watch against the mic")
+                .font(.headline)
+                .multilineTextAlignment(.center)
 
-                Text("Look for a peak at your watch's beat rate")
-                    .multilineTextAlignment(.center)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Text("Look for a peak at your watch's beat rate")
+                .multilineTextAlignment(.center)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                    .frame(height: 120)
+            FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                .frame(height: 120)
 
-                primaryButton("Measure") { coordinator.startMeasurement() }
-                    .padding(.top, 8)
+            primaryButton("Measure") { coordinator.startMeasurement() }
+                .padding(.top, 4)
 
-                Button("Cancel") { coordinator.stopMonitoring() }
-                    .foregroundStyle(.red)
-            }
-            .padding(.bottom, 20)
+            Button("Cancel") { coordinator.stopMonitoring() }
+                .foregroundStyle(.red)
+                .padding(.top, 2)
+
+            Spacer()
         }
     }
 
     // MARK: - Recording
 
-    private func recordingView(elapsed: Double, liveQuality: Int) -> some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(maxHeight: .infinity)
+    private func recordingView(elapsed: Double, liveQuality: Int, headlineY: CGFloat) -> some View {
+        VStack(spacing: 10) {
+            Spacer()
+                .frame(height: headlineY - 100)
 
-            VStack(spacing: 12) {
-                Text("Listening...")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
+            Text("Listening...")
+                .font(.headline)
+                .multilineTextAlignment(.center)
 
-                Text(liveCaption(elapsed: elapsed, quality: liveQuality))
-                    .multilineTextAlignment(.center)
-                    .font(.subheadline)
+            Text(liveCaption(elapsed: elapsed, quality: liveQuality))
+                .multilineTextAlignment(.center)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                .frame(height: 80)
+
+            HStack {
+                Text("Quality:")
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                    .frame(height: 80)
-
-                HStack {
-                    Text("Quality:")
-                        .foregroundStyle(.secondary)
-                    Text("\(liveQuality)%")
-                        .font(.title2.bold().monospacedDigit())
-                        .foregroundStyle(qualityColor(liveQuality))
-                }
-
-                ProgressView(value: min(Double(liveQuality), 80), total: 80)
-                    .progressViewStyle(.linear)
-                    .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
-
-                primaryButton("Cancel") { coordinator.cancelMeasurement() }
-                    .tint(.red)
+                Text("\(liveQuality)%")
+                    .font(.title2.bold().monospacedDigit())
+                    .foregroundStyle(qualityColor(liveQuality))
             }
-            .padding(.bottom, 20)
+
+            ProgressView(value: min(Double(liveQuality), 80), total: 80)
+                .progressViewStyle(.linear)
+                .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
+
+            Button("Cancel") { coordinator.cancelMeasurement() }
+                .foregroundStyle(.red)
+                .padding(.top, 4)
+
+            Spacer()
         }
     }
 
@@ -156,7 +161,7 @@ struct ContentView: View {
 
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
                 .frame(maxHeight: .infinity)
-                .padding(.vertical, -8)
+                .padding(.vertical, -4)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
@@ -181,7 +186,7 @@ struct ContentView: View {
             }
 
             primaryButton("Measure Again") { coordinator.startMonitoring() }
-                .padding(.top, 8)
+                .padding(.top, 6)
         }
     }
 
