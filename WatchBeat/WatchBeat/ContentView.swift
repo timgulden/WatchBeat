@@ -30,54 +30,11 @@ struct ContentView: View {
         .padding()
     }
 
-    // MARK: - Shared bottom section (button aligns across screens)
-
-    /// The bottom section shared by idle, monitoring, and recording screens.
-    /// Everything from the headline down is identical in position.
-    private func bottomSection(
-        headline: String,
-        caption: String,
-        middleContent: AnyView,
-        buttonTitle: String,
-        buttonAction: @escaping () -> Void,
-        showCancel: Bool = false,
-        cancelAction: (() -> Void)? = nil
-    ) -> some View {
-        VStack(spacing: 16) {
-            Text(headline)
-                .font(.headline)
-
-            Text(caption)
-                .multilineTextAlignment(.center)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            middleContent
-
-            Button(action: buttonAction) {
-                Text(buttonTitle)
-                    .font(.title2.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            if showCancel, let cancelAction {
-                Button("Cancel", action: cancelAction)
-                    .foregroundStyle(.red)
-            } else {
-                // Invisible placeholder to keep button position consistent
-                Text(" ").font(.body).opacity(0)
-            }
-        }
-    }
-
     // MARK: - Idle
 
     private var idleView: some View {
         VStack(spacing: 0) {
-            // Balance wheel fills the space between title and bottom section
+            // Image fills upper area
             Image("WatchBeatMark")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
@@ -85,13 +42,23 @@ struct ContentView: View {
                 .padding(.horizontal, 30)
                 .frame(maxHeight: .infinity)
 
-            bottomSection(
-                headline: "Position your watch against the mic",
-                caption: "Press your iPhone mic against the watch caseback, then tap Listen.",
-                middleContent: AnyView(Color.clear.frame(height: 120)),
-                buttonTitle: "Listen",
-                buttonAction: { coordinator.startMonitoring() }
-            )
+            // Instructions + button group — this block's position defines
+            // where the Measure button will be on the next screen.
+            VStack(spacing: 12) {
+                Text("Position your watch against the mic")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+
+                Text("Press your iPhone mic against the watch caseback, then tap Listen.")
+                    .multilineTextAlignment(.center)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                primaryButton("Listen") { coordinator.startMonitoring() }
+                    .padding(.top, 8)
+            }
+            .padding(.bottom, 40)
         }
     }
 
@@ -99,20 +66,31 @@ struct ContentView: View {
 
     private var monitoringView: some View {
         VStack(spacing: 0) {
-            Spacer()
+            // Upper area — empty to match where the image was
+            Color.clear.frame(maxHeight: .infinity)
 
-            bottomSection(
-                headline: "Position your watch against the mic",
-                caption: "Look for a peak at your watch's beat rate",
-                middleContent: AnyView(
-                    FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                        .frame(height: 120)
-                ),
-                buttonTitle: "Measure",
-                buttonAction: { coordinator.startMeasurement() },
-                showCancel: true,
-                cancelAction: { coordinator.stopMonitoring() }
-            )
+            // Same structure as idle: instructions + content + button
+            VStack(spacing: 12) {
+                Text("Position your watch against the mic")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+
+                Text("Look for a peak at your watch's beat rate")
+                    .multilineTextAlignment(.center)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                    .frame(height: 120)
+
+                primaryButton("Measure") { coordinator.startMeasurement() }
+                    .padding(.top, 8)
+
+                Button("Cancel") { coordinator.stopMonitoring() }
+                    .foregroundStyle(.red)
+            }
+            .padding(.bottom, 20)
         }
     }
 
@@ -120,48 +98,39 @@ struct ContentView: View {
 
     private func recordingView(elapsed: Double, liveQuality: Int) -> some View {
         VStack(spacing: 0) {
-            Spacer()
+            Color.clear.frame(maxHeight: .infinity)
 
-            bottomSection(
-                headline: "Listening...",
-                caption: liveQualityCaption(elapsed: elapsed, quality: liveQuality),
-                middleContent: AnyView(
-                    VStack(spacing: 8) {
-                        FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                            .frame(height: 80)
+            VStack(spacing: 12) {
+                Text("Listening...")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
 
-                        HStack {
-                            Text("Quality:")
-                                .foregroundStyle(.secondary)
-                            Text("\(liveQuality)%")
-                                .font(.title2.bold().monospacedDigit())
-                                .foregroundStyle(qualityColor(liveQuality))
-                        }
+                Text(liveCaption(elapsed: elapsed, quality: liveQuality))
+                    .multilineTextAlignment(.center)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                        ProgressView(value: min(Double(liveQuality), 80), total: 80)
-                            .progressViewStyle(.linear)
-                            .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
-                    }
-                ),
-                buttonTitle: "Cancel",
-                buttonAction: { coordinator.cancelMeasurement() }
-            )
+                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                    .frame(height: 80)
+
+                HStack {
+                    Text("Quality:")
+                        .foregroundStyle(.secondary)
+                    Text("\(liveQuality)%")
+                        .font(.title2.bold().monospacedDigit())
+                        .foregroundStyle(qualityColor(liveQuality))
+                }
+
+                ProgressView(value: min(Double(liveQuality), 80), total: 80)
+                    .progressViewStyle(.linear)
+                    .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
+
+                primaryButton("Cancel") { coordinator.cancelMeasurement() }
+                    .tint(.red)
+            }
+            .padding(.bottom, 20)
         }
-    }
-
-    private func liveQualityCaption(elapsed: Double, quality: Int) -> String {
-        if elapsed < 15 { return "Collecting... \(Int(elapsed))s" }
-        if quality >= 80 { return "Great signal! Finishing..." }
-        if quality > 0 { return "Searching for good contact... \(Int(elapsed))s" }
-        return "Waiting for first analysis... \(Int(elapsed))s"
-    }
-
-    private func qualityColor(_ q: Int) -> Color {
-        if q >= 80 { return .green }
-        if q >= 50 { return .green }
-        if q >= 30 { return .orange }
-        if q > 0 { return .red }
-        return .secondary
     }
 
     // MARK: - Result
@@ -186,8 +155,8 @@ struct ContentView: View {
             }
 
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                .frame(height: 300)
-                .padding(.top, -8)
+                .frame(maxHeight: .infinity)
+                .padding(.vertical, -8)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
@@ -210,20 +179,9 @@ struct ContentView: View {
                 )
                 .frame(height: 110)
             }
-            .padding(.top, -4)
 
-            Spacer(minLength: 8)
-
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Measure Again")
-                    .font(.title2.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            Text(" ").font(.body).opacity(0)
+            primaryButton("Measure Again") { coordinator.startMonitoring() }
+                .padding(.top, 8)
         }
     }
 
@@ -234,22 +192,44 @@ struct ContentView: View {
             Spacer()
 
             Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
+                .font(.system(size: 50))
                 .foregroundStyle(.orange)
 
             Text(message)
                 .multilineTextAlignment(.center)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             Spacer()
 
-            Button("Try Again") {
-                coordinator.startMonitoring()
-            }
-            .buttonStyle(.borderedProminent)
-
-            Text(" ").font(.body).opacity(0)
+            primaryButton("Try Again") { coordinator.startMonitoring() }
         }
+    }
+
+    // MARK: - Helpers
+
+    private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.title3.bold())
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+
+    private func liveCaption(elapsed: Double, quality: Int) -> String {
+        if elapsed < 15 { return "Collecting... \(Int(elapsed))s" }
+        if quality >= 80 { return "Great signal! Finishing..." }
+        if quality > 0 { return "Searching for good contact... \(Int(elapsed))s" }
+        return "Waiting for first analysis... \(Int(elapsed))s"
+    }
+
+    private func qualityColor(_ q: Int) -> Color {
+        if q >= 50 { return .green }
+        if q >= 30 { return .orange }
+        if q > 0 { return .red }
+        return .secondary
     }
 }
 
@@ -269,12 +249,11 @@ struct FrequencyBarsView: View {
                 ForEach(rates, id: \.self) { rate in
                     let power = ratePowers[rate] ?? 0
                     let normalizedHeight = maxPower > 0 ? CGFloat(power / maxPower) : 0
-                    let isSelected = selectedRate == rate || selectedRate == nil
                     let isStrongest = power == maxPower && maxPower > 0 && power > 0
 
                     VStack(spacing: 2) {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(barColor(isSelected: isSelected, isStrongest: isStrongest))
+                            .fill(isStrongest ? Color.green : Color.blue)
                             .frame(height: max(2, normalizedHeight * (geo.size.height - 30)))
 
                         Text("\(Int(rate.hz)) Hz")
@@ -284,13 +263,6 @@ struct FrequencyBarsView: View {
                 }
             }
         }
-    }
-
-    private func barColor(isSelected: Bool, isStrongest: Bool) -> Color {
-        if isSelected && isStrongest { return .green }
-        else if isSelected { return .blue }
-        else if isStrongest { return .orange }
-        return Color(.systemGray4)
     }
 }
 
