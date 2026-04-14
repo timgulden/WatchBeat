@@ -36,8 +36,15 @@ struct ContentView: View {
 
     private var idleView: some View {
         VStack(spacing: 16) {
-            Text("Press your iPhone mic against the watch caseback, then tap Listen to check signal level.")
+            Image("WatchBeatMark")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxHeight: 220)
+                .opacity(0.85)
+
+            Text("Press your iPhone mic against the watch caseback, then tap Listen.")
                 .multilineTextAlignment(.center)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             Button(action: { coordinator.startMonitoring() }) {
