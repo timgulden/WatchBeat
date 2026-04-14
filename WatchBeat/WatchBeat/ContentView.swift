@@ -13,7 +13,6 @@ struct ContentView: View {
             case .idle:
                 idleView
             case .monitoring:
-                Spacer()
                 monitoringView
             case .recording(let elapsed, let liveQuality):
                 recordingView(elapsed: elapsed, liveQuality: liveQuality)
@@ -34,20 +33,23 @@ struct ContentView: View {
     // MARK: - Idle
 
     private var idleView: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 20) {
             Image("WatchBeatMark")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(maxHeight: 300)
                 .opacity(0.85)
                 .padding(.top, -16)
 
-            Spacer()
+            Text("Position your watch against the mic")
+                .font(.headline)
 
             Text("Press your iPhone mic against the watch caseback, then tap Listen.")
                 .multilineTextAlignment(.center)
-                .font(.subheadline)
+                .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Placeholder matching the frequency bars height
+            Color.clear.frame(height: 120)
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Listen")
@@ -57,6 +59,9 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+
+            // Placeholder matching Cancel button height
+            Color.clear.frame(height: 20)
         }
     }
 
