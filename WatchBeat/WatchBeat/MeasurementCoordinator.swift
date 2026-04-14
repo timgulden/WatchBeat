@@ -185,6 +185,13 @@ final class MeasurementCoordinator: ObservableObject {
             }
         }
 
+        // Save audio BEFORE stopping the engine
+        var savedBuffer: WatchBeatCore.AudioBuffer?
+        if let best = bestResult {
+            savedBuffer = await captureService.getRecentAudio(duration: analysisWindow)
+            if let buf = savedBuffer { saveRawAudio(buf, result: best.0) }
+        }
+
         // Stop timer and recording
         monitorTask?.cancel()
         monitorTask = nil
@@ -197,10 +204,6 @@ final class MeasurementCoordinator: ObservableObject {
 
         // Show result if quality meets minimum threshold, otherwise show error
         if let (result, diagnostics) = bestResult, result.qualityScore >= minimumDisplayQuality {
-            // Save the most recent audio
-            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
-                saveRawAudio(buffer, result: result)
-            }
 
             let scoresText = diagnostics.rateScores
                 .sorted { $0.magnitude > $1.magnitude }
