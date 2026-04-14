@@ -10,10 +10,10 @@ struct ContentView: View {
             let w = geo.size.width
 
             // Fixed positions measured from bottom of safe area
-            let cancelY = h - 115
-            let buttonCenterY = h - 155
+            let cancelY = h - 100
+            let buttonCenterY = h - 145
             let barsBottom = h - 195
-            let barsHeight: CGFloat = 160
+            let barsHeight: CGFloat = 240
             let barsTop = barsBottom - barsHeight
             let captionY = barsTop - 20
             let headlineY = captionY - 30
@@ -52,8 +52,8 @@ struct ContentView: View {
                     errorOverlay(message: message, w: w, h: h, buttonCenterY: buttonCenterY)
                 }
             }
-            .padding(.horizontal)
         }
+        .edgesIgnoringSafeArea(.bottom)
     }
 
     // MARK: - Idle
@@ -236,6 +236,7 @@ struct ContentView: View {
             .padding(.top, 6)
         }
         .padding(.top, 10)
+        .padding(.horizontal, 20)
     }
 
     // MARK: - Error
