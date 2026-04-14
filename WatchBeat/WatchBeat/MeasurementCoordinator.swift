@@ -136,9 +136,6 @@ final class MeasurementCoordinator: ObservableObject {
                 return
             }
 
-            // Save raw audio for debugging
-            saveRawAudio(buffer)
-
             // Analyze
             state = .analyzing
 
@@ -146,6 +143,9 @@ final class MeasurementCoordinator: ObservableObject {
             let (result, diagnostics) = await Task.detached { [pipeline] in
                 pipeline.measureWithDiagnostics(buffer, knownRate: rateOverride)
             }.value
+
+            // Save raw audio with quality and rate in filename
+            saveRawAudio(buffer, result: result)
 
             guard !Task.isCancelled else {
                 state = .idle
@@ -192,11 +192,13 @@ final class MeasurementCoordinator: ObservableObject {
     }
 
     /// Save raw audio as a 32-bit float WAV for offline analysis.
-    private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer) {
+    private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer, result: MeasurementResult) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let filename = "watchbeat_\(formatter.string(from: Date())).wav"
+        let q = Int(result.qualityScore * 100)
+        let rate = result.snappedRate.rawValue
+        let filename = "watchbeat_\(formatter.string(from: Date()))_\(rate)bph_q\(q).wav"
         let url = docs.appendingPathComponent(filename)
 
         // Write a minimal WAV file (32-bit float, mono)
