@@ -11,10 +11,10 @@ struct RateDialView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let size = min(geo.size.width, geo.size.height)
+            let size = max(1, min(geo.size.width, geo.size.height))
             let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let radius = size * 0.42
-            let lineWidth = size * 0.06
+            let radius = max(1, size * 0.42)
+            let lineWidth = max(1, size * 0.06)
 
             ZStack {
                 // Background track (7:00 to 5:00 going through 12:00)
@@ -190,7 +190,7 @@ struct TimegraphView: View {
                         if dev > halfWindow { dev -= yWindowMs }
                         if dev < -halfWindow { dev += yWindowMs }
                         let yNorm = dev / yWindowMs  // -0.5 to +0.5
-                        let y = centerY - CGFloat(yNorm) * (h - 2 * margin)
+                        let y = centerY - CGFloat(yNorm) * max(1, h - 2 * margin)
 
                         let color: Color = tick.isEven ? .blue : .cyan
                         let rect = CGRect(x: x - dotSize/2, y: y - dotSize/2,
