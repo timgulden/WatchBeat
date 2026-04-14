@@ -41,6 +41,9 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
 
+    /// Current live quality percentage during recording (class property so timer task can read it).
+    private var liveQuality: Int = 0
+
     /// Analysis window duration in seconds.
     let analysisWindow: Double = 15.0
     /// Minimum quality to auto-accept a result (great).
@@ -129,44 +132,43 @@ final class MeasurementCoordinator: ObservableObject {
         }
 
         state = .recording(elapsed: 0, liveQuality: 0)
+        liveQuality = 0
 
         let startTime = ContinuousClock.now
         var bestResult: (MeasurementResult, PipelineDiagnostics)?
         var bestQuality: Double = 0
-        var currentLiveQuality: Int = 0
-        var shouldStop = false
 
         // Timer task: updates elapsed time and frequency bars smoothly every 200ms
         monitorTask = Task {
-            while !Task.isCancelled && !shouldStop {
+            while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
                 let elapsed = (ContinuousClock.now - startTime).asSeconds
                 self.ratePowers = self.frequencyMonitor.ratePowers
-                self.state = .recording(elapsed: elapsed, liveQuality: currentLiveQuality)
+                self.state = .recording(elapsed: elapsed, liveQuality: self.liveQuality)
             }
         }
 
-        // Analysis task: runs every analysisInterval, does not block the timer
-        // Wait for enough audio first
+        // Wait for enough audio
         while !Task.isCancelled {
             let elapsed = (ContinuousClock.now - startTime).asSeconds
             if elapsed >= analysisWindow { break }
-            if elapsed > maxRecordingTime { shouldStop = true; break }
+            if elapsed > maxRecordingTime { break }
             try? await Task.sleep(for: .milliseconds(500))
         }
 
-        while !Task.isCancelled && !shouldStop {
+        // Analysis loop
+        var done = false
+        while !Task.isCancelled && !done {
             let elapsed = (ContinuousClock.now - startTime).asSeconds
             if elapsed > maxRecordingTime { break }
 
-            // Run analysis on background thread
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
                 let (result, diagnostics) = await Task.detached { [pipeline] in
                     pipeline.measureWithDiagnostics(buffer)
                 }.value
 
                 let quality = result.qualityScore
-                currentLiveQuality = Int(quality * 100)
+                liveQuality = Int(quality * 100)
 
                 if quality > bestQuality {
                     bestQuality = quality
@@ -174,19 +176,19 @@ final class MeasurementCoordinator: ObservableObject {
                 }
 
                 if quality >= qualityThreshold {
-                    break
+                    done = true
                 }
             }
 
-            // Wait before next analysis
-            try? await Task.sleep(for: .seconds(analysisInterval))
+            if !done {
+                try? await Task.sleep(for: .seconds(analysisInterval))
+            }
         }
 
-        shouldStop = true
-
-        // Stop recording
-        captureService.stopRecording()
+        // Stop timer and recording
         monitorTask?.cancel()
+        monitorTask = nil
+        captureService.stopRecording()
 
         guard !Task.isCancelled else {
             state = .idle
