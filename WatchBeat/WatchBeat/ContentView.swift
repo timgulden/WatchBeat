@@ -60,7 +60,7 @@ struct ContentView: View {
 
     private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
         let imageCenter = (80 + headlineY) / 2
-        let imageSize = min(headlineY - 100, w - 80)
+        let imageSize = max(10, min(headlineY - 100, w - 80))
         return Image("WatchBeatMark")
             .resizable()
             .aspectRatio(contentMode: .fit)
@@ -320,7 +320,7 @@ struct FrequencyBarsView: View {
 
         GeometryReader { geo in
             let labelHeight: CGFloat = 16
-            let barAreaHeight = geo.size.height - labelHeight - 4
+            let barAreaHeight = max(10, geo.size.height - labelHeight - 4)
 
             HStack(alignment: .bottom, spacing: 4) {
                 ForEach(rates, id: \.self) { rate in
