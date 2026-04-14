@@ -16,10 +16,8 @@ struct ContentView: View {
                 idleView
             case .monitoring:
                 monitoringView
-            case .requestingPermission:
-                ProgressView("Requesting microphone access...")
-            case .recording(let elapsed, let total):
-                recordingView(elapsed: elapsed, total: total)
+            case .recording(let elapsed, let liveQuality):
+                recordingView(elapsed: elapsed, liveQuality: liveQuality)
             case .analyzing:
                 ProgressView("Analyzing...")
                     .font(.title3)
@@ -90,24 +88,49 @@ struct ContentView: View {
 
     // MARK: - Recording
 
-    private func recordingView(elapsed: Double, total: Double) -> some View {
+    private func recordingView(elapsed: Double, liveQuality: Int) -> some View {
         VStack(spacing: 16) {
-            Text("Recording...")
+            Text("Listening...")
                 .font(.title3)
 
-            // Show frequency bars during recording too
             FrequencyBarsView(
                 ratePowers: coordinator.ratePowers,
                 selectedRate: nil
             )
             .frame(height: 100)
 
-            ProgressView(value: elapsed, total: total)
-                .progressViewStyle(.linear)
+            // Live quality indicator
+            VStack(spacing: 4) {
+                HStack {
+                    Text("Quality:")
+                        .foregroundStyle(.secondary)
+                    Text("\(liveQuality)%")
+                        .font(.title2.bold().monospacedDigit())
+                        .foregroundStyle(liveQuality >= 50 ? .green : liveQuality > 0 ? .orange : .secondary)
+                }
 
-            Text("\(Int(elapsed))s / \(Int(total))s")
-                .font(.body.monospacedDigit())
-                .foregroundStyle(.secondary)
+                if elapsed < 15 {
+                    Text("Collecting... \(Int(elapsed))s")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if liveQuality >= 50 {
+                    Text("Good signal! Finishing...")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if liveQuality > 0 {
+                    Text("Searching for good contact... \(Int(elapsed))s")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Waiting for first analysis... \(Int(elapsed))s")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ProgressView(value: min(Double(liveQuality), 50), total: 50)
+                .progressViewStyle(.linear)
+                .tint(liveQuality >= 50 ? .green : .orange)
 
             Button("Cancel") {
                 coordinator.cancelMeasurement()

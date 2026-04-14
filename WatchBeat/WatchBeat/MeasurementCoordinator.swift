@@ -2,21 +2,22 @@ import SwiftUI
 import Combine
 import WatchBeatCore
 
-/// Orchestrates the capture-then-analyze workflow and publishes state for the UI.
+/// Orchestrates the capture-and-analyze workflow.
+///
+/// Flow: Listen (see frequency bars) → Measure (continuous recording with rolling
+/// 15-second analysis every 3 seconds) → auto-stop when quality ≥ 50% → show result.
 @MainActor
 final class MeasurementCoordinator: ObservableObject {
 
     enum State: Equatable {
         case idle
-        case monitoring  // live level meter before recording
-        case requestingPermission
-        case recording(elapsed: Double, total: Double)
-        case analyzing
+        case monitoring        // frequency bars, positioning
+        case recording(elapsed: Double, liveQuality: Int)  // recording + analyzing
+        case analyzing         // final analysis
         case result(MeasurementDisplayData)
         case error(String)
     }
 
-    /// Formatted measurement data for display.
     struct MeasurementDisplayData: Equatable {
         let rateBPH: Int
         let rateErrorSecondsPerDay: String
@@ -30,11 +31,14 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
 
-    /// User-selected beat rate, or nil for auto-detect.
-    @Published var selectedRate: StandardBeatRate? = nil
-
-    /// Capture duration in seconds.
-    var captureDuration: Double = 30.0
+    /// Analysis window duration in seconds.
+    let analysisWindow: Double = 15.0
+    /// Minimum quality to auto-accept a result.
+    let qualityThreshold: Double = 0.50
+    /// How often to run analysis during recording (seconds).
+    let analysisInterval: Double = 3.0
+    /// Maximum recording time before giving up.
+    let maxRecordingTime: Double = 60.0
 
     private let captureService = AudioCaptureService()
     private let frequencyMonitor = FrequencyMonitor()
@@ -42,7 +46,8 @@ final class MeasurementCoordinator: ObservableObject {
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
-    /// Start the frequency monitor so the user can position the watch.
+    // MARK: - Monitoring
+
     func startMonitoring() {
         do {
             try frequencyMonitor.start()
@@ -55,51 +60,44 @@ final class MeasurementCoordinator: ObservableObject {
                 }
             }
         } catch {
-            state = .error("Could not start audio monitor: \(error.localizedDescription)")
+            state = .error("Could not start audio: \(error.localizedDescription)")
         }
     }
 
-    /// Stop monitoring and go back to idle.
     func stopMonitoring() {
         monitorTask?.cancel()
         monitorTask = nil
         frequencyMonitor.stop()
         state = .idle
         ratePowers = [:]
-        rawPeak = 0
     }
 
-    /// Start a measurement: keep monitor running for visual feedback during recording.
+    // MARK: - Recording + rolling analysis
+
     func startMeasurement() {
-        // Keep the frequency monitor running — we'll stop it after analysis.
-        // The capture service will start its own audio engine, so we need to
-        // stop the monitor's engine first, but keep the polling task alive.
+        // Stop the frequency monitor's audio engine
         frequencyMonitor.stop()
 
         recordingTask?.cancel()
-        recordingTask = Task {
-            await performMeasurement()
-        }
+        recordingTask = Task { await performContinuousMeasurement() }
     }
 
-    /// Cancel an in-progress measurement.
     func cancelMeasurement() {
         recordingTask?.cancel()
         recordingTask = nil
+        captureService.stopRecording()
         monitorTask?.cancel()
         monitorTask = nil
         frequencyMonitor.stop()
         state = .idle
         ratePowers = [:]
-        rawPeak = 0
     }
 
-    private func performMeasurement() async {
-        // Request microphone permission
-        state = .requestingPermission
+    private func performContinuousMeasurement() async {
+        // Request permission
         let granted = await captureService.requestPermission()
         guard granted else {
-            state = .error("Microphone access denied. Please enable it in Settings.")
+            state = .error("Microphone access denied.")
             return
         }
 
@@ -109,68 +107,98 @@ final class MeasurementCoordinator: ObservableObject {
             self?.frequencyMonitor.feedSamples(samples)
         }
 
-        // Start recording with progress updates
-        state = .recording(elapsed: 0, total: captureDuration)
+        // Start continuous recording
+        do {
+            await captureService.resetBuffer()
+            try captureService.startRecording()
+        } catch {
+            state = .error(error.localizedDescription)
+            return
+        }
 
-        let progressTask = Task {
-            let start = ContinuousClock.now
+        // Start frequency bar updates
+        monitorTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))
-                let elapsed = (ContinuousClock.now - start).asSeconds
-                await MainActor.run {
-                    if case .recording = self.state {
-                        self.state = .recording(elapsed: min(elapsed, self.captureDuration), total: self.captureDuration)
-                    }
-                    // Update frequency bars during recording
-                    self.ratePowers = self.frequencyMonitor.ratePowers
-                }
+                self.ratePowers = self.frequencyMonitor.ratePowers
             }
         }
 
-        do {
-            let buffer = try await captureService.capture(duration: captureDuration)
-            progressTask.cancel()
+        state = .recording(elapsed: 0, liveQuality: 0)
 
-            guard !Task.isCancelled else {
-                state = .idle
-                return
+        let startTime = ContinuousClock.now
+        var bestResult: (MeasurementResult, PipelineDiagnostics)?
+        var bestQuality: Double = 0
+
+        // Rolling analysis loop
+        while !Task.isCancelled {
+            let elapsed = (ContinuousClock.now - startTime).asSeconds
+
+            // Wait until we have enough audio for a window
+            if elapsed < analysisWindow {
+                state = .recording(elapsed: elapsed, liveQuality: 0)
+                try? await Task.sleep(for: .milliseconds(200))
+                continue
             }
 
-            // Analyze
-            state = .analyzing
-
-            let rateOverride = self.selectedRate
-            let (result, diagnostics) = await Task.detached { [pipeline] in
-                pipeline.measureWithDiagnostics(buffer, knownRate: rateOverride)
-            }.value
-
-            // Save raw audio with quality and rate in filename
-            saveRawAudio(buffer, result: result)
-
-            guard !Task.isCancelled else {
-                state = .idle
-                return
+            // Check timeout
+            if elapsed > maxRecordingTime {
+                break
             }
 
-            // Build diagnostic text
+            // Get most recent window and analyze
+            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
+                let (result, diagnostics) = await Task.detached { [pipeline] in
+                    pipeline.measureWithDiagnostics(buffer)
+                }.value
+
+                let quality = result.qualityScore
+                state = .recording(elapsed: elapsed, liveQuality: Int(quality * 100))
+
+                if quality > bestQuality {
+                    bestQuality = quality
+                    bestResult = (result, diagnostics)
+                }
+
+                // Auto-stop if quality threshold met
+                if quality >= qualityThreshold {
+                    break
+                }
+            }
+
+            // Wait before next analysis
+            try? await Task.sleep(for: .seconds(analysisInterval))
+        }
+
+        // Stop recording
+        captureService.stopRecording()
+        monitorTask?.cancel()
+
+        guard !Task.isCancelled else {
+            state = .idle
+            return
+        }
+
+        // Save the best audio and show result
+        if let (result, diagnostics) = bestResult {
+            // Save the most recent audio
+            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
+                saveRawAudio(buffer, result: result)
+            }
+
             let scoresText = diagnostics.rateScores
                 .sorted { $0.magnitude > $1.magnitude }
                 .prefix(3)
                 .map { "\($0.rate.rawValue)bph: \(String(format: "%.1f", $0.magnitude))" }
                 .joined(separator: ", ")
 
-            let rateMode = rateOverride != nil ? "Manual: \(rateOverride!.rawValue) bph" : "Auto-detect"
-
             let diagText = """
-            Rate mode: \(rateMode)
             Audio: \(captureService.lastConfigInfo)
             Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
             Period: \(String(format: "%.4f", diagnostics.periodEstimate.measuredHz)) Hz
             Confidence: \(String(format: "%.1f%%", diagnostics.periodEstimate.confidence * 100))
             Ticks: \(diagnostics.tickCount)
             Top rates: \(scoresText)
-            Sample rate: \(Int(diagnostics.sampleRate)) Hz
-            Samples: \(diagnostics.sampleCount)
             """
 
             let displayData = MeasurementDisplayData(
@@ -182,16 +210,13 @@ final class MeasurementCoordinator: ObservableObject {
                 diagnosticText: diagText
             )
             state = .result(displayData)
-
-        } catch {
-            progressTask.cancel()
-            if !Task.isCancelled {
-                state = .error(error.localizedDescription)
-            }
+        } else {
+            state = .error("Could not get a usable measurement. Try in a quieter environment with firmer contact.")
         }
     }
 
-    /// Save raw audio as a 32-bit float WAV for offline analysis.
+    // MARK: - File saving
+
     private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer, result: MeasurementResult) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let formatter = DateFormatter()
@@ -201,34 +226,28 @@ final class MeasurementCoordinator: ObservableObject {
         let filename = "watchbeat_\(formatter.string(from: Date()))_\(rate)bph_q\(q).wav"
         let url = docs.appendingPathComponent(filename)
 
-        // Write a minimal WAV file (32-bit float, mono)
         let samples = buffer.samples
         let sampleRate = UInt32(buffer.sampleRate)
         let numSamples = UInt32(samples.count)
-        let dataSize = numSamples * 4 // 4 bytes per float
+        let dataSize = numSamples * 4
         let fileSize = 36 + dataSize
 
         var data = Data()
-        // RIFF header
         data.append(contentsOf: "RIFF".utf8)
         data.append(withUnsafeBytes(of: fileSize.littleEndian) { Data($0) })
         data.append(contentsOf: "WAVE".utf8)
-        // fmt chunk
         data.append(contentsOf: "fmt ".utf8)
-        data.append(withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) }) // chunk size
-        data.append(withUnsafeBytes(of: UInt16(3).littleEndian) { Data($0) })  // IEEE float
-        data.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })  // mono
-        data.append(withUnsafeBytes(of: sampleRate.littleEndian) { Data($0) }) // sample rate
-        data.append(withUnsafeBytes(of: (sampleRate * 4).littleEndian) { Data($0) }) // byte rate
-        data.append(withUnsafeBytes(of: UInt16(4).littleEndian) { Data($0) })  // block align
-        data.append(withUnsafeBytes(of: UInt16(32).littleEndian) { Data($0) }) // bits per sample
-        // data chunk
+        data.append(withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt16(3).littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: sampleRate.littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: (sampleRate * 4).littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt16(4).littleEndian) { Data($0) })
+        data.append(withUnsafeBytes(of: UInt16(32).littleEndian) { Data($0) })
         data.append(contentsOf: "data".utf8)
         data.append(withUnsafeBytes(of: dataSize.littleEndian) { Data($0) })
         samples.withUnsafeBytes { data.append(contentsOf: $0) }
-
         try? data.write(to: url)
-        print("Saved raw audio to: \(url.path)")
     }
 
     private func formatRateError(_ value: Double) -> String {
@@ -237,11 +256,9 @@ final class MeasurementCoordinator: ObservableObject {
     }
 
     private func formatBeatError(_ value: Double) -> String {
-        return "\(String(format: "%.1f", value)) ms"
+        "\(String(format: "%.1f", value)) ms"
     }
 }
-
-// MARK: - Duration helper
 
 private extension Duration {
     var asSeconds: Double {
