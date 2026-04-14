@@ -44,7 +44,7 @@ final class MeasurementCoordinator: ObservableObject {
     /// Analysis window duration in seconds.
     let analysisWindow: Double = 15.0
     /// Minimum quality to auto-accept a result.
-    let qualityThreshold: Double = 0.50
+    let qualityThreshold: Double = 0.60
     /// How often to run analysis during recording (seconds).
     let analysisInterval: Double = 3.0
     /// Maximum recording time before giving up.

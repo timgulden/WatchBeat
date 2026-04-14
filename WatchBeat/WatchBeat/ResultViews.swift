@@ -4,10 +4,9 @@ import SwiftUI
 
 struct RateDialView: View {
     let rateError: Double  // s/day
+    let beatErrorMs: Double?  // shown in the gap at bottom
 
-    // Visual range: -60 to +60 maps to 7:00 to 5:00 (300° arc)
-    // Values beyond ±60 are pinned visually but show the real number
-    private let maxDisplayError: Double = 60.0
+    private let maxDisplayError: Double = 120.0
     private let maxArcDegrees: Double = 150.0  // each direction from 12:00
 
     var body: some View {
@@ -24,19 +23,17 @@ struct RateDialView: View {
                     .frame(width: radius * 2, height: radius * 2)
                     .position(center)
 
-                // Colored arc for the rate error
+                // Colored arc
                 if abs(rateError) > 0.5 {
                     let clampedError = max(-maxDisplayError, min(maxDisplayError, rateError))
                     let arcDegrees = (clampedError / maxDisplayError) * maxArcDegrees
 
                     if rateError > 0 {
-                        // Fast: blue, clockwise from 12:00
                         Arc(startAngle: .degrees(-90), endAngle: .degrees(-90 + arcDegrees), clockwise: false)
                             .stroke(Color.blue, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                             .frame(width: radius * 2, height: radius * 2)
                             .position(center)
                     } else {
-                        // Slow: red, counter-clockwise from 12:00
                         Arc(startAngle: .degrees(-90 + arcDegrees), endAngle: .degrees(-90), clockwise: false)
                             .stroke(Color.red, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                             .frame(width: radius * 2, height: radius * 2)
@@ -51,7 +48,7 @@ struct RateDialView: View {
                     .position(x: center.x, y: center.y - radius)
 
                 // Rate error number in the center
-                VStack(spacing: 2) {
+                VStack(spacing: 0) {
                     Text(formatError(rateError))
                         .font(.system(size: errorFontSize(rateError, dialSize: size),
                                       weight: .bold, design: .rounded))
@@ -60,21 +57,38 @@ struct RateDialView: View {
                         .lineLimit(1)
 
                     Text("s/day")
-                        .font(.system(size: size * 0.08, weight: .medium))
+                        .font(.system(size: size * 0.07, weight: .medium))
                         .foregroundStyle(.secondary)
+
+                    if abs(rateError) > 0.5 {
+                        Text(rateError > 0 ? "FAST" : "SLOW")
+                            .font(.system(size: size * 0.055, weight: .semibold))
+                            .foregroundStyle(rateError > 0 ? .blue : .red)
+                    }
                 }
                 .position(center)
 
-                // "FAST" / "SLOW" label
-                if abs(rateError) > 0.5 {
-                    Text(rateError > 0 ? "FAST" : "SLOW")
-                        .font(.system(size: size * 0.06, weight: .semibold))
-                        .foregroundStyle(rateError > 0 ? .blue : .red)
-                        .position(x: center.x, y: center.y + radius * 0.45)
+                // Beat error in the gap between 5:00 and 7:00
+                if let be = beatErrorMs {
+                    VStack(spacing: 1) {
+                        Text(String(format: "%.1f ms", be))
+                            .font(.system(size: size * 0.09, weight: .bold, design: .rounded))
+                            .foregroundStyle(beatErrorColor(be))
+                        Text("beat error")
+                            .font(.system(size: size * 0.05))
+                            .foregroundStyle(.secondary)
+                    }
+                    .position(x: center.x, y: center.y + radius * 0.85)
                 }
             }
         }
         .aspectRatio(1, contentMode: .fit)
+    }
+
+    private func beatErrorColor(_ ms: Double) -> Color {
+        if ms < 1.0 { return .green }
+        if ms < 3.0 { return .orange }
+        return .red
     }
 
     private func formatError(_ value: Double) -> String {
@@ -87,14 +101,13 @@ struct RateDialView: View {
 
     private func errorFontSize(_ value: Double, dialSize: CGFloat) -> CGFloat {
         let digits = formatError(value).count
-        if digits <= 4 { return dialSize * 0.22 }
-        if digits <= 5 { return dialSize * 0.18 }
-        if digits <= 6 { return dialSize * 0.15 }
-        return dialSize * 0.12
+        if digits <= 4 { return dialSize * 0.20 }
+        if digits <= 5 { return dialSize * 0.17 }
+        if digits <= 6 { return dialSize * 0.14 }
+        return dialSize * 0.11
     }
 }
 
-/// An arc shape for SwiftUI.
 struct Arc: Shape {
     let startAngle: Angle
     let endAngle: Angle
@@ -114,46 +127,60 @@ struct Arc: Shape {
 
 struct TimegrapherPlotView: View {
     let residuals: [(index: Int, residualMs: Double, isEven: Bool)]
+    let rateErrorPerDay: Double  // s/day, used for scaling
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
 
-            if residuals.isEmpty {
-                Text("No tick data")
+            if residuals.count < 3 {
+                Text("Insufficient data")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Canvas { context, size in
-                    let maxIdx = residuals.map(\.index).max() ?? 1
-                    let maxRes = max(residuals.map { abs($0.residualMs) }.max() ?? 1, 0.5)
-
                     // Background
                     context.fill(Path(CGRect(origin: .zero, size: size)),
                                  with: .color(Color(.systemGray6)))
 
-                    // Center line (zero residual)
-                    let centerY = h / 2
-                    var centerLine = Path()
-                    centerLine.move(to: CGPoint(x: 0, y: centerY))
-                    centerLine.addLine(to: CGPoint(x: w, y: centerY))
-                    context.stroke(centerLine, with: .color(.gray.opacity(0.3)), lineWidth: 1)
+                    // The Weishi-style plot: X = time within a wrap, Y = residual.
+                    // Each row wraps after a fixed time interval.
+                    // Y axis = one beat period height, with residuals wrapping top-to-bottom.
 
-                    // Plot points — wrap horizontally
-                    let beatsPerRow = max(1, maxIdx / 4)  // ~4 rows
-                    let dotSize: CGFloat = 3
+                    let maxIdx = residuals.last?.index ?? 1
+                    let beatsPerWrap = max(12, maxIdx / 3)  // ~3-4 rows
+                    let numRows = (maxIdx / beatsPerWrap) + 1
 
-                    for tick in residuals {
-                        let col = tick.index % beatsPerRow
-                        let row = tick.index / beatsPerRow
-                        let numRows = maxIdx / beatsPerRow + 1
+                    // Y scale: the beat period. Residuals wrap within this.
+                    // For the Y axis, use the actual residual range for better visualization.
+                    let allRes = residuals.map(\.residualMs)
+                    let resRange = (allRes.max() ?? 1) - (allRes.min() ?? -1)
+                    let yScale = max(resRange * 1.5, 1.0)  // add some padding
 
-                        let x = CGFloat(col) / CGFloat(beatsPerRow) * w
-                        let rowHeight = h / CGFloat(numRows)
+                    let rowHeight = h / CGFloat(numRows)
+                    let dotSize: CGFloat = 4
+
+                    // Draw center lines for each row
+                    for row in 0..<numRows {
                         let rowCenter = rowHeight * (CGFloat(row) + 0.5)
-                        let yOffset = CGFloat(tick.residualMs / maxRes) * rowHeight * 0.4
-                        let y = rowCenter - yOffset  // negative = up (positive residual = above line)
+                        var line = Path()
+                        line.move(to: CGPoint(x: 0, y: rowCenter))
+                        line.addLine(to: CGPoint(x: w, y: rowCenter))
+                        context.stroke(line, with: .color(.gray.opacity(0.2)), lineWidth: 0.5)
+                    }
+
+                    // Plot ticks
+                    for tick in residuals {
+                        let col = tick.index % beatsPerWrap
+                        let row = tick.index / beatsPerWrap
+
+                        let x = (CGFloat(col) + 0.5) / CGFloat(beatsPerWrap) * w
+                        let rowCenter = rowHeight * (CGFloat(row) + 0.5)
+
+                        // Residual mapped to row height
+                        let yOffset = CGFloat(tick.residualMs / yScale) * rowHeight * 0.8
+                        let y = rowCenter - yOffset
 
                         let color: Color = tick.isEven ? .blue : .cyan
                         let rect = CGRect(x: x - dotSize/2, y: y - dotSize/2,
@@ -176,19 +203,19 @@ struct QualityBadgeView: View {
         HStack(spacing: 6) {
             Circle()
                 .fill(qualityColor)
-                .frame(width: 12, height: 12)
+                .frame(width: 10, height: 10)
 
             Text("\(percent)%")
-                .font(.title3.bold().monospacedDigit())
+                .font(.subheadline.bold().monospacedDigit())
 
             Text("quality")
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .background(qualityColor.opacity(0.1))
-        .cornerRadius(20)
+        .cornerRadius(16)
     }
 
     private var qualityColor: Color {
@@ -198,22 +225,8 @@ struct QualityBadgeView: View {
     }
 }
 
-// MARK: - Previews
-
-#Preview("Dial +45") {
-    RateDialView(rateError: 45)
-        .frame(width: 250, height: 250)
-        .padding()
-}
-
-#Preview("Dial -12") {
-    RateDialView(rateError: -12)
-        .frame(width: 250, height: 250)
-        .padding()
-}
-
-#Preview("Dial +85") {
-    RateDialView(rateError: 85.3)
+#Preview("Dial +77") {
+    RateDialView(rateError: 77, beatErrorMs: 1.6)
         .frame(width: 250, height: 250)
         .padding()
 }

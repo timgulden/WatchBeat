@@ -143,48 +143,40 @@ struct ContentView: View {
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
         ScrollView {
-            VStack(spacing: 16) {
-                // Detected rate
-                Text("\(data.rateBPH) bph")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.secondary)
-
-                // Quality badge
-                QualityBadgeView(percent: data.qualityPercent)
-
-                // Rate error dial
-                RateDialView(rateError: data.rateError)
-                    .frame(height: 220)
-
-                // Beat error
-                if let be = data.beatErrorMs {
-                    HStack(spacing: 4) {
-                        Text("Beat error:")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Text(String(format: "%.1f ms", be))
-                            .font(.subheadline.bold().monospacedDigit())
-                    }
+            VStack(spacing: 10) {
+                // Rate + quality on one line
+                HStack {
+                    Text("\(data.rateBPH) bph")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    QualityBadgeView(percent: data.qualityPercent)
                 }
 
+                // Rate error dial with beat error in the gap
+                RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
+                    .frame(height: 200)
+
                 // Timegrapher plot
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text("Timegrapher")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
                         Spacer()
-                        HStack(spacing: 8) {
-                            Circle().fill(.blue).frame(width: 6, height: 6)
+                        HStack(spacing: 6) {
+                            Circle().fill(.blue).frame(width: 5, height: 5)
                             Text("tick").font(.caption2).foregroundStyle(.secondary)
-                            Circle().fill(.cyan).frame(width: 6, height: 6)
+                            Circle().fill(.cyan).frame(width: 5, height: 5)
                             Text("tock").font(.caption2).foregroundStyle(.secondary)
                         }
                     }
 
-                    TimegrapherPlotView(residuals: data.tickResiduals)
-                        .frame(height: 150)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    TimegrapherPlotView(
+                        residuals: data.tickResiduals,
+                        rateErrorPerDay: data.rateError
+                    )
+                    .frame(height: 130)
                 }
 
                 // Diagnostics
@@ -198,10 +190,9 @@ struct ContentView: View {
                 Button(action: { coordinator.startMonitoring() }) {
                     Text("Measure Again")
                         .frame(maxWidth: .infinity)
-                        .padding()
+                        .padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
         }
     }
