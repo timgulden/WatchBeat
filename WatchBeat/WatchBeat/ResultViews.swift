@@ -164,12 +164,18 @@ struct TimegraphView: View {
                         yValues.append(tick.residualMs + cumDrift)
                     }
 
-                    // Y scale: fit all points with some padding
+                    // Fixed Y scale: ±60 s/day over 15 seconds = ±10.4 ms.
+                    // This ensures the same visual slope always means the same s/day,
+                    // regardless of beat rate (the total drift in a fixed time window
+                    // depends only on s/day, not on beat rate).
+                    let fixedYWindowMs = 60.0 / 86400.0 * 15.0 * 1000.0 * 2.0  // ±60 s/day = 20.8ms total
+
+                    // But if the data exceeds this window, expand to fit
                     let yMin = yValues.min() ?? 0
                     let yMax = yValues.max() ?? 0
-                    let yRange = max(yMax - yMin, 0.5)
+                    let dataRange = yMax - yMin
+                    let yScale = max(fixedYWindowMs, dataRange * 1.3)
                     let yCenter = (yMin + yMax) / 2
-                    let yScale = yRange * 1.3  // 30% padding
 
                     // Center line
                     let centerY = h / 2.0
