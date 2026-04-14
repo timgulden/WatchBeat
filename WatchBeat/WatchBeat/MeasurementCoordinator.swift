@@ -2,33 +2,27 @@ import SwiftUI
 import Combine
 import WatchBeatCore
 
-/// Orchestrates the capture-and-analyze workflow.
-///
-/// Flow: Listen (see frequency bars) → Measure (continuous recording with rolling
-/// 15-second analysis every 3 seconds) → auto-stop when quality ≥ 50% → show result.
 @MainActor
 final class MeasurementCoordinator: ObservableObject {
 
     enum State: Equatable {
         case idle
-        case monitoring        // frequency bars, positioning
-        case recording(elapsed: Double, liveQuality: Int)  // recording + analyzing
-        case analyzing         // final analysis
+        case monitoring
+        case recording(elapsed: Double, liveQuality: Int)
+        case analyzing
         case result(MeasurementDisplayData)
         case error(String)
     }
 
     struct MeasurementDisplayData: Equatable {
         let rateBPH: Int
-        let rateError: Double           // raw value for dial
+        let rateError: Double
         let rateErrorFormatted: String
-        let beatErrorMs: Double?        // raw value
+        let beatErrorMs: Double?
         let beatErrorFormatted: String?
         let qualityPercent: Int
         let tickCount: Int
         let diagnosticText: String
-        /// Tick residuals in milliseconds for the timegrapher plot.
-        /// Each entry: (beatIndex, residualMs, isEvenBeat)
         let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
 
         static func == (lhs: Self, rhs: Self) -> Bool {
@@ -41,22 +35,12 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
 
-    /// Current live quality percentage during recording.
-    private var liveQuality: Int = 0
-    /// Best quality seen so far during this recording session.
     private(set) var bestQualitySoFar: Int = 0
-    /// Set by the deadline task when maxRecordingTime is reached.
-    private var timedOut: Bool = false
 
-    /// Analysis window duration in seconds.
     let analysisWindow: Double = 15.0
-    /// Minimum quality to auto-accept a result (great).
     let qualityThreshold: Double = 0.80
-    /// Minimum quality to show results (below this = try again).
     let minimumDisplayQuality: Double = 0.30
-    /// How often to run analysis during recording (seconds).
     let analysisInterval: Double = 3.0
-    /// Maximum recording time before giving up.
     let maxRecordingTime: Double = 60.0
 
     private let captureService = AudioCaptureService()
@@ -91,12 +75,10 @@ final class MeasurementCoordinator: ObservableObject {
         ratePowers = [:]
     }
 
-    // MARK: - Recording + rolling analysis
+    // MARK: - Recording
 
     func startMeasurement() {
-        // Stop the frequency monitor's audio engine
         frequencyMonitor.stop()
-
         recordingTask?.cancel()
         recordingTask = Task { await performContinuousMeasurement() }
     }
@@ -113,20 +95,17 @@ final class MeasurementCoordinator: ObservableObject {
     }
 
     private func performContinuousMeasurement() async {
-        // Request permission
         let granted = await captureService.requestPermission()
         guard granted else {
             state = .error("Microphone access denied.")
             return
         }
 
-        // Set up frequency monitor to receive samples during recording
         frequencyMonitor.initializeForExternalFeed(sampleRate: 48000)
         captureService.onSamples = { [weak self] samples in
             self?.frequencyMonitor.feedSamples(samples)
         }
 
-        // Start continuous recording
         do {
             await captureService.resetBuffer()
             try captureService.startRecording()
@@ -135,89 +114,80 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
+        // Timer task ONLY updates frequency bars — does NOT touch state
+        monitorTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(150))
+                self.ratePowers = self.frequencyMonitor.ratePowers
+            }
+        }
+
         state = .recording(elapsed: 0, liveQuality: 0)
-        liveQuality = 0
         bestQualitySoFar = 0
-        timedOut = false
 
         let startTime = ContinuousClock.now
         var bestResult: (MeasurementResult, PipelineDiagnostics)?
         var bestQuality: Double = 0
 
-        // Timer task: updates UI every 200ms
-        monitorTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
-                let elapsed = (ContinuousClock.now - startTime).asSeconds
-                self.ratePowers = self.frequencyMonitor.ratePowers
-                self.state = .recording(elapsed: elapsed, liveQuality: self.liveQuality)
-            }
-        }
-
-        // Deadline task: sets timedOut flag after exactly maxRecordingTime
-        let deadlineTask = Task {
-            try? await Task.sleep(for: .seconds(self.maxRecordingTime))
-            await MainActor.run { self.timedOut = true }
-        }
-
-        // Wait for enough audio
-        while !Task.isCancelled && !timedOut {
+        // Single loop handles everything: timing, analysis, state updates.
+        // This is the pattern that worked reliably before.
+        while !Task.isCancelled {
             let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed >= analysisWindow { break }
-            try? await Task.sleep(for: .milliseconds(500))
-        }
 
-        // Analysis loop — exits when quality met OR timedOut
-        while !Task.isCancelled && !timedOut {
+            // Update elapsed time on every iteration
+            state = .recording(elapsed: elapsed, liveQuality: bestQualitySoFar)
+
+            // Check timeout
+            if elapsed > maxRecordingTime {
+                break
+            }
+
+            // Wait for enough audio
+            if elapsed < analysisWindow {
+                try? await Task.sleep(for: .milliseconds(200))
+                continue
+            }
+
+            // Analyze the most recent window
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
                 let (result, diagnostics) = await Task.detached { [pipeline] in
                     pipeline.measureWithDiagnostics(buffer)
                 }.value
 
                 let quality = result.qualityScore
-                liveQuality = Int(quality * 100)
-                bestQualitySoFar = max(bestQualitySoFar, liveQuality)
+                let qualityPct = Int(quality * 100)
+                bestQualitySoFar = max(bestQualitySoFar, qualityPct)
 
                 if quality > bestQuality {
                     bestQuality = quality
                     bestResult = (result, diagnostics)
                 }
 
+                // Update state with current quality
+                let elapsedNow = (ContinuousClock.now - startTime).asSeconds
+                state = .recording(elapsed: elapsedNow, liveQuality: bestQualitySoFar)
+
+                // Auto-stop if quality threshold met
                 if quality >= qualityThreshold {
                     break
                 }
             }
 
-            // Sleep in short intervals so we notice timedOut quickly
-            for _ in 0..<6 {
-                if timedOut || Task.isCancelled { break }
-                try? await Task.sleep(for: .milliseconds(500))
-            }
+            // Wait before next analysis
+            try? await Task.sleep(for: .seconds(analysisInterval))
         }
 
-        deadlineTask.cancel()
-
-        // CRITICAL: Stop the timer task FIRST so it can't overwrite state
+        // Stop everything
         monitorTask?.cancel()
         monitorTask = nil
-        // Give it a moment to actually stop
-        try? await Task.sleep(for: .milliseconds(300))
 
-        // Final analysis on the most recent data
-        if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
-            let (result, diagnostics) = await Task.detached { [pipeline] in
-                pipeline.measureWithDiagnostics(buffer)
-            }.value
-
-            let quality = result.qualityScore
-            if quality > bestQuality {
-                bestResult = (result, diagnostics)
+        // Save audio before stopping engine
+        if let best = bestResult {
+            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
+                saveRawAudio(buffer, result: best.0)
             }
-
-            saveRawAudio(buffer, result: bestResult?.0 ?? result)
         }
 
-        // Stop recording
         captureService.stopRecording()
 
         guard !Task.isCancelled else {
@@ -225,9 +195,8 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Show result if quality meets minimum threshold, otherwise show error
+        // Show result or error
         if let (result, diagnostics) = bestResult, result.qualityScore >= minimumDisplayQuality {
-
             let scoresText = diagnostics.rateScores
                 .sorted { $0.magnitude > $1.magnitude }
                 .prefix(3)
