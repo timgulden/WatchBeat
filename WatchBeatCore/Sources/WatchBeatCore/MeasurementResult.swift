@@ -1,19 +1,31 @@
 import Foundation
 
+/// A single tick's timing data for the timegrapher plot.
+public struct TickTiming: Sendable {
+    /// Beat index (0, 1, 2, ...).
+    public let beatIndex: Int
+    /// Residual from regression line in milliseconds.
+    public let residualMs: Double
+    /// Whether this is an even beat (tick vs tock).
+    public let isEvenBeat: Bool
+
+    public init(beatIndex: Int, residualMs: Double, isEvenBeat: Bool) {
+        self.beatIndex = beatIndex
+        self.residualMs = residualMs
+        self.isEvenBeat = isEvenBeat
+    }
+}
+
 /// The output of the full measurement pipeline.
 public struct MeasurementResult: Sendable {
-    /// The detected standard beat rate.
     public let snappedRate: StandardBeatRate
-    /// Rate error in seconds per day. Positive = watch runs fast.
     public let rateErrorSecondsPerDay: Double
-    /// Beat error (tick/tock asymmetry) in milliseconds. Nil for quartz.
     public let beatErrorMilliseconds: Double?
-    /// Relative amplitude indicator from correlation peak magnitudes.
     public let amplitudeProxy: Double
-    /// Measurement quality from regression residuals, 0...1.
     public let qualityScore: Double
-    /// Number of ticks detected.
     public let tickCount: Int
+    /// Tick timing data for the timegrapher plot.
+    public let tickTimings: [TickTiming]
 
     public init(
         snappedRate: StandardBeatRate,
@@ -21,7 +33,8 @@ public struct MeasurementResult: Sendable {
         beatErrorMilliseconds: Double?,
         amplitudeProxy: Double,
         qualityScore: Double,
-        tickCount: Int
+        tickCount: Int,
+        tickTimings: [TickTiming] = []
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -29,5 +42,6 @@ public struct MeasurementResult: Sendable {
         self.amplitudeProxy = amplitudeProxy
         self.qualityScore = qualityScore
         self.tickCount = tickCount
+        self.tickTimings = tickTimings
     }
 }

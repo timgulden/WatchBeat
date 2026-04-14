@@ -130,7 +130,8 @@ public struct MeasurementPipeline {
         }
 
         let tickResult = bestTickResult ?? TickExtractionResult(
-            confirmedCount: 0, qualityScore: 0, beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity
+            confirmedCount: 0, qualityScore: 0, beatErrorMs: nil, amplitudeProxy: 0,
+            measuredPeriod: nil, residualStd: .infinity, tickTimings: []
         )
 
         // Step 4: Rate error from tick regression
@@ -154,7 +155,8 @@ public struct MeasurementPipeline {
             beatErrorMilliseconds: tickResult.beatErrorMs,
             amplitudeProxy: tickResult.amplitudeProxy,
             qualityScore: tickResult.qualityScore,
-            tickCount: tickResult.confirmedCount
+            tickCount: tickResult.confirmedCount,
+            tickTimings: tickResult.tickTimings
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz
@@ -324,8 +326,9 @@ public struct MeasurementPipeline {
         let beatErrorMs: Double?
         let amplitudeProxy: Double
         let measuredPeriod: Double?
-        /// Regression residual std dev in seconds. Low = ticks fit the rate well.
         let residualStd: Double
+        /// Tick timings for the timegrapher plot.
+        let tickTimings: [TickTiming]
     }
 
     /// Divide the raw signal into beat-length windows, find energy peaks.
@@ -341,7 +344,7 @@ public struct MeasurementPipeline {
 
         guard periodSamples > 10 && periodSamples < n / 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity, tickTimings: [])
         }
 
         // Squared signal for energy measurement
@@ -354,7 +357,7 @@ public struct MeasurementPipeline {
         let numOffsets = 5
         var bestResult = TickExtractionResult(confirmedCount: 0, qualityScore: 0,
                                                beatErrorMs: nil, amplitudeProxy: 0,
-                                               measuredPeriod: nil, residualStd: .infinity)
+                                               measuredPeriod: nil, residualStd: .infinity, tickTimings: [])
 
         for k in 0..<numOffsets {
             let offset = k * periodSamples / numOffsets
@@ -380,7 +383,7 @@ public struct MeasurementPipeline {
         let numWindows = usableLength / periodSamples
         guard numWindows >= 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity, tickTimings: [])
         }
 
         var peakOffsets = [Int](repeating: 0, count: numWindows)
@@ -455,7 +458,7 @@ public struct MeasurementPipeline {
 
         guard tickEnergies.count >= 3 else {
             return TickExtractionResult(confirmedCount: 0, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity, tickTimings: [])
         }
 
         // Confirm ticks: energy must exceed gap energy
@@ -470,7 +473,7 @@ public struct MeasurementPipeline {
 
         guard confirmed.count >= 3 else {
             return TickExtractionResult(confirmedCount: tickEnergies.count, qualityScore: 0,
-                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity)
+                                        beatErrorMs: nil, amplitudeProxy: 0, measuredPeriod: nil, residualStd: .infinity, tickTimings: [])
         }
 
         // Quality from SNR
@@ -501,13 +504,25 @@ public struct MeasurementPipeline {
             beatError = nil
         }
 
+        // Build tick timings for the timegrapher plot
+        var timings: [TickTiming] = []
+        if let slope = regression.slope, let intercept = regression.intercept {
+            for i in confirmed {
+                guard i < peakTimes.count else { continue }
+                let predicted = slope * Double(i) + intercept
+                let residualMs = (peakTimes[i] - predicted) * 1000.0
+                timings.append(TickTiming(beatIndex: i, residualMs: residualMs, isEvenBeat: i % 2 == 0))
+            }
+        }
+
         return TickExtractionResult(
             confirmedCount: confirmed.count,
             qualityScore: quality,
             beatErrorMs: beatError,
             amplitudeProxy: Double(medianTick),
             measuredPeriod: regression.slope,
-            residualStd: regression.residualStd
+            residualStd: regression.residualStd,
+            tickTimings: timings
         )
     }
 

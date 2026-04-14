@@ -142,66 +142,67 @@ struct ContentView: View {
     // MARK: - Result
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 4) {
-                Text("Detected Rate")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(spacing: 16) {
+                // Detected rate
                 Text("\(data.rateBPH) bph")
-                    .font(.title2.bold())
-            }
-
-            VStack(spacing: 4) {
-                Text("Rate Error")
-                    .font(.caption)
+                    .font(.subheadline.bold())
                     .foregroundStyle(.secondary)
-                Text(data.rateErrorSecondsPerDay)
-                    .font(.system(size: 44, weight: .bold, design: .monospaced))
-                    .minimumScaleFactor(0.5)
-                    .lineLimit(1)
-            }
 
-            if let beatError = data.beatErrorMilliseconds {
-                VStack(spacing: 4) {
-                    Text("Beat Error")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(beatError)
-                        .font(.title3.monospacedDigit())
+                // Quality badge
+                QualityBadgeView(percent: data.qualityPercent)
+
+                // Rate error dial
+                RateDialView(rateError: data.rateError)
+                    .frame(height: 220)
+
+                // Beat error
+                if let be = data.beatErrorMs {
+                    HStack(spacing: 4) {
+                        Text("Beat error:")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Text(String(format: "%.1f ms", be))
+                            .font(.subheadline.bold().monospacedDigit())
+                    }
                 }
-            }
 
-            HStack(spacing: 32) {
-                VStack(spacing: 4) {
-                    Text("Quality")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(data.qualityPercent)%")
-                        .font(.body.monospacedDigit())
+                // Timegrapher plot
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Timegrapher")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        HStack(spacing: 8) {
+                            Circle().fill(.blue).frame(width: 6, height: 6)
+                            Text("tick").font(.caption2).foregroundStyle(.secondary)
+                            Circle().fill(.cyan).frame(width: 6, height: 6)
+                            Text("tock").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    TimegrapherPlotView(residuals: data.tickResiduals)
+                        .frame(height: 150)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-                VStack(spacing: 4) {
-                    Text("Ticks")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(data.tickCount)")
-                        .font(.body.monospacedDigit())
+
+                // Diagnostics
+                DisclosureGroup("Diagnostics") {
+                    Text(data.diagnosticText)
+                        .font(.caption.monospaced())
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }
+                .font(.caption)
 
-            DisclosureGroup("Diagnostics") {
-                Text(data.diagnosticText)
-                    .font(.caption.monospaced())
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(action: { coordinator.startMonitoring() }) {
+                    Text("Measure Again")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
-            .font(.caption)
-
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Measure Again")
-                    .frame(maxWidth: .infinity)
-                    .padding()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
     }
 

@@ -20,11 +20,21 @@ final class MeasurementCoordinator: ObservableObject {
 
     struct MeasurementDisplayData: Equatable {
         let rateBPH: Int
-        let rateErrorSecondsPerDay: String
-        let beatErrorMilliseconds: String?
+        let rateError: Double           // raw value for dial
+        let rateErrorFormatted: String
+        let beatErrorMs: Double?        // raw value
+        let beatErrorFormatted: String?
         let qualityPercent: Int
         let tickCount: Int
         let diagnosticText: String
+        /// Tick residuals in milliseconds for the timegrapher plot.
+        /// Each entry: (beatIndex, residualMs, isEvenBeat)
+        let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.rateBPH == rhs.rateBPH && lhs.rateError == rhs.rateError &&
+            lhs.qualityPercent == rhs.qualityPercent && lhs.tickCount == rhs.tickCount
+        }
     }
 
     @Published var state: State = .idle
@@ -201,13 +211,20 @@ final class MeasurementCoordinator: ObservableObject {
             Top rates: \(scoresText)
             """
 
+            let tickResiduals = result.tickTimings.map {
+                (index: $0.beatIndex, residualMs: $0.residualMs, isEven: $0.isEvenBeat)
+            }
+
             let displayData = MeasurementDisplayData(
                 rateBPH: result.snappedRate.rawValue,
-                rateErrorSecondsPerDay: formatRateError(result.rateErrorSecondsPerDay),
-                beatErrorMilliseconds: result.beatErrorMilliseconds.map { formatBeatError($0) },
+                rateError: result.rateErrorSecondsPerDay,
+                rateErrorFormatted: formatRateError(result.rateErrorSecondsPerDay),
+                beatErrorMs: result.beatErrorMilliseconds,
+                beatErrorFormatted: result.beatErrorMilliseconds.map { formatBeatError($0) },
                 qualityPercent: Int(result.qualityScore * 100),
                 tickCount: result.tickCount,
-                diagnosticText: diagText
+                diagnosticText: diagText,
+                tickResiduals: tickResiduals
             )
             state = .result(displayData)
         } else {
