@@ -9,12 +9,11 @@ struct ContentView: View {
             Text("WatchBeat")
                 .font(.largeTitle.bold())
 
-            Spacer()
-
             switch coordinator.state {
             case .idle:
                 idleView
             case .monitoring:
+                Spacer()
                 monitoringView
             case .recording(let elapsed, let liveQuality):
                 recordingView(elapsed: elapsed, liveQuality: liveQuality)
@@ -35,12 +34,15 @@ struct ContentView: View {
     // MARK: - Idle
 
     private var idleView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             Image("WatchBeatMark")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(maxHeight: 220)
+                .frame(maxHeight: 300)
                 .opacity(0.85)
+                .padding(.top, -16)
+
+            Spacer()
 
             Text("Press your iPhone mic against the watch caseback, then tap Listen.")
                 .multilineTextAlignment(.center)
