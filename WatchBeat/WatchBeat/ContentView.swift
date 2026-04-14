@@ -191,7 +191,8 @@ struct ContentView: View {
     // MARK: - Result (uses its own layout, fills the screen)
 
     private func resultOverlay(data: MeasurementCoordinator.MeasurementDisplayData, w: CGFloat, h: CGFloat) -> some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 2) {
+            // Rate and quality just below the title
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(data.rateBPH) bph")
@@ -208,11 +209,14 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .padding(.top, 60) // below title
 
+            // Dial fills the middle
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                .frame(maxHeight: .infinity)
-                .padding(.vertical, -4)
+                .frame(height: 310)
+                .padding(.top, -8)
 
+            // Timegraph
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text("Timegraph")
@@ -234,6 +238,9 @@ struct ContentView: View {
                 )
                 .frame(height: 110)
             }
+            .padding(.top, -4)
+
+            Spacer()
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Measure Again")
@@ -242,9 +249,8 @@ struct ContentView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.top, 6)
+            .padding(.bottom, 8)
         }
-        .padding(.top, 10)
         .padding(.horizontal, 20)
     }
 
