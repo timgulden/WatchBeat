@@ -56,21 +56,26 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.bottom)
     }
 
+    // MARK: - Shared logo
+
+    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
+        let imageCenter = (80 + headlineY) / 2
+        let imageSize = min(headlineY - 100, w - 80)
+        return Image("WatchBeatMark")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: imageSize, height: imageSize)
+            .opacity(0.85)
+            .position(x: w / 2, y: imageCenter)
+    }
+
     // MARK: - Idle
 
     private func idleOverlay(w: CGFloat, h: CGFloat, headlineY: CGFloat, captionY: CGFloat,
                               barsTop: CGFloat, barsBottom: CGFloat, barsHeight: CGFloat,
                               buttonCenterY: CGFloat) -> some View {
         ZStack {
-            // Balance wheel centered between title (y=80) and headline
-            let imageCenter = (80 + headlineY) / 2
-            let imageSize = min(headlineY - 100, w - 80)
-            Image("WatchBeatMark")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: imageSize, height: imageSize)
-                .opacity(0.85)
-                .position(x: w / 2, y: imageCenter)
+            logoImage(w: w, headlineY: headlineY)
 
             Text("Position your watch against the mic")
                 .font(.headline)
@@ -102,6 +107,8 @@ struct ContentView: View {
                                     barsTop: CGFloat, barsHeight: CGFloat,
                                     buttonCenterY: CGFloat, cancelY: CGFloat) -> some View {
         ZStack {
+            logoImage(w: w, headlineY: headlineY)
+
             Text("Position your watch against the mic")
                 .font(.headline)
                 .multilineTextAlignment(.center)
@@ -141,6 +148,8 @@ struct ContentView: View {
                                    buttonCenterY: CGFloat, cancelY: CGFloat,
                                    elapsed: Double, liveQuality: Int) -> some View {
         ZStack {
+            logoImage(w: w, headlineY: headlineY)
+
             Text("Listening...")
                 .font(.headline)
                 .position(x: w / 2, y: headlineY)
