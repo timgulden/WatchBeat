@@ -123,18 +123,12 @@ struct Arc: Shape {
     }
 }
 
-// MARK: - Timegrapher Plot
+// MARK: - Timegraph
 
-struct TimegrapherPlotView: View {
+struct TimegraphView: View {
     let residuals: [(index: Int, residualMs: Double, isEven: Bool)]
     let rateErrorPerDay: Double
     let beatRateHz: Double
-
-    // Y axis represents ±60 s/day of cumulative deviation.
-    // This matches the Weishi style where each row is one beat period
-    // and drift causes the dots to slope up (fast) or down (slow),
-    // wrapping when they reach the edge.
-    private let yAxisSecondsPerDay: Double = 60.0
 
     var body: some View {
         GeometryReader { geo in
@@ -151,62 +145,47 @@ struct TimegrapherPlotView: View {
                     context.fill(Path(CGRect(origin: .zero, size: size)),
                                  with: .color(Color(.systemGray6)))
 
-                    // Weishi-style: X = time within wrap, Y = cumulative deviation
-                    // that wraps at ±yAxisWindow.
+                    // Single row, no wrapping. Every tick from the 15-second
+                    // window is one dot, spread left to right.
                     //
-                    // The Y window = how much cumulative deviation fits in the plot.
-                    // For 60 s/day at this beat rate over 15 seconds:
-                    //   drift per second = 60/86400 = 0.000694 s = 0.694 ms
-                    //   drift in 15 seconds = 10.4 ms
-                    //   drift per beat = 0.694 / beatRateHz ms
+                    // Y axis: cumulative deviation from nominal position.
+                    // Rate error creates a slope; beat error creates tick/tock separation.
                     //
-                    // The Y axis window should be one beat period in ms,
-                    // and dots wrap when cumulative deviation exceeds it.
-                    let beatPeriodMs = 1000.0 / beatRateHz
-                    let yWindowMs = beatPeriodMs  // one full beat period
+                    // The residuals from regression have the slope removed.
+                    // We add it back for the visual so the user sees the drift.
 
-                    // Wrap width: ~2 seconds of beats
-                    let beatsPerWrap = max(8, Int(beatRateHz * 2))
-                    let maxIdx = residuals.last?.index ?? 1
-                    let numRows = max(1, (maxIdx / beatsPerWrap) + 1)
-
-                    let rowHeight = h / CGFloat(numRows)
-                    let dotSize: CGFloat = 3.5
-
-                    // Draw faint center lines
-                    for row in 0..<numRows {
-                        let y = rowHeight * (CGFloat(row) + 0.5)
-                        var line = Path()
-                        line.move(to: CGPoint(x: 0, y: y))
-                        line.addLine(to: CGPoint(x: w, y: y))
-                        context.stroke(line, with: .color(.gray.opacity(0.15)), lineWidth: 0.5)
-                    }
-
-                    // Plot using regression residuals directly.
-                    // The residuals already have the regression slope removed,
-                    // so a perfect watch shows a flat line and beat error shows
-                    // as tick/tock separation. The rate error is in the slope
-                    // which we add back as cumulative drift for the visual.
+                    let n = residuals.count
                     let driftPerBeatMs = rateErrorPerDay / 86400.0 / beatRateHz * 1000.0
 
+                    // Compute all Y values (cumulative deviation)
+                    var yValues = [Double]()
                     for tick in residuals {
-                        let col = tick.index % beatsPerWrap
-                        let row = tick.index / beatsPerWrap
+                        let cumDrift = driftPerBeatMs * Double(tick.index)
+                        yValues.append(tick.residualMs + cumDrift)
+                    }
 
-                        let x = (CGFloat(col) + 0.5) / CGFloat(beatsPerWrap) * w
+                    // Y scale: fit all points with some padding
+                    let yMin = yValues.min() ?? 0
+                    let yMax = yValues.max() ?? 0
+                    let yRange = max(yMax - yMin, 0.5)
+                    let yCenter = (yMin + yMax) / 2
+                    let yScale = yRange * 1.3  // 30% padding
 
-                        // Add back the rate error drift for the visual slope
-                        let cumulativeDriftMs = driftPerBeatMs * Double(col)
-                        let totalDevMs = tick.residualMs + cumulativeDriftMs
+                    // Center line
+                    let centerY = h / 2.0
+                    var centerLine = Path()
+                    centerLine.move(to: CGPoint(x: 0, y: centerY))
+                    centerLine.addLine(to: CGPoint(x: w, y: centerY))
+                    context.stroke(centerLine, with: .color(.gray.opacity(0.2)), lineWidth: 0.5)
 
-                        // Wrap within ±yWindowMs/2
-                        var wrapped = totalDevMs.truncatingRemainder(dividingBy: yWindowMs)
-                        if wrapped > yWindowMs / 2 { wrapped -= yWindowMs }
-                        if wrapped < -yWindowMs / 2 { wrapped += yWindowMs }
+                    // Plot dots
+                    let dotSize: CGFloat = 3.0
+                    let margin: CGFloat = 4.0
 
-                        let rowCenter = rowHeight * (CGFloat(row) + 0.5)
-                        let yOffset = CGFloat(wrapped / yWindowMs) * rowHeight
-                        let y = rowCenter - yOffset
+                    for (i, tick) in residuals.enumerated() {
+                        let x = margin + (w - 2 * margin) * CGFloat(i) / CGFloat(max(n - 1, 1))
+                        let yNorm = (yValues[i] - yCenter) / yScale  // -0.5 to +0.5
+                        let y = centerY - CGFloat(yNorm) * (h - 2 * margin)
 
                         let color: Color = tick.isEven ? .blue : .cyan
                         let rect = CGRect(x: x - dotSize/2, y: y - dotSize/2,

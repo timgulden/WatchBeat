@@ -142,10 +142,10 @@ struct ContentView: View {
     // MARK: - Result
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 2) {
             // Rate and quality — tight to the title
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 0) {
                     Text("\(data.rateBPH) bph")
                         .font(.subheadline.bold())
                     Text("\(Int(Double(data.rateBPH) / 3600.0)) Hz")
@@ -153,22 +153,23 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 1) {
+                VStack(alignment: .trailing, spacing: 2) {
                     QualityBadgeView(percent: data.qualityPercent)
-                    Text("measurement quality")
-                        .font(.system(size: 9))
+                    Text("Measurement Quality")
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
             }
 
-            // Rate error dial with beat error — bigger now
+            // Rate error dial with beat error
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                .frame(height: 250)
+                .frame(height: 280)
+                .padding(.top, -8)
 
-            // Timegrapher plot
+            // Timegraph
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text("Timegrapher")
+                    Text("Timegraph")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -180,13 +181,14 @@ struct ContentView: View {
                     }
                 }
 
-                TimegrapherPlotView(
+                TimegraphView(
                     residuals: data.tickResiduals,
                     rateErrorPerDay: data.rateError,
                     beatRateHz: Double(data.rateBPH) / 3600.0
                 )
-                .frame(height: 130)
+                .frame(height: 120)
             }
+            .padding(.top, -8)
 
             Spacer(minLength: 4)
 
