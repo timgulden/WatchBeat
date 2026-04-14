@@ -5,40 +5,76 @@ struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 0) {
             Text("WatchBeat")
                 .font(.largeTitle.bold())
+                .padding(.bottom, 8)
 
+            // Main content area — fills available space
+            Group {
+                switch coordinator.state {
+                case .idle:
+                    idleContent
+                case .monitoring:
+                    monitoringContent
+                case .recording(let elapsed, let liveQuality):
+                    recordingContent(elapsed: elapsed, liveQuality: liveQuality)
+                case .analyzing:
+                    Spacer()
+                    ProgressView("Analyzing...")
+                        .font(.title3)
+                    Spacer()
+                case .result(let data):
+                    resultView(data: data)
+                case .error(let message):
+                    errorView(message: message)
+                }
+            }
+            .frame(maxHeight: .infinity)
+
+            // Action button — fixed position at bottom for idle/monitoring/recording
             switch coordinator.state {
             case .idle:
-                idleView
+                actionButton("Listen") { coordinator.startMonitoring() }
             case .monitoring:
-                monitoringView
-            case .recording(let elapsed, let liveQuality):
-                recordingView(elapsed: elapsed, liveQuality: liveQuality)
-            case .analyzing:
-                ProgressView("Analyzing...")
-                    .font(.title3)
-            case .result(let data):
-                resultView(data: data)
-            case .error(let message):
-                errorView(message: message)
+                actionButton("Measure") { coordinator.startMeasurement() }
+                Button("Cancel") { coordinator.stopMonitoring() }
+                    .foregroundStyle(.red)
+                    .padding(.top, 4)
+            case .recording:
+                Button("Cancel") { coordinator.cancelMeasurement() }
+                    .foregroundStyle(.red)
+            case .result:
+                actionButton("Measure Again") { coordinator.startMonitoring() }
+            default:
+                EmptyView()
             }
-
-            Spacer()
         }
         .padding()
     }
 
-    // MARK: - Idle
+    private func actionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.title2.bold())
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+    }
 
-    private var idleView: some View {
-        VStack(spacing: 20) {
+    // MARK: - Idle content (between title and button)
+
+    private var idleContent: some View {
+        VStack(spacing: 12) {
             Image("WatchBeatMark")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .opacity(0.85)
-                .padding(.top, -16)
+                .padding(.horizontal, 40)
+
+            Spacer()
 
             Text("Position your watch against the mic")
                 .font(.headline)
@@ -47,28 +83,15 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            // Placeholder matching the frequency bars height
-            Color.clear.frame(height: 120)
-
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Listen")
-                    .font(.title2.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            // Placeholder matching Cancel button height
-            Color.clear.frame(height: 20)
         }
     }
 
-    // MARK: - Live level monitor
+    // MARK: - Monitoring content
 
-    private var monitoringView: some View {
-        VStack(spacing: 20) {
+    private var monitoringContent: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
             Text("Position your watch against the mic")
                 .font(.headline)
 
@@ -76,34 +99,20 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            // Frequency monitor — shows power at each standard beat rate
             FrequencyBarsView(
                 ratePowers: coordinator.ratePowers,
                 selectedRate: nil
             )
             .frame(height: 120)
-
-            Button(action: { coordinator.startMeasurement() }) {
-                Text("Measure")
-                    .font(.title2.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            Button("Cancel") {
-                coordinator.stopMonitoring()
-            }
-            .foregroundStyle(.red)
         }
     }
 
+    // MARK: - Recording content
 
-    // MARK: - Recording
-
-    private func recordingView(elapsed: Double, liveQuality: Int) -> some View {
+    private func recordingContent(elapsed: Double, liveQuality: Int) -> some View {
         VStack(spacing: 16) {
+            Spacer()
+
             Text("Listening...")
                 .font(.title3)
 
@@ -113,7 +122,6 @@ struct ContentView: View {
             )
             .frame(height: 100)
 
-            // Live quality indicator
             VStack(spacing: 4) {
                 HStack {
                     Text("Quality:")
@@ -145,11 +153,6 @@ struct ContentView: View {
             ProgressView(value: min(Double(liveQuality), 80), total: 80)
                 .progressViewStyle(.linear)
                 .tint(liveQuality >= 80 ? .green : liveQuality >= 50 ? .green.opacity(0.7) : .orange)
-
-            Button("Cancel") {
-                coordinator.cancelMeasurement()
-            }
-            .foregroundStyle(.red)
         }
     }
 
@@ -157,7 +160,6 @@ struct ContentView: View {
 
     private func resultView(data: MeasurementCoordinator.MeasurementDisplayData) -> some View {
         VStack(spacing: 0) {
-            // Rate and quality — tight to the title
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(data.rateBPH) bph")
@@ -176,12 +178,10 @@ struct ContentView: View {
             }
             .padding(.top, -8)
 
-            // Rate error dial with beat error — 20% bigger
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
                 .frame(height: 330)
                 .padding(.top, -12)
 
-            // Timegraph
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text("Timegraph")
@@ -204,15 +204,6 @@ struct ContentView: View {
                 .frame(height: 120)
             }
             .padding(.top, -8)
-
-            Spacer(minLength: 4)
-
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Measure Again")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -220,6 +211,8 @@ struct ContentView: View {
 
     private func errorView(message: String) -> some View {
         VStack(spacing: 16) {
+            Spacer()
+
             Image(systemName: "exclamationmark.triangle")
                 .font(.largeTitle)
                 .foregroundStyle(.orange)
@@ -227,6 +220,8 @@ struct ContentView: View {
             Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+
+            Spacer()
 
             Button("Try Again") {
                 coordinator.startMonitoring()
@@ -256,12 +251,10 @@ struct FrequencyBarsView: View {
                     let isStrongest = power == maxPower && maxPower > 0 && power > 0
 
                     VStack(spacing: 2) {
-                        // Bar
                         RoundedRectangle(cornerRadius: 3)
                             .fill(barColor(isSelected: isSelected, isStrongest: isStrongest))
                             .frame(height: max(2, normalizedHeight * (geo.size.height - 30)))
 
-                        // Label
                         Text("\(Int(rate.hz)) Hz")
                             .font(.system(size: 9, weight: isStrongest ? .bold : .regular))
                             .foregroundStyle(isStrongest ? .primary : .secondary)
@@ -272,17 +265,12 @@ struct FrequencyBarsView: View {
     }
 
     private func barColor(isSelected: Bool, isStrongest: Bool) -> Color {
-        if isSelected && isStrongest {
-            return .green
-        } else if isSelected {
-            return .blue
-        } else if isStrongest {
-            return .orange
-        }
+        if isSelected && isStrongest { return .green }
+        else if isSelected { return .blue }
+        else if isStrongest { return .orange }
         return Color(.systemGray4)
     }
 }
-
 
 #Preview {
     ContentView()
