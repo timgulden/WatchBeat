@@ -239,7 +239,8 @@ struct ContentView: View {
             }
             .padding(.top, -4)
 
-            // Button right after timegraph
+            Spacer()
+
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Measure Again")
                     .font(.title3.bold())
@@ -247,9 +248,7 @@ struct ContentView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.top, 12)
-
-            Spacer()
+            .padding(.bottom, 20)
         }
         .padding(.top, 80) // clear the WatchBeat title
         .padding(.horizontal, 20)
