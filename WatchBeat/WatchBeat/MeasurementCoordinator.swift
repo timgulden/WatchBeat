@@ -184,8 +184,14 @@ final class MeasurementCoordinator: ObservableObject {
                 }
             }
 
+            // Wait before next analysis, but check timeout every 500ms
             if !done {
-                try? await Task.sleep(for: .seconds(analysisInterval))
+                for _ in 0..<Int(analysisInterval * 2) {
+                    if Task.isCancelled { done = true; break }
+                    let e = (ContinuousClock.now - startTime).asSeconds
+                    if e > maxRecordingTime { done = true; break }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
             }
         }
 
