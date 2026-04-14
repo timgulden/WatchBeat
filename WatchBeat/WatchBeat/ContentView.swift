@@ -192,7 +192,7 @@ struct ContentView: View {
 
     private func resultOverlay(data: MeasurementCoordinator.MeasurementDisplayData, w: CGFloat, h: CGFloat) -> some View {
         VStack(spacing: 2) {
-            // Rate and quality just below the title
+            // Rate and quality
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(data.rateBPH) bph")
@@ -209,9 +209,8 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.top, 60) // below title
 
-            // Dial fills the middle
+            // Dial
             RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
                 .frame(height: 310)
                 .padding(.top, -8)
@@ -240,8 +239,7 @@ struct ContentView: View {
             }
             .padding(.top, -4)
 
-            Spacer()
-
+            // Button right after timegraph
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Measure Again")
                     .font(.title3.bold())
@@ -249,8 +247,11 @@ struct ContentView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.bottom, 8)
+            .padding(.top, 12)
+
+            Spacer()
         }
+        .padding(.top, 80) // clear the WatchBeat title
         .padding(.horizontal, 20)
     }
 
