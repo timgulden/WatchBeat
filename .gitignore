@@ -25,3 +25,5 @@ Pods/
 
 # IDE
 *.xcscmblueprint
+SoundSamples/
+analyze_samples.swift

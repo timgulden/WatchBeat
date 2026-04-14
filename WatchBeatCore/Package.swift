@@ -13,6 +13,10 @@ let package = Package(
             name: "WatchBeatCore",
             targets: ["WatchBeatCore"]
         ),
+        .executable(
+            name: "AnalyzeSamples",
+            targets: ["AnalyzeSamples"]
+        ),
     ],
     targets: [
         .target(
@@ -21,6 +25,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Accelerate"),
             ]
+        ),
+        .executableTarget(
+            name: "AnalyzeSamples",
+            dependencies: ["WatchBeatCore"]
         ),
         .testTarget(
             name: "WatchBeatCoreTests",

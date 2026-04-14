@@ -405,7 +405,7 @@ public struct MeasurementPipeline {
 
         // Re-window centered on the median offset, with a search window
         // of 40% of the period for the peak to drift within.
-        let tickWindow = max(10, Int(Double(periodSamples) * 0.4))
+        let tickWindow = max(10, Int(Double(periodSamples) * 0.2))
         let halfTick = tickWindow / 2
 
         var tickEnergies: [Float] = []

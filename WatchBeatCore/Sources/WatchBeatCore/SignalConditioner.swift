@@ -53,7 +53,7 @@ public struct SignalConditioner {
 
     /// 4th-order Butterworth bandpass implemented as two cascaded biquad sections
     /// for each of the highpass and lowpass halves.
-    func bandpassFilter(_ samples: [Float], sampleRate: Double, lowCutoff: Double, highCutoff: Double) -> [Float] {
+    public func bandpassFilter(_ samples: [Float], sampleRate: Double, lowCutoff: Double, highCutoff: Double) -> [Float] {
         // Highpass at lowCutoff, then lowpass at highCutoff
         // Each is 2nd-order Butterworth, cascaded twice for 4th-order
         let highpassed = applyBiquadCascade(samples, coefficients: butterworthHighpass(cutoff: lowCutoff, sampleRate: sampleRate))
