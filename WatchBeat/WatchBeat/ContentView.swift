@@ -304,6 +304,9 @@ struct FrequencyBarsView: View {
         let maxPower = ratePowers.values.max() ?? 1.0
 
         GeometryReader { geo in
+            let labelHeight: CGFloat = 16
+            let barAreaHeight = geo.size.height - labelHeight - 4
+
             HStack(alignment: .bottom, spacing: 4) {
                 ForEach(rates, id: \.self) { rate in
                     let power = ratePowers[rate] ?? 0
@@ -311,13 +314,18 @@ struct FrequencyBarsView: View {
                     let isStrongest = power == maxPower && maxPower > 0 && power > 0
 
                     VStack(spacing: 2) {
+                        // Spacer pushes bar to bottom of bar area
+                        Spacer(minLength: 0)
+
                         RoundedRectangle(cornerRadius: 3)
                             .fill(isStrongest ? Color.green : Color.blue)
-                            .frame(height: max(2, normalizedHeight * (geo.size.height - 24)))
+                            .frame(height: max(2, normalizedHeight * barAreaHeight))
 
+                        // Label always at the bottom
                         Text("\(Int(rate.hz)) Hz")
                             .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
                             .foregroundStyle(isStrongest ? .primary : .secondary)
+                            .frame(height: labelHeight)
                     }
                 }
             }
