@@ -8,7 +8,7 @@ final class MeasurementCoordinator: ObservableObject {
     enum State: Equatable {
         case idle
         case monitoring
-        case recording(elapsed: Double, liveQuality: Int)
+        case recording
         case analyzing
         case result(MeasurementDisplayData)
         case error(String)
@@ -35,11 +35,12 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
 
+    /// Best quality seen so far during this recording session.
     private(set) var bestQualitySoFar: Int = 0
+    /// When recording started — the view uses this to compute elapsed time per frame.
+    private(set) var recordingStartTime: ContinuousClock.Instant?
     /// Guards the timer task from overwriting state after recording ends.
-    /// Both the timer and the main loop run on @MainActor, so access is serial.
     private var isRecording: Bool = false
-    private var recordingStartTime: ContinuousClock.Instant?
 
     let analysisWindow: Double = 15.0
     let qualityThreshold: Double = 0.80
@@ -122,7 +123,7 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        state = .recording(elapsed: 0, liveQuality: 0)
+        state = .recording
         bestQualitySoFar = 0
         isRecording = true
 
@@ -131,18 +132,14 @@ final class MeasurementCoordinator: ObservableObject {
         var bestResult: (MeasurementResult, PipelineDiagnostics)?
         var bestQuality: Double = 0
 
-        // Timer task: updates elapsed time + frequency bars every 200ms.
-        // Caps displayed time at maxRecordingTime so the counter never exceeds 60.
-        // Keeps running (showing "60s" with animated bars) while the analysis
-        // finishes its last cycle. Exits when isRecording goes false.
+        // Timer task: updates frequency bars every 200ms.
+        // Does NOT update state — the view uses TimelineView to read elapsed time
+        // directly from recordingStartTime at 60fps.
         monitorTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
                 guard self.isRecording else { break }
-                let rawElapsed = (ContinuousClock.now - startTime).asSeconds
-                let displayElapsed = min(rawElapsed, self.maxRecordingTime)
                 self.ratePowers = self.frequencyMonitor.ratePowers
-                self.state = .recording(elapsed: displayElapsed, liveQuality: self.bestQualitySoFar)
             }
         }
 
@@ -281,7 +278,7 @@ final class MeasurementCoordinator: ObservableObject {
     }
 }
 
-private extension Duration {
+extension Duration {
     var asSeconds: Double {
         let (seconds, attoseconds) = self.components
         return Double(seconds) + Double(attoseconds) * 1e-18

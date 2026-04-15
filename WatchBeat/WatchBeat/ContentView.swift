@@ -35,11 +35,10 @@ struct ContentView: View {
                                       barsTop: barsTop, barsHeight: barsHeight,
                                       buttonCenterY: buttonCenterY, cancelY: cancelY)
 
-                case .recording(let elapsed, let liveQuality):
+                case .recording:
                     recordingOverlay(w: w, h: h, headlineY: headlineY, captionY: captionY,
                                      barsTop: barsTop, barsHeight: barsHeight,
-                                     buttonCenterY: buttonCenterY, cancelY: cancelY,
-                                     elapsed: elapsed, liveQuality: liveQuality)
+                                     buttonCenterY: buttonCenterY, cancelY: cancelY)
 
                 case .analyzing:
                     ProgressView("Analyzing...").font(.title3)
@@ -145,51 +144,52 @@ struct ContentView: View {
 
     private func recordingOverlay(w: CGFloat, h: CGFloat, headlineY: CGFloat, captionY: CGFloat,
                                    barsTop: CGFloat, barsHeight: CGFloat,
-                                   buttonCenterY: CGFloat, cancelY: CGFloat,
-                                   elapsed: Double, liveQuality: Int) -> some View {
-        ZStack {
-            logoImage(w: w, headlineY: headlineY)
+                                   buttonCenterY: CGFloat, cancelY: CGFloat) -> some View {
+        // TimelineView drives smooth 60fps updates for elapsed time
+        TimelineView(.animation) { _ in
+            let elapsed = elapsedTime()
+            let best = coordinator.bestQualitySoFar
 
-            Text("Listening...")
-                .font(.headline)
-                .position(x: w / 2, y: headlineY)
+            ZStack {
+                logoImage(w: w, headlineY: headlineY)
 
-            Text(liveCaption(elapsed: elapsed, quality: liveQuality))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(width: max(1, w - 40))
-                .position(x: w / 2, y: captionY)
+                Text("Listening...")
+                    .font(.headline)
+                    .position(x: w / 2, y: headlineY)
 
-            // Bars in same position as monitoring
-            FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                .frame(width: max(1, w - 40), height: barsHeight)
-                .position(x: w / 2, y: barsTop + barsHeight / 2)
-
-            // Quality display + best-so-far progress bar
-            VStack(spacing: 6) {
-                HStack {
-                    Text("Quality:")
-                        .foregroundStyle(.secondary)
-                    Text("\(liveQuality)%")
-                        .font(.title2.bold().monospacedDigit())
-                        .foregroundStyle(qualityColor(liveQuality))
-                }
-                // Bar shows best quality collected so far
-                let best = coordinator.bestQualitySoFar
-                ProgressView(value: min(Double(best), 80), total: 80)
-                    .progressViewStyle(.linear)
-                    .tint(best >= 80 ? .green : best >= 50 ? .green.opacity(0.7) : best >= 30 ? .orange : .red)
-                    .frame(width: max(1, w - 40))
-                Text("Best: \(best)%")
-                    .font(.caption2)
+                Text(liveCaption(elapsed: elapsed, quality: best))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-            }
-            .position(x: w / 2, y: buttonCenterY - 10)
+                    .multilineTextAlignment(.center)
+                    .frame(width: max(1, w - 40))
+                    .position(x: w / 2, y: captionY)
 
-            Button("Cancel") { coordinator.cancelMeasurement() }
-                .foregroundStyle(.red)
-                .position(x: w / 2, y: cancelY)
+                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                    .frame(width: max(1, w - 40), height: barsHeight)
+                    .position(x: w / 2, y: barsTop + barsHeight / 2)
+
+                VStack(spacing: 6) {
+                    HStack {
+                        Text("Quality:")
+                            .foregroundStyle(.secondary)
+                        Text("\(best)%")
+                            .font(.title2.bold().monospacedDigit())
+                            .foregroundStyle(qualityColor(best))
+                    }
+                    ProgressView(value: min(Double(best), 80), total: 80)
+                        .progressViewStyle(.linear)
+                        .tint(best >= 80 ? .green : best >= 50 ? .green.opacity(0.7) : best >= 30 ? .orange : .red)
+                        .frame(width: max(1, w - 40))
+                    Text("Best: \(best)%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .position(x: w / 2, y: buttonCenterY - 10)
+
+                Button("Cancel") { coordinator.cancelMeasurement() }
+                    .foregroundStyle(.red)
+                    .position(x: w / 2, y: cancelY)
+            }
         }
     }
 
@@ -287,6 +287,12 @@ struct ContentView: View {
     }
 
     // MARK: - Helpers
+
+    /// Elapsed recording time, capped at maxRecordingTime. Computed fresh each frame.
+    private func elapsedTime() -> Double {
+        guard let start = coordinator.recordingStartTime else { return 0 }
+        return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
+    }
 
     private func liveCaption(elapsed: Double, quality: Int) -> String {
         if elapsed < 15 { return "Collecting... \(Int(elapsed))s" }
