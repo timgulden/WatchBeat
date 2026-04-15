@@ -132,15 +132,17 @@ final class MeasurementCoordinator: ObservableObject {
         var bestQuality: Double = 0
 
         // Timer task: updates elapsed time + frequency bars every 200ms.
-        // Only updates state while isRecording is true. Since both this task
-        // and the main loop run on @MainActor, access to isRecording is serial.
+        // Caps displayed time at maxRecordingTime so the counter never exceeds 60.
+        // Keeps running (showing "60s" with animated bars) while the analysis
+        // finishes its last cycle. Exits when isRecording goes false.
         monitorTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
                 guard self.isRecording else { break }
-                let elapsed = (ContinuousClock.now - startTime).asSeconds
+                let rawElapsed = (ContinuousClock.now - startTime).asSeconds
+                let displayElapsed = min(rawElapsed, self.maxRecordingTime)
                 self.ratePowers = self.frequencyMonitor.ratePowers
-                self.state = .recording(elapsed: elapsed, liveQuality: self.bestQualitySoFar)
+                self.state = .recording(elapsed: displayElapsed, liveQuality: self.bestQualitySoFar)
             }
         }
 
