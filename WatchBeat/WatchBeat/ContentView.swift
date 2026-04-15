@@ -66,15 +66,9 @@ struct ContentView: View {
     private func wheelAngle() -> Double {
         switch coordinator.state {
         case .monitoring:
-            guard let start = coordinator.monitoringStartTime else { return 0 }
-            // If bars already have data (returning from failed measurement),
-            // skip the 11:00→12:00 sweep and start at 12:00 (+30°)
             let hasData = coordinator.ratePowers.values.contains { $0 > 0 }
-            if hasData {
-                let elapsed = (ContinuousClock.now - start).asSeconds
-                // Brief snap to +30° (allow 0.3s for visual transition)
-                return min(elapsed / 0.3, 1.0) * 30
-            }
+            if hasData { return 30 } // buffer has data, hand at 12:00
+            guard let start = coordinator.monitoringStartTime else { return 0 }
             let elapsed = (ContinuousClock.now - start).asSeconds
             let progress = min(elapsed / 5.0, 1.0)
             return progress * 30 // 0° → +30°
