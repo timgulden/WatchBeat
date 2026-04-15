@@ -347,7 +347,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 24)
             .frame(width: max(1, w))
-            .position(x: w / 2, y: h * 0.38)
+            .position(x: w / 2, y: h * 0.42)
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Try Again")
