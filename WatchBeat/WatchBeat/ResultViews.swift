@@ -242,7 +242,7 @@ struct GMTHandView: View {
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let tipY = center.y - radius
             let tailY = center.y + radius * 0.15
-            let halfWidth: CGFloat = 3
+            let halfWidth: CGFloat = 1.5
             let arrowWidth: CGFloat = 8
             let arrowStart = tipY + 16
 

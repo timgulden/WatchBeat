@@ -57,29 +57,25 @@ struct ContentView: View {
 
     // MARK: - Shared logo
 
-    /// Rotation angle for the entire balance wheel + GMT hand assembly.
-    /// - monitoring: if buffer was empty at start, sweeps -30° → 0° over 5 seconds;
-    ///              if buffer was full (returning from failed measurement), stays at 0°
+    /// Rotation angle for wheel + hand assembly.
+    /// - monitoring: sweeps -30° → 0° over 5 seconds (hand goes 11:00 → 12:00)
     /// - recording: sweeps 0° → 360° over 60 seconds
     private func wheelAngle() -> Double {
         switch coordinator.state {
         case .monitoring:
-            guard let start = coordinator.monitoringStartTime else { return 0 }
+            guard let start = coordinator.monitoringStartTime else { return -30 }
             let elapsed = (ContinuousClock.now - start).asSeconds
-            // If monitoring started with a full buffer (e.g., after failed measurement),
-            // the bars appear instantly. Use a short sweep as visual cue.
-            let bufferFillTime = 5.0
-            let progress = min(elapsed / bufferFillTime, 1.0)
-            return -30 + progress * 30 // -30° → 0°
+            let progress = min(elapsed / 5.0, 1.0)
+            return -30 + progress * 30
         case .recording:
-            let elapsed = elapsedTime() // capped at 60
+            let elapsed = elapsedTime()
             return (elapsed / coordinator.maxRecordingTime) * 360
         default:
             return 0
         }
     }
 
-    /// Plain logo — no hand, no rotation. For the idle screen.
+    /// Plain logo — no hand, no marker. For the idle screen.
     private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
         let imageCenter = (80 + headlineY) / 2
         let imageSize = max(10, min(headlineY - 100, w - 80))
@@ -91,14 +87,14 @@ struct ContentView: View {
             .position(x: w / 2, y: imageCenter)
     }
 
-    /// Logo with GMT hand and marker — rotates as a unit. For monitoring/recording.
+    /// Logo with GMT hand — wheel and hand rotate together as a unit.
     private func logoWithHand(w: CGFloat, headlineY: CGFloat) -> some View {
         let imageCenter = (80 + headlineY) / 2
         let imageSize = max(10, min(headlineY - 100, w - 80))
         let radius = imageSize / 2
 
         return ZStack {
-            // Balance wheel + GMT hand rotate together
+            // Wheel + hand rotate together
             ZStack {
                 Image("WatchBeatMark")
                     .resizable()
@@ -110,7 +106,7 @@ struct ContentView: View {
             }
             .rotationEffect(.degrees(wheelAngle()))
 
-            // 12:00 marker stays fixed (does not rotate), pointing down
+            // 12:00 marker stays fixed
             GMTMarkerView()
                 .frame(width: 12, height: 12)
                 .offset(y: -radius - 2)
