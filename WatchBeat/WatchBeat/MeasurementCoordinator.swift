@@ -14,6 +14,9 @@ enum MeasurementConstants {
     static let analysisInterval: Double = 3.0
     /// Maximum recording duration in seconds.
     static let maxRecordingTime: Double = 60.0
+    /// Maximum plausible rate error in s/day. Matches industry standard (±999).
+    /// Anything beyond this is a measurement error, not a real watch rate.
+    static let maxPlausibleRateError: Double = 999.0
 
     /// Quality color thresholds for UI display.
     static func qualityColor(_ percent: Int) -> Color {
@@ -59,6 +62,8 @@ final class MeasurementCoordinator: ObservableObject {
 
     /// Best quality seen so far during this recording session.
     private(set) var bestQualitySoFar: Int = 0
+    /// Quality from the most recent analysis pass (may be lower than best).
+    private(set) var currentQuality: Int = 0
     /// When recording started — the view uses this to compute elapsed time per frame.
     private(set) var recordingStartTime: ContinuousClock.Instant?
     /// When monitoring (listening) started — for the initial hand sweep.
@@ -171,10 +176,12 @@ final class MeasurementCoordinator: ObservableObject {
 
         state = .recording
         bestQualitySoFar = 0
+        currentQuality = 0
         isRecording = true
 
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
+        let maxRate = MeasurementConstants.maxPlausibleRateError
         var bestResult: (MeasurementResult, PipelineDiagnostics)?
         var bestQuality: Double = 0
 
@@ -207,14 +214,16 @@ final class MeasurementCoordinator: ObservableObject {
                 }.value
 
                 let quality = result.qualityScore
-                bestQualitySoFar = max(bestQualitySoFar, Int(quality * 100))
+                let plausible = abs(result.rateErrorSecondsPerDay) <= maxRate
+                currentQuality = Int(quality * 100)
+                bestQualitySoFar = max(bestQualitySoFar, currentQuality)
 
-                if quality > bestQuality {
+                if quality > bestQuality && plausible {
                     bestQuality = quality
                     bestResult = (result, diagnostics)
                 }
 
-                if quality >= qualityThreshold {
+                if quality >= qualityThreshold && plausible {
                     break
                 }
             }
@@ -234,8 +243,10 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Show result or error
-        if let (result, diagnostics) = bestResult, result.qualityScore >= minimumDisplayQuality {
+        // Show result or error — must meet quality threshold and be physically plausible
+        if let (result, diagnostics) = bestResult,
+           result.qualityScore >= minimumDisplayQuality,
+           abs(result.rateErrorSecondsPerDay) <= maxRate {
             let scoresText = diagnostics.rateScores
                 .sorted { $0.magnitude > $1.magnitude }
                 .prefix(3)

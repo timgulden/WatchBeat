@@ -267,11 +267,12 @@ public struct MeasurementPipeline {
     }
 
     /// Peak FFT magnitude in a small window around a target frequency.
-    /// Window is ±0.2 Hz — narrow enough to avoid overlap between adjacent
-    /// beat rates (closest pair is 18000/19800 bph at 5.0/5.5 Hz, 0.5 Hz apart).
+    /// Window is ±0.5 Hz — intentionally wide so adjacent rates score similarly,
+    /// which triggers the more thorough try-all-rates path with tick extraction.
+    /// (The FrequencyMonitor display uses ±0.2 Hz to avoid visual overlap.)
     private func peakMagnitudeNear(magnitudes: [Float], freqResolution: Double, hz: Double) -> Float {
         let targetBin = Int(round(hz / freqResolution))
-        let windowRadius = max(1, Int(ceil(0.2 / freqResolution)))
+        let windowRadius = max(1, Int(ceil(0.5 / freqResolution)))
         let lo = max(0, targetBin - windowRadius)
         let hi = min(magnitudes.count - 1, targetBin + windowRadius)
         var peak: Float = 0

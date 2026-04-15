@@ -224,6 +224,7 @@ struct RecordingScreen: View {
     var body: some View {
         TimelineView(.animation) { _ in
             let elapsed = elapsedTime()
+            let current = coordinator.currentQuality
             let best = coordinator.bestQualitySoFar
 
             ScreenLayout {
@@ -242,22 +243,33 @@ struct RecordingScreen: View {
                     .frame(height: 240)
             } controls: {
                 VStack(spacing: 10) {
-                    // Quality display in place of action button
-                    VStack(spacing: 6) {
-                        HStack {
-                            Text("Quality:")
+                    VStack(spacing: 4) {
+                        // Current quality — small
+                        HStack(spacing: 4) {
+                            Text("Current:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("\(current)%")
+                                .font(.caption.bold().monospacedDigit())
+                                .foregroundStyle(MeasurementConstants.qualityColor(current))
+                        }
+                        // Progress bar — tracks best
+                        ProgressView(value: min(Double(best), 80), total: 80)
+                            .progressViewStyle(.linear)
+                            .tint(MeasurementConstants.qualityColor(best))
+                        // Best quality — prominent
+                        HStack(spacing: 4) {
+                            Text("Best:")
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
                             Text("\(best)%")
                                 .font(.title2.bold().monospacedDigit())
                                 .foregroundStyle(MeasurementConstants.qualityColor(best))
                         }
-                        ProgressView(value: min(Double(best), 80), total: 80)
-                            .progressViewStyle(.linear)
-                            .tint(MeasurementConstants.qualityColor(best))
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Measurement quality")
-                    .accessibilityValue("\(best) percent")
+                    .accessibilityValue("Current \(current) percent, best \(best) percent")
                     Button("Cancel") { coordinator.cancelMeasurement() }
                         .foregroundStyle(.red)
                 }
