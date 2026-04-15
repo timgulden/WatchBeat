@@ -110,10 +110,10 @@ struct ContentView: View {
             }
             .rotationEffect(.degrees(wheelAngle()))
 
-            // 12:00 marker stays fixed (does not rotate)
+            // 12:00 marker stays fixed (does not rotate), pointing down
             GMTMarkerView()
                 .frame(width: 12, height: 12)
-                .offset(y: -radius - 8)
+                .offset(y: -radius - 2)
         }
         .position(x: w / 2, y: imageCenter)
     }

@@ -265,14 +265,14 @@ struct GMTHandView: View {
     }
 }
 
-/// A small triangle marker at the 12:00 position.
+/// A small inverted triangle marker at the 12:00 position, pointing down.
 struct GMTMarkerView: View {
     var body: some View {
         Canvas { context, size in
             var path = Path()
-            path.move(to: CGPoint(x: size.width / 2, y: 0))
-            path.addLine(to: CGPoint(x: 0, y: size.height))
-            path.addLine(to: CGPoint(x: size.width, y: size.height))
+            path.move(to: CGPoint(x: size.width / 2, y: size.height))
+            path.addLine(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: size.width, y: 0))
             path.closeSubpath()
             context.fill(path, with: .color(.black))
         }
