@@ -349,10 +349,10 @@ struct ContentView: View {
     }
 
     private func liveCaption(elapsed: Double, quality: Int) -> String {
-        if elapsed < 15 { return "Collecting... \(Int(elapsed))s" }
+        if elapsed < 15 { return "Collecting..." }
         if quality >= 80 { return "Great signal! Finishing..." }
-        if quality > 0 { return "Searching for good contact... \(Int(elapsed))s" }
-        return "Waiting for first analysis... \(Int(elapsed))s"
+        if quality > 0 { return "Searching for good contact..." }
+        return "Waiting for first analysis..."
     }
 
     private func qualityColor(_ q: Int) -> Color {
