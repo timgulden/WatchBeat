@@ -57,19 +57,22 @@ struct ContentView: View {
 
     // MARK: - Shared logo
 
-    /// Rotation angle for wheel + hand assembly.
-    /// - monitoring: sweeps -30° → 0° over 5 seconds (hand goes 11:00 → 12:00)
-    /// - recording: sweeps 0° → 360° over 60 seconds
+    /// Rotation angle for the wheel + hand assembly.
+    /// - idle: 0° (normal position, no hand shown)
+    /// - monitoring: 0° → +30° over 5 seconds (hand drawn at -30° within wheel,
+    ///   so it sweeps from 11:00 to 12:00 visually)
+    /// - recording: +30° → +390° over 60 seconds (one full revolution from the
+    ///   +30° home position, ending back at +30° with hand at 12:00)
     private func wheelAngle() -> Double {
         switch coordinator.state {
         case .monitoring:
-            guard let start = coordinator.monitoringStartTime else { return -30 }
+            guard let start = coordinator.monitoringStartTime else { return 0 }
             let elapsed = (ContinuousClock.now - start).asSeconds
             let progress = min(elapsed / 5.0, 1.0)
-            return -30 + progress * 30
+            return progress * 30 // 0° → +30°
         case .recording:
             let elapsed = elapsedTime()
-            return (elapsed / coordinator.maxRecordingTime) * 360
+            return 30 + (elapsed / coordinator.maxRecordingTime) * 360 // +30° → +390°
         default:
             return 0
         }
@@ -103,6 +106,7 @@ struct ContentView: View {
                     .opacity(0.85)
 
                 GMTHandView(radius: radius * 0.85)
+                    .rotationEffect(.degrees(-30)) // hand drawn at 11:00 within wheel
             }
             .rotationEffect(.degrees(wheelAngle()))
 
