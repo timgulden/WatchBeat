@@ -55,57 +55,67 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.bottom)
     }
 
-    // MARK: - Shared logo with GMT hand
+    // MARK: - Shared logo
 
-    /// The angle (in degrees, clockwise from 12:00) for the GMT hand.
-    /// - idle: 330° (11:00 position)
-    /// - monitoring: sweeps 330° → 360° over 5 seconds, then holds at 360° (12:00)
-    /// - recording: sweeps 0° → 360° over 60 seconds, capped at 360°
-    private func gmtHandAngle() -> Double {
+    /// Rotation angle for the entire balance wheel + GMT hand assembly.
+    /// - monitoring: if buffer was empty at start, sweeps -30° → 0° over 5 seconds;
+    ///              if buffer was full (returning from failed measurement), stays at 0°
+    /// - recording: sweeps 0° → 360° over 60 seconds
+    private func wheelAngle() -> Double {
         switch coordinator.state {
-        case .idle:
-            return 330 // 11:00
         case .monitoring:
-            guard let start = coordinator.monitoringStartTime else { return 330 }
+            guard let start = coordinator.monitoringStartTime else { return 0 }
             let elapsed = (ContinuousClock.now - start).asSeconds
-            let progress = min(elapsed / 5.0, 1.0) // 0→1 over 5 seconds
-            return 330 + progress * 30 // 330° → 360°
+            // If monitoring started with a full buffer (e.g., after failed measurement),
+            // the bars appear instantly. Use a short sweep as visual cue.
+            let bufferFillTime = 5.0
+            let progress = min(elapsed / bufferFillTime, 1.0)
+            return -30 + progress * 30 // -30° → 0°
         case .recording:
-            let elapsed = elapsedTime() // already capped at 60
+            let elapsed = elapsedTime() // capped at 60
             return (elapsed / coordinator.maxRecordingTime) * 360
         default:
             return 0
         }
     }
 
+    /// Plain logo — no hand, no rotation. For the idle screen.
+    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
+        let imageCenter = (80 + headlineY) / 2
+        let imageSize = max(10, min(headlineY - 100, w - 80))
+        return Image("WatchBeatMark")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: imageSize, height: imageSize)
+            .opacity(0.85)
+            .position(x: w / 2, y: imageCenter)
+    }
+
+    /// Logo with GMT hand and marker — rotates as a unit. For monitoring/recording.
     private func logoWithHand(w: CGFloat, headlineY: CGFloat) -> some View {
         let imageCenter = (80 + headlineY) / 2
         let imageSize = max(10, min(headlineY - 100, w - 80))
         let radius = imageSize / 2
 
         return ZStack {
-            // Balance wheel
-            Image("WatchBeatMark")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: imageSize, height: imageSize)
-                .opacity(0.85)
+            // Balance wheel + GMT hand rotate together
+            ZStack {
+                Image("WatchBeatMark")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: imageSize, height: imageSize)
+                    .opacity(0.85)
 
-            // 12:00 marker (black triangle above the wheel)
+                GMTHandView(radius: radius * 0.85)
+            }
+            .rotationEffect(.degrees(wheelAngle()))
+
+            // 12:00 marker stays fixed (does not rotate)
             GMTMarkerView()
                 .frame(width: 12, height: 12)
                 .offset(y: -radius - 8)
-
-            // GMT hand
-            GMTHandView(radius: radius * 0.85)
-                .rotationEffect(.degrees(gmtHandAngle()))
         }
         .position(x: w / 2, y: imageCenter)
-    }
-
-    // Keep the old logoImage for backward compatibility during transition
-    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
-        logoWithHand(w: w, headlineY: headlineY)
     }
 
     // MARK: - Idle
@@ -193,7 +203,7 @@ struct ContentView: View {
             let best = coordinator.bestQualitySoFar
 
             ZStack {
-                logoImage(w: w, headlineY: headlineY)
+                logoWithHand(w: w, headlineY: headlineY)
 
                 Text("Listening...")
                     .font(.headline)
