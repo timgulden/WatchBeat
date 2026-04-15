@@ -77,12 +77,33 @@ struct RateDialView: View {
                         Text("beat error")
                             .font(.system(size: size * 0.05))
                             .foregroundStyle(.secondary)
+                        Text(beatErrorLabel(be))
+                            .font(.system(size: size * 0.055, weight: .semibold))
+                            .foregroundStyle(beatErrorColor(be))
                     }
                     .position(x: center.x, y: center.y + radius * 0.85)
                 }
             }
         }
         .aspectRatio(1, contentMode: .fit)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Rate error")
+        .accessibilityValue(rateErrorAccessibilityDescription)
+    }
+
+    private var rateErrorAccessibilityDescription: String {
+        let direction = rateError > 0 ? "fast" : rateError < 0 ? "slow" : "accurate"
+        var desc = "\(formatError(rateError)) seconds per day, \(direction)"
+        if let be = beatErrorMs {
+            desc += ". Beat error \(String(format: "%.1f", be)) milliseconds, \(beatErrorLabel(be).lowercased())"
+        }
+        return desc
+    }
+
+    private func beatErrorLabel(_ ms: Double) -> String {
+        if ms < 1.0 { return "GOOD" }
+        if ms < 3.0 { return "FAIR" }
+        return "HIGH"
     }
 
     private func beatErrorColor(_ ms: Double) -> Color {
@@ -199,6 +220,9 @@ struct TimegraphView: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Timegraph")
+                .accessibilityValue("\(residuals.count) ticks plotted")
             }
         }
     }
@@ -209,10 +233,12 @@ struct TimegraphView: View {
 struct QualityBadgeView: View {
     let percent: Int
 
+    private var color: Color { MeasurementConstants.qualityColor(percent) }
+
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(qualityColor)
+                .fill(color)
                 .frame(width: 10, height: 10)
 
             Text("\(percent)%")
@@ -220,14 +246,17 @@ struct QualityBadgeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(qualityColor.opacity(0.1))
+        .background(color.opacity(0.1))
         .cornerRadius(16)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Quality")
+        .accessibilityValue("\(percent) percent, \(qualityDescription)")
     }
 
-    private var qualityColor: Color {
-        if percent >= 50 { return .green }
-        if percent >= 30 { return .orange }
-        return .red
+    private var qualityDescription: String {
+        if percent >= 50 { return "good" }
+        if percent >= 30 { return "fair" }
+        return "poor"
     }
 }
 

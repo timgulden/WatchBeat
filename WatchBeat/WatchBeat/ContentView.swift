@@ -3,322 +3,386 @@ import WatchBeatCore
 
 struct ContentView: View {
     @StateObject private var coordinator = MeasurementCoordinator()
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        Group {
+            switch coordinator.state {
+            case .idle:
+                IdleScreen(coordinator: coordinator)
+            case .monitoring:
+                MonitoringScreen(coordinator: coordinator)
+            case .recording:
+                RecordingScreen(coordinator: coordinator)
+            case .analyzing:
+                AnalyzingScreen()
+            case .result(let data):
+                ResultScreen(data: data, coordinator: coordinator)
+            case .error:
+                ErrorScreen(coordinator: coordinator)
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background {
+                coordinator.handleBackgrounded()
+            }
+        }
+    }
+}
+
+// MARK: - Shared Layout
+
+/// Consistent screen layout used by idle, monitoring, recording, and error screens.
+/// Anchors the button area at a fixed distance from the bottom so buttons don't
+/// shift between screens. The logo area flexes to fill remaining space.
+struct ScreenLayout<Logo: View, TextContent: View, Bars: View, Controls: View>: View {
+    @ViewBuilder var logo: Logo
+    @ViewBuilder var textContent: TextContent
+    @ViewBuilder var bars: Bars
+    @ViewBuilder var controls: Controls
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
+
+            // Logo — fills available space
+            logo
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // Text area — top-aligned with minimum height so the headline stays
+            // in the same position regardless of caption length. 80pt covers
+            // 2 lines at subheadline size on all iPhone widths.
+            textContent
+                .padding(.horizontal, 20)
+                .frame(minHeight: 80, alignment: .top)
+                .padding(.bottom, 12)
+
+            // Frequency bars
+            bars
+                .padding(.horizontal, 20)
+
+            // Bottom controls — fixed height region
+            controls
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 20)
+                .frame(height: 110)
+        }
+    }
+}
+
+// MARK: - Logo Helpers
+
+/// Watch logo with optional GMT hand overlay. Always renders the same view
+/// hierarchy (wheel + hand + marker) so layout is identical regardless of
+/// whether the hand is visible. Hand and marker are hidden via opacity.
+struct WatchLogo: View {
+    var showHand: Bool = false
+    var angle: Double = 0
 
     var body: some View {
         GeometryReader { geo in
-            let h = geo.size.height
-            let w = geo.size.width
-
-            // Fixed positions measured from bottom of safe area
-            let cancelY = h - 100
-            let buttonCenterY = h - 145
-            let barsBottom = h - 195
-            let barsHeight: CGFloat = 240
-            let barsTop = barsBottom - barsHeight
-            let captionY = barsTop - 20
-            let headlineY = captionY - 30
+            let size = min(geo.size.width, geo.size.height)
+            let radius = size / 2
 
             ZStack {
-                // Title — always at top
-                Text("WatchBeat")
-                    .font(.largeTitle.bold())
-                    .position(x: w / 2, y: 50)
+                // Wheel + hand always in same ZStack — rotate together
+                ZStack {
+                    Image("WatchBeatMark")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: size, height: size)
+                        .opacity(0.85)
 
-                switch coordinator.state {
-                case .idle:
-                    idleOverlay(w: w, h: h, headlineY: headlineY, captionY: captionY,
-                                barsTop: barsTop, barsBottom: barsBottom, barsHeight: barsHeight,
-                                buttonCenterY: buttonCenterY)
+                    GMTHandView(radius: radius * 0.85)
+                        .rotationEffect(.degrees(-30))
+                        .opacity(showHand ? 1 : 0)
+                }
+                .rotationEffect(.degrees(angle))
 
-                case .monitoring:
-                    monitoringOverlay(w: w, headlineY: headlineY, captionY: captionY,
-                                      barsTop: barsTop, barsHeight: barsHeight,
-                                      buttonCenterY: buttonCenterY, cancelY: cancelY)
+                // 12:00 marker stays fixed
+                GMTMarkerView()
+                    .frame(width: 12, height: 12)
+                    .offset(y: -radius - 2)
+                    .opacity(showHand ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: 280, maxHeight: 280)
+        .padding(30)
+        .accessibilityHidden(true)
+    }
+}
 
-                case .recording:
-                    recordingOverlay(w: w, h: h, headlineY: headlineY, captionY: captionY,
-                                     barsTop: barsTop, barsHeight: barsHeight,
-                                     buttonCenterY: buttonCenterY, cancelY: cancelY)
+// MARK: - Action Button Style
 
-                case .analyzing:
-                    ProgressView("Analyzing...").font(.title3)
-                        .position(x: w / 2, y: h / 2)
+/// Consistent action button used across all screens.
+struct ActionButton: View {
+    let title: String
+    let action: () -> Void
 
-                case .result(let data):
-                    resultOverlay(data: data, w: w, h: h)
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.title3.bold())
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+}
 
-                case .error(let message):
-                    errorOverlay(message: message, w: w, h: h, buttonCenterY: buttonCenterY)
+// MARK: - Idle Screen
+
+struct IdleScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
+        ScreenLayout {
+            WatchLogo()
+        } textContent: {
+            VStack(spacing: 6) {
+                Text("Position your watch against the mic")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                Text("Press your iPhone mic against the watch caseback, then tap Listen.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        } bars: {
+            // No bars on idle screen — use empty space to match bar height
+            Color.clear.frame(height: 240)
+        } controls: {
+            VStack(spacing: 10) {
+                ActionButton(title: "Listen") {
+                    coordinator.startMonitoring()
                 }
             }
         }
-        .edgesIgnoringSafeArea(.bottom)
     }
+}
 
-    // MARK: - Shared logo
+// MARK: - Monitoring Screen
 
-    /// Rotation angle for the wheel + hand assembly.
-    /// - idle: 0° (normal position, no hand shown)
-    /// - monitoring: 0° → +30° over 5 seconds (hand drawn at -30° within wheel,
-    ///   so it sweeps from 11:00 to 12:00 visually)
-    /// - recording: +30° → +390° over 60 seconds (one full revolution from the
-    ///   +30° home position, ending back at +30° with hand at 12:00)
-    private func wheelAngle() -> Double {
-        switch coordinator.state {
-        case .monitoring:
-            let hasData = coordinator.ratePowers.values.contains { $0 > 0 }
-            if hasData { return 30 } // buffer has data, hand at 12:00
-            guard let start = coordinator.monitoringStartTime else { return 0 }
-            let elapsed = (ContinuousClock.now - start).asSeconds
-            let progress = min(elapsed / 5.0, 1.0)
-            return progress * 30 // 0° → +30°
-        case .recording:
-            let elapsed = elapsedTime()
-            return 30 + (elapsed / coordinator.maxRecordingTime) * 360 // +30° → +390°
-        default:
-            return 0
-        }
-    }
+struct MonitoringScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
 
-    /// Plain logo — no hand, no marker. For the idle screen.
-    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
-        let imageCenter = (80 + headlineY) / 2
-        let imageSize = max(10, min(headlineY - 100, w - 80))
-        return Image("WatchBeatMark")
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: imageSize, height: imageSize)
-            .opacity(0.85)
-            .position(x: w / 2, y: imageCenter)
-    }
-
-    /// Logo with GMT hand — wheel and hand rotate together as a unit.
-    private func logoWithHand(w: CGFloat, headlineY: CGFloat) -> some View {
-        let imageCenter = (80 + headlineY) / 2
-        let imageSize = max(10, min(headlineY - 100, w - 80))
-        let radius = imageSize / 2
-
-        return ZStack {
-            // Wheel + hand rotate together
-            ZStack {
-                Image("WatchBeatMark")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: imageSize, height: imageSize)
-                    .opacity(0.85)
-
-                GMTHandView(radius: radius * 0.85)
-                    .rotationEffect(.degrees(-30)) // hand drawn at 11:00 within wheel
-            }
-            .rotationEffect(.degrees(wheelAngle()))
-
-            // 12:00 marker stays fixed
-            GMTMarkerView()
-                .frame(width: 12, height: 12)
-                .offset(y: -radius - 2)
-        }
-        .position(x: w / 2, y: imageCenter)
-    }
-
-    // MARK: - Idle
-
-    private func idleOverlay(w: CGFloat, h: CGFloat, headlineY: CGFloat, captionY: CGFloat,
-                              barsTop: CGFloat, barsBottom: CGFloat, barsHeight: CGFloat,
-                              buttonCenterY: CGFloat) -> some View {
-        ZStack {
-            logoImage(w: w, headlineY: headlineY)
-
-            Text("Position your watch against the mic")
-                .font(.headline)
-                .multilineTextAlignment(.center)
-                .frame(width: max(1, w - 40))
-                .position(x: w / 2, y: headlineY)
-
-            Text("Press your iPhone mic against the watch caseback, then tap Listen.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(width: max(1, w - 40))
-                .position(x: w / 2, y: captionY)
-
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Listen")
-                    .font(.title3.bold())
-                    .frame(width: max(1, w - 40))
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.borderedProminent)
-            .position(x: w / 2, y: buttonCenterY)
-        }
-    }
-
-    // MARK: - Monitoring
-
-    private func monitoringOverlay(w: CGFloat, headlineY: CGFloat, captionY: CGFloat,
-                                    barsTop: CGFloat, barsHeight: CGFloat,
-                                    buttonCenterY: CGFloat, cancelY: CGFloat) -> some View {
+    var body: some View {
         TimelineView(.animation) { _ in
-        ZStack {
-            logoWithHand(w: w, headlineY: headlineY)
-
-            Text("Position your watch against the mic")
-                .font(.headline)
-                .multilineTextAlignment(.center)
-                .frame(width: max(1, w - 40))
-                .position(x: w / 2, y: headlineY)
-
-            Text("Look for a peak at your watch's beat rate")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(width: max(1, w - 40))
-                .position(x: w / 2, y: captionY)
-
-            FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                .frame(width: max(1, w - 40), height: barsHeight)
-                .position(x: w / 2, y: barsTop + barsHeight / 2)
-
-            Button(action: { coordinator.startMeasurement() }) {
-                Text("Measure")
-                    .font(.title3.bold())
-                    .frame(width: max(1, w - 40))
-                    .padding(.vertical, 10)
+            ScreenLayout {
+                WatchLogo(showHand: true, angle: wheelAngle())
+            } textContent: {
+                VStack(spacing: 6) {
+                    Text("Position your watch against the mic")
+                        .font(.headline)
+                        .multilineTextAlignment(.center)
+                    Text("Look for a peak at your watch's beat rate")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            } bars: {
+                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                    .frame(height: 240)
+            } controls: {
+                VStack(spacing: 10) {
+                    ActionButton(title: "Measure") {
+                        coordinator.startMeasurement()
+                    }
+                    Button("Cancel") { coordinator.stopMonitoring() }
+                        .foregroundStyle(.red)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .position(x: w / 2, y: buttonCenterY)
-
-            Button("Cancel") { coordinator.stopMonitoring() }
-                .foregroundStyle(.red)
-                .position(x: w / 2, y: cancelY)
         }
-        } // TimelineView
     }
 
-    // MARK: - Recording
+    private func wheelAngle() -> Double {
+        // After the first monitoring session, always start at 12:00
+        guard coordinator.needsSweep else { return 30 }
+        guard let start = coordinator.monitoringStartTime else { return 0 }
+        let hasData = coordinator.ratePowers.values.contains { $0 > 0 }
+        // Once data arrives, lock to 12:00 — sweep is done
+        if hasData { return 30 }
+        // Cold start: 1-second pause, then 5-second sweep from 11:00 to 12:00
+        let elapsed = (ContinuousClock.now - start).asSeconds
+        let sweepElapsed = max(0, elapsed - 1.0)
+        let progress = min(sweepElapsed / 5.0, 1.0)
+        return progress * 30
+    }
+}
 
-    private func recordingOverlay(w: CGFloat, h: CGFloat, headlineY: CGFloat, captionY: CGFloat,
-                                   barsTop: CGFloat, barsHeight: CGFloat,
-                                   buttonCenterY: CGFloat, cancelY: CGFloat) -> some View {
-        // TimelineView drives smooth 60fps updates for elapsed time
+// MARK: - Recording Screen
+
+struct RecordingScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
         TimelineView(.animation) { _ in
             let elapsed = elapsedTime()
             let best = coordinator.bestQualitySoFar
 
-            ZStack {
-                logoWithHand(w: w, headlineY: headlineY)
-
-                Text("Listening...")
-                    .font(.headline)
-                    .position(x: w / 2, y: headlineY)
-
-                Text(liveCaption(elapsed: elapsed, quality: best))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(width: max(1, w - 40))
-                    .position(x: w / 2, y: captionY)
-
-                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                    .frame(width: max(1, w - 40), height: barsHeight)
-                    .position(x: w / 2, y: barsTop + barsHeight / 2)
-
+            ScreenLayout {
+                WatchLogo(showHand: true, angle: 30 + (elapsed / coordinator.maxRecordingTime) * 360)
+            } textContent: {
                 VStack(spacing: 6) {
-                    HStack {
-                        Text("Quality:")
-                            .foregroundStyle(.secondary)
-                        Text("\(best)%")
-                            .font(.title2.bold().monospacedDigit())
-                            .foregroundStyle(qualityColor(best))
-                    }
-                    ProgressView(value: min(Double(best), 80), total: 80)
-                        .progressViewStyle(.linear)
-                        .tint(best >= 80 ? .green : best >= 50 ? .green.opacity(0.7) : best >= 30 ? .orange : .red)
-                        .frame(width: max(1, w - 40))
-                    Text("Best: \(best)%")
-                        .font(.caption2)
+                    Text("Listening...")
+                        .font(.headline)
+                    Text(liveCaption(elapsed: elapsed, quality: best))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
-                .position(x: w / 2, y: buttonCenterY - 10)
-
-                Button("Cancel") { coordinator.cancelMeasurement() }
-                    .foregroundStyle(.red)
-                    .position(x: w / 2, y: cancelY)
+            } bars: {
+                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                    .frame(height: 240)
+            } controls: {
+                VStack(spacing: 10) {
+                    // Quality display in place of action button
+                    VStack(spacing: 6) {
+                        HStack {
+                            Text("Quality:")
+                                .foregroundStyle(.secondary)
+                            Text("\(best)%")
+                                .font(.title2.bold().monospacedDigit())
+                                .foregroundStyle(MeasurementConstants.qualityColor(best))
+                        }
+                        ProgressView(value: min(Double(best), 80), total: 80)
+                            .progressViewStyle(.linear)
+                            .tint(MeasurementConstants.qualityColor(best))
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Measurement quality")
+                    .accessibilityValue("\(best) percent")
+                    Button("Cancel") { coordinator.cancelMeasurement() }
+                        .foregroundStyle(.red)
+                }
             }
         }
     }
 
-    // MARK: - Result (uses its own layout, fills the screen)
+    private func elapsedTime() -> Double {
+        guard let start = coordinator.recordingStartTime else { return 0 }
+        return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
+    }
 
-    private func resultOverlay(data: MeasurementCoordinator.MeasurementDisplayData, w: CGFloat, h: CGFloat) -> some View {
-        VStack(spacing: 2) {
-            // Rate and quality
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("\(data.rateBPH) bph")
-                        .font(.subheadline.bold())
-                    Text("\(formatOscHz(Double(data.rateBPH) / 3600.0 / 2.0)) Hz")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    QualityBadgeView(percent: data.qualityPercent)
-                    Text("Measurement Quality")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-            }
+    private func liveCaption(elapsed: Double, quality: Int) -> String {
+        if elapsed < 15 { return "Collecting..." }
+        if quality >= 80 { return "Great signal! Finishing..." }
+        if quality > 0 { return "Searching for good contact..." }
+        return "Waiting for first analysis..."
+    }
 
-            // Dial
-            RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
-                .frame(height: 310)
-                .padding(.top, -8)
+}
 
-            // Timegraph
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text("Timegraph")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
+// MARK: - Analyzing Screen
+
+struct AnalyzingScreen: View {
+    var body: some View {
+        VStack {
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
+            Spacer()
+            ProgressView("Analyzing...")
+                .font(.title3)
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Result Screen
+
+struct ResultScreen: View {
+    let data: MeasurementCoordinator.MeasurementDisplayData
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+
+            VStack(spacing: 2) {
+                // Rate and quality
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("\(data.rateBPH) bph")
+                            .font(.subheadline.bold())
+                        Text("\(formatOscHz(Double(data.rateBPH) / 3600.0 / 2.0)) Hz")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    HStack(spacing: 6) {
-                        Circle().fill(.blue).frame(width: 5, height: 5)
-                        Text("tick").font(.caption2).foregroundStyle(.secondary)
-                        Circle().fill(.cyan).frame(width: 5, height: 5)
-                        Text("tock").font(.caption2).foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        QualityBadgeView(percent: data.qualityPercent)
+                        Text("Measurement Quality")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
                     }
                 }
 
-                TimegraphView(
-                    residuals: data.tickResiduals,
-                    rateErrorPerDay: data.rateError,
-                    beatRateHz: Double(data.rateBPH) / 3600.0
-                )
-                .frame(height: 110)
+                // Dial
+                RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
+                    .frame(maxHeight: 310)
+                    .padding(.top, -8)
+
+                // Timegraph — centered between dial and button
+                Spacer(minLength: 8)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("Timegraph")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle().fill(.blue).frame(width: 5, height: 5)
+                            Text("tick").font(.caption2).foregroundStyle(.secondary)
+                            Circle().fill(.cyan).frame(width: 5, height: 5)
+                            Text("tock").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    TimegraphView(
+                        residuals: data.tickResiduals,
+                        rateErrorPerDay: data.rateError,
+                        beatRateHz: Double(data.rateBPH) / 3600.0
+                    )
+                    .aspectRatio(1.618, contentMode: .fit)
+                }
+
+                Spacer(minLength: 8)
+
+                ActionButton(title: "Measure Again") {
+                    coordinator.startMonitoring()
+                }
+                .padding(.bottom, 20)
             }
-            .padding(.top, -4)
+            .padding(.horizontal, 20)
+        }
+    }
+}
+
+// MARK: - Error Screen
+
+struct ErrorScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
 
             Spacer()
 
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Measure Again")
-                    .font(.title3.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.bottom, 120)
-        }
-        .padding(.top, 80) // clear the WatchBeat title
-        .padding(.horizontal, 20)
-    }
-
-    // MARK: - Error
-
-    private func errorOverlay(message: String, w: CGFloat, h: CGFloat, buttonCenterY: CGFloat) -> some View {
-        ZStack {
             VStack(alignment: .leading, spacing: 16) {
-                // Header
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.title2)
@@ -346,17 +410,14 @@ struct ContentView: View {
                     .padding(.top, 4)
             }
             .padding(.horizontal, 24)
-            .frame(width: max(1, w))
-            .position(x: w / 2, y: h * 0.42)
 
-            Button(action: { coordinator.startMonitoring() }) {
-                Text("Try Again")
-                    .font(.title3.bold())
-                    .frame(width: max(1, w - 40))
-                    .padding(.vertical, 10)
+            Spacer()
+
+            ActionButton(title: "Try Again") {
+                coordinator.startMonitoring()
             }
-            .buttonStyle(.borderedProminent)
-            .position(x: w / 2, y: buttonCenterY)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
         }
     }
 
@@ -370,77 +431,6 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Elapsed recording time, capped at maxRecordingTime. Computed fresh each frame.
-    private func elapsedTime() -> Double {
-        guard let start = coordinator.recordingStartTime else { return 0 }
-        return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
-    }
-
-    private func liveCaption(elapsed: Double, quality: Int) -> String {
-        if elapsed < 15 { return "Collecting..." }
-        if quality >= 80 { return "Great signal! Finishing..." }
-        if quality > 0 { return "Searching for good contact..." }
-        return "Waiting for first analysis..."
-    }
-
-    private func qualityColor(_ q: Int) -> Color {
-        if q >= 50 { return .green }
-        if q >= 30 { return .orange }
-        if q > 0 { return .red }
-        return .secondary
-    }
-}
-
-/// Format oscillation Hz for display — shows decimal for non-integer values like 2.75.
-private func formatOscHz(_ hz: Double) -> String {
-    if hz == hz.rounded() { return "\(Int(hz))" }
-    let oneDecimal = String(format: "%.1f", hz)
-    if Double(oneDecimal) == hz { return oneDecimal }
-    return String(format: "%.2f", hz)
-}
-
-// MARK: - Frequency Bars
-
-struct FrequencyBarsView: View {
-    let ratePowers: [StandardBeatRate: Float]
-    let selectedRate: StandardBeatRate?
-
-    private let rates = StandardBeatRate.allCases
-
-    var body: some View {
-        let maxPower = ratePowers.values.max() ?? 1.0
-
-        GeometryReader { geo in
-            let labelHeight: CGFloat = 16
-            let barAreaHeight = max(10, geo.size.height - labelHeight - 4)
-
-            HStack(alignment: .bottom, spacing: 4) {
-                ForEach(rates, id: \.self) { rate in
-                    let power = ratePowers[rate] ?? 0
-                    let normalizedHeight = maxPower > 0 ? CGFloat(power / maxPower) : 0
-                    let isStrongest = power == maxPower && maxPower > 0 && power > 0
-
-                    VStack(spacing: 2) {
-                        // Spacer pushes bar to bottom of bar area
-                        Spacer(minLength: 0)
-
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(isStrongest ? Color.green : Color.blue)
-                            .frame(height: max(2, normalizedHeight * barAreaHeight))
-
-                        // Label always at the bottom
-                        Text("\(formatOscHz(rate.oscillationHz)) Hz")
-                            .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
-                            .foregroundStyle(isStrongest ? .primary : .secondary)
-                            .frame(height: labelHeight)
-                    }
-                }
-            }
         }
     }
 }

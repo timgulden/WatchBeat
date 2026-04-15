@@ -16,6 +16,11 @@ final class FrequencyMonitor: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private(set) var configInfo: String = ""
 
+    deinit {
+        engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+    }
+
     // Rolling buffer: ~5 seconds of audio at 48 kHz for decent frequency resolution
     private let rollingBufferDuration: Double = 5.0
     private var rollingBuffer: [Float] = []
@@ -149,11 +154,13 @@ final class FrequencyMonitor: @unchecked Sendable {
         let magnitudes = computeFFTMagnitudes(samples: decimated, fftLength: fftLength)
         let freqRes = envRate / Double(fftLength)
 
-        // Measure power at each standard rate
+        // Measure power at each standard rate.
+        // Window is ±0.2 Hz — narrow enough to avoid overlap between adjacent
+        // beat rates (closest pair is 5.0 and 5.5 Hz, 0.5 Hz apart).
         var powers: [StandardBeatRate: Float] = [:]
         for rate in StandardBeatRate.allCases {
             let targetBin = Int(round(rate.hz / freqRes))
-            let windowRadius = max(1, Int(ceil(0.5 / freqRes)))
+            let windowRadius = max(1, Int(ceil(0.2 / freqRes)))
             let lo = max(0, targetBin - windowRadius)
             let hi = min(magnitudes.count - 1, targetBin + windowRadius)
             var peak: Float = 0

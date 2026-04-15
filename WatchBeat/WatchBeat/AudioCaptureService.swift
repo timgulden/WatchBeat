@@ -63,6 +63,11 @@ final class AudioCaptureService: @unchecked Sendable {
     private let collector = RollingCollector()
     private(set) var sampleRate: Double = 48000
 
+    deinit {
+        engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+    }
+
     /// Request microphone permission.
     func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in

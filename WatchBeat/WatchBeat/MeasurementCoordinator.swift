@@ -2,6 +2,28 @@ import SwiftUI
 import Combine
 import WatchBeatCore
 
+/// Shared measurement and display constants.
+enum MeasurementConstants {
+    /// Auto-stop recording when quality reaches this threshold.
+    static let autoStopQuality: Double = 0.80
+    /// Minimum quality to show results (below this, show "try again").
+    static let minimumDisplayQuality: Double = 0.30
+    /// Rolling analysis window in seconds.
+    static let analysisWindow: Double = 15.0
+    /// Seconds between analysis passes during recording.
+    static let analysisInterval: Double = 3.0
+    /// Maximum recording duration in seconds.
+    static let maxRecordingTime: Double = 60.0
+
+    /// Quality color thresholds for UI display.
+    static func qualityColor(_ percent: Int) -> Color {
+        if percent >= 50 { return .green }
+        if percent >= 30 { return .orange }
+        if percent > 0 { return .red }
+        return .secondary
+    }
+}
+
 @MainActor
 final class MeasurementCoordinator: ObservableObject {
 
@@ -43,12 +65,15 @@ final class MeasurementCoordinator: ObservableObject {
     private(set) var monitoringStartTime: ContinuousClock.Instant?
     /// Guards the timer task from overwriting state after recording ends.
     private var isRecording: Bool = false
+    /// True only for the first monitoring session. Drives the 11:00→12:00 sweep animation.
+    /// Subsequent returns to monitoring start the hand at 12:00 with no sweep.
+    private(set) var needsSweep: Bool = true
 
-    let analysisWindow: Double = 15.0
-    let qualityThreshold: Double = 0.80
-    let minimumDisplayQuality: Double = 0.30
-    let analysisInterval: Double = 3.0
-    let maxRecordingTime: Double = 60.0
+    let analysisWindow = MeasurementConstants.analysisWindow
+    let qualityThreshold = MeasurementConstants.autoStopQuality
+    let minimumDisplayQuality = MeasurementConstants.minimumDisplayQuality
+    let analysisInterval = MeasurementConstants.analysisInterval
+    let maxRecordingTime = MeasurementConstants.maxRecordingTime
 
     private let captureService = AudioCaptureService()
     private let frequencyMonitor = FrequencyMonitor()
@@ -56,10 +81,26 @@ final class MeasurementCoordinator: ObservableObject {
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
+    // MARK: - Lifecycle
+
+    /// Called when the app moves to the background. Stops audio capture
+    /// and returns to idle so the mic is released.
+    func handleBackgrounded() {
+        switch state {
+        case .monitoring:
+            stopMonitoring()
+        case .recording:
+            cancelMeasurement()
+        default:
+            break
+        }
+    }
+
     // MARK: - Monitoring
 
     func startMonitoring() {
         do {
+            ratePowers = [:]
             try frequencyMonitor.start()
             state = .monitoring
             monitoringStartTime = ContinuousClock.now
@@ -79,6 +120,7 @@ final class MeasurementCoordinator: ObservableObject {
         monitorTask?.cancel()
         monitorTask = nil
         frequencyMonitor.stop()
+        needsSweep = false
         state = .idle
         ratePowers = [:]
     }
@@ -91,6 +133,7 @@ final class MeasurementCoordinator: ObservableObject {
         // the engine but preserve the buffer for seamless bars.
         monitorTask?.cancel()
         monitorTask = nil
+        needsSweep = false
         recordingTask?.cancel()
         recordingTask = Task { await performContinuousMeasurement() }
     }
@@ -184,13 +227,6 @@ final class MeasurementCoordinator: ObservableObject {
         monitorTask?.cancel()
         monitorTask = nil
 
-        // Save audio before stopping engine
-        if let best = bestResult {
-            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
-                saveRawAudio(buffer, result: best.0)
-            }
-        }
-
         captureService.stopRecording()
 
         guard !Task.isCancelled else {
@@ -236,7 +272,7 @@ final class MeasurementCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - File saving
+    // MARK: - File saving (disabled, call from performContinuousMeasurement to re-enable)
 
     private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer, result: MeasurementResult) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
