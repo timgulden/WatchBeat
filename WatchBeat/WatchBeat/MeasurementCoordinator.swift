@@ -82,7 +82,11 @@ final class MeasurementCoordinator: ObservableObject {
     // MARK: - Recording
 
     func startMeasurement() {
-        frequencyMonitor.stop()
+        // Cancel the monitoring poll task, but don't call frequencyMonitor.stop()
+        // which would clear the buffer. initializeForExternalFeed() will stop
+        // the engine but preserve the buffer for seamless bars.
+        monitorTask?.cancel()
+        monitorTask = nil
         recordingTask?.cancel()
         recordingTask = Task { await performContinuousMeasurement() }
     }
