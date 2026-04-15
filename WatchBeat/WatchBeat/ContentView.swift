@@ -55,17 +55,57 @@ struct ContentView: View {
         .edgesIgnoringSafeArea(.bottom)
     }
 
-    // MARK: - Shared logo
+    // MARK: - Shared logo with GMT hand
 
-    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
+    /// The angle (in degrees, clockwise from 12:00) for the GMT hand.
+    /// - idle: 330° (11:00 position)
+    /// - monitoring: sweeps 330° → 360° over 5 seconds, then holds at 360° (12:00)
+    /// - recording: sweeps 0° → 360° over 60 seconds, capped at 360°
+    private func gmtHandAngle() -> Double {
+        switch coordinator.state {
+        case .idle:
+            return 330 // 11:00
+        case .monitoring:
+            guard let start = coordinator.monitoringStartTime else { return 330 }
+            let elapsed = (ContinuousClock.now - start).asSeconds
+            let progress = min(elapsed / 5.0, 1.0) // 0→1 over 5 seconds
+            return 330 + progress * 30 // 330° → 360°
+        case .recording:
+            let elapsed = elapsedTime() // already capped at 60
+            return (elapsed / coordinator.maxRecordingTime) * 360
+        default:
+            return 0
+        }
+    }
+
+    private func logoWithHand(w: CGFloat, headlineY: CGFloat) -> some View {
         let imageCenter = (80 + headlineY) / 2
         let imageSize = max(10, min(headlineY - 100, w - 80))
-        return Image("WatchBeatMark")
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: imageSize, height: imageSize)
-            .opacity(0.85)
-            .position(x: w / 2, y: imageCenter)
+        let radius = imageSize / 2
+
+        return ZStack {
+            // Balance wheel
+            Image("WatchBeatMark")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: imageSize, height: imageSize)
+                .opacity(0.85)
+
+            // 12:00 marker (black triangle above the wheel)
+            GMTMarkerView()
+                .frame(width: 12, height: 12)
+                .offset(y: -radius - 8)
+
+            // GMT hand
+            GMTHandView(radius: radius * 0.85)
+                .rotationEffect(.degrees(gmtHandAngle()))
+        }
+        .position(x: w / 2, y: imageCenter)
+    }
+
+    // Keep the old logoImage for backward compatibility during transition
+    private func logoImage(w: CGFloat, headlineY: CGFloat) -> some View {
+        logoWithHand(w: w, headlineY: headlineY)
     }
 
     // MARK: - Idle
@@ -105,8 +145,9 @@ struct ContentView: View {
     private func monitoringOverlay(w: CGFloat, headlineY: CGFloat, captionY: CGFloat,
                                     barsTop: CGFloat, barsHeight: CGFloat,
                                     buttonCenterY: CGFloat, cancelY: CGFloat) -> some View {
+        TimelineView(.animation) { _ in
         ZStack {
-            logoImage(w: w, headlineY: headlineY)
+            logoWithHand(w: w, headlineY: headlineY)
 
             Text("Position your watch against the mic")
                 .font(.headline)
@@ -138,6 +179,7 @@ struct ContentView: View {
                 .foregroundStyle(.red)
                 .position(x: w / 2, y: cancelY)
         }
+        } // TimelineView
     }
 
     // MARK: - Recording

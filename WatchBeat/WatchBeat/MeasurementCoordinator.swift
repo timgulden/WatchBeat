@@ -39,6 +39,8 @@ final class MeasurementCoordinator: ObservableObject {
     private(set) var bestQualitySoFar: Int = 0
     /// When recording started — the view uses this to compute elapsed time per frame.
     private(set) var recordingStartTime: ContinuousClock.Instant?
+    /// When monitoring (listening) started — for the initial hand sweep.
+    private(set) var monitoringStartTime: ContinuousClock.Instant?
     /// Guards the timer task from overwriting state after recording ends.
     private var isRecording: Bool = false
 
@@ -60,6 +62,7 @@ final class MeasurementCoordinator: ObservableObject {
         do {
             try frequencyMonitor.start()
             state = .monitoring
+            monitoringStartTime = ContinuousClock.now
             monitorTask = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(100))

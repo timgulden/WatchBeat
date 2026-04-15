@@ -231,6 +231,54 @@ struct QualityBadgeView: View {
     }
 }
 
+// MARK: - GMT Hand and Marker
+
+/// A GMT-style watch hand: elongated with an arrow tip.
+struct GMTHandView: View {
+    let radius: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let tipY = center.y - radius
+            let tailY = center.y + radius * 0.15
+            let halfWidth: CGFloat = 3
+            let arrowWidth: CGFloat = 8
+            let arrowStart = tipY + 16
+
+            var path = Path()
+            // Arrow tip
+            path.move(to: CGPoint(x: center.x, y: tipY))
+            path.addLine(to: CGPoint(x: center.x - arrowWidth, y: arrowStart))
+            path.addLine(to: CGPoint(x: center.x - halfWidth, y: arrowStart))
+            // Shaft
+            path.addLine(to: CGPoint(x: center.x - halfWidth, y: tailY))
+            path.addLine(to: CGPoint(x: center.x + halfWidth, y: tailY))
+            path.addLine(to: CGPoint(x: center.x + halfWidth, y: arrowStart))
+            // Arrow tip other side
+            path.addLine(to: CGPoint(x: center.x + arrowWidth, y: arrowStart))
+            path.closeSubpath()
+
+            context.fill(path, with: .color(.black))
+        }
+        .frame(width: radius * 2, height: radius * 2)
+    }
+}
+
+/// A small triangle marker at the 12:00 position.
+struct GMTMarkerView: View {
+    var body: some View {
+        Canvas { context, size in
+            var path = Path()
+            path.move(to: CGPoint(x: size.width / 2, y: 0))
+            path.addLine(to: CGPoint(x: 0, y: size.height))
+            path.addLine(to: CGPoint(x: size.width, y: size.height))
+            path.closeSubpath()
+            context.fill(path, with: .color(.black))
+        }
+    }
+}
+
 #Preview("Dial +77") {
     RateDialView(rateError: 77, beatErrorMs: 1.6)
         .frame(width: 250, height: 250)
