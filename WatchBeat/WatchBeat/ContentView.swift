@@ -80,20 +80,20 @@ struct ContentView: View {
             Text("Position your watch against the mic")
                 .font(.headline)
                 .multilineTextAlignment(.center)
-                .frame(width: w - 40)
+                .frame(width: max(1, w - 40))
                 .position(x: w / 2, y: headlineY)
 
             Text("Press your iPhone mic against the watch caseback, then tap Listen.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(width: w - 40)
+                .frame(width: max(1, w - 40))
                 .position(x: w / 2, y: captionY)
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Listen")
                     .font(.title3.bold())
-                    .frame(width: w - 40)
+                    .frame(width: max(1, w - 40))
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
@@ -112,24 +112,24 @@ struct ContentView: View {
             Text("Position your watch against the mic")
                 .font(.headline)
                 .multilineTextAlignment(.center)
-                .frame(width: w - 40)
+                .frame(width: max(1, w - 40))
                 .position(x: w / 2, y: headlineY)
 
             Text("Look for a peak at your watch's beat rate")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(width: w - 40)
+                .frame(width: max(1, w - 40))
                 .position(x: w / 2, y: captionY)
 
             FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                .frame(width: w - 40, height: barsHeight)
+                .frame(width: max(1, w - 40), height: barsHeight)
                 .position(x: w / 2, y: barsTop + barsHeight / 2)
 
             Button(action: { coordinator.startMeasurement() }) {
                 Text("Measure")
                     .font(.title3.bold())
-                    .frame(width: w - 40)
+                    .frame(width: max(1, w - 40))
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
@@ -158,12 +158,12 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(width: w - 40)
+                .frame(width: max(1, w - 40))
                 .position(x: w / 2, y: captionY)
 
             // Bars in same position as monitoring
             FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                .frame(width: w - 40, height: barsHeight)
+                .frame(width: max(1, w - 40), height: barsHeight)
                 .position(x: w / 2, y: barsTop + barsHeight / 2)
 
             // Quality display + best-so-far progress bar
@@ -180,7 +180,7 @@ struct ContentView: View {
                 ProgressView(value: min(Double(best), 80), total: 80)
                     .progressViewStyle(.linear)
                     .tint(best >= 80 ? .green : best >= 50 ? .green.opacity(0.7) : best >= 30 ? .orange : .red)
-                    .frame(width: w - 40)
+                    .frame(width: max(1, w - 40))
                 Text("Best: \(best)%")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -271,14 +271,14 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .frame(width: w - 40)
+                    .frame(width: max(1, w - 40))
             }
             .position(x: w / 2, y: h * 0.4)
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Try Again")
                     .font(.title3.bold())
-                    .frame(width: w - 40)
+                    .frame(width: max(1, w - 40))
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
