@@ -317,17 +317,37 @@ struct ContentView: View {
 
     private func errorOverlay(message: String, w: CGFloat, h: CGFloat, buttonCenterY: CGFloat) -> some View {
         ZStack {
-            VStack(spacing: 16) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 50))
-                    .foregroundStyle(.orange)
-                Text(message)
-                    .multilineTextAlignment(.center)
-                    .font(.subheadline)
+            VStack(alignment: .leading, spacing: 16) {
+                // Header
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.title2)
+                        .foregroundStyle(.orange)
+                    Text("Signal too weak")
+                        .font(.title3.bold())
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+
+                Text("Tips for a better reading:")
+                    .font(.subheadline.bold())
+                    .padding(.top, 4)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
+                    tipRow(icon: "arrow.down.to.line", text: "Place the watch face-down on a hard surface. Use a soft cloth to protect the crystal.")
+                    tipRow(icon: "iphone.gen3", text: "Press the bottom edge of your iPhone firmly against the caseback.")
+                    tipRow(icon: "chart.bar.fill", text: "Adjust position to maximize the frequency bar at your watch's beat rate.")
+                    tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
+                }
+
+                Text("Some watches are very quiet and may require several attempts.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(width: max(1, w - 40))
+                    .padding(.top, 4)
             }
-            .position(x: w / 2, y: h * 0.4)
+            .padding(.horizontal, 24)
+            .frame(width: max(1, w))
+            .position(x: w / 2, y: h * 0.38)
 
             Button(action: { coordinator.startMonitoring() }) {
                 Text("Try Again")
@@ -337,6 +357,19 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .position(x: w / 2, y: buttonCenterY)
+        }
+    }
+
+    private func tipRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundStyle(.blue)
+                .frame(width: 24)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
