@@ -145,24 +145,39 @@ struct IdleScreen: View {
         ScreenLayout {
             WatchLogo()
         } textContent: {
-            VStack(spacing: 6) {
-                Text("Position your watch against the mic")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                Text("Press your iPhone mic against the watch caseback, then tap Listen.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
+            Text("Place mic against watch caseback")
+                .font(.headline)
+                .multilineTextAlignment(.center)
         } bars: {
-            // No bars on idle screen — use empty space to match bar height
-            Color.clear.frame(height: 240)
+            VStack(alignment: .leading, spacing: 12) {
+                tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
+                tipRow(icon: "arrow.down.to.line", text: "Place the watch face-down on a hard surface. Use a soft cloth to protect the crystal.")
+                tipRow(icon: "iphone.gen3", text: "Press the bottom edge of your iPhone firmly against the caseback.")
+                tipRow(icon: "chart.bar.fill", text: "Adjust position to maximize the frequency bar at your watch's beat rate.")
+                tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
+            }
+            .padding(.horizontal, 4)
+            .offset(y: -20)
+            .frame(height: 240)
         } controls: {
             VStack(spacing: 10) {
                 ActionButton(title: "Listen") {
                     coordinator.startMonitoring()
                 }
             }
+        }
+    }
+
+    private func tipRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundStyle(.blue)
+                .frame(width: 24)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -178,7 +193,7 @@ struct MonitoringScreen: View {
                 WatchLogo(showHand: true, angle: wheelAngle())
             } textContent: {
                 VStack(spacing: 6) {
-                    Text("Position your watch against the mic")
+                    Text("Place mic against watch caseback")
                         .font(.headline)
                         .multilineTextAlignment(.center)
                     Text("Look for a peak at your watch's beat rate")
@@ -317,13 +332,12 @@ struct ResultScreen: View {
 
     /// Compute amplitude on the fly from stored pulse widths + current lift angle.
     private var amplitudeDegrees: Double? {
-        guard let la = coordinator.liftAngleDegrees,
-              let pw = data.pulseWidths else { return nil }
+        guard let pw = data.pulseWidths else { return nil }
         return AmplitudeEstimator.combinedAmplitude(
             pulseWidths: pw,
             beatRate: StandardBeatRate.nearest(toHz: Double(data.rateBPH) / 3600.0),
             rateErrorSecondsPerDay: data.rateError,
-            liftAngleDegrees: la
+            liftAngleDegrees: coordinator.liftAngleDegrees
         )
     }
 
@@ -396,10 +410,6 @@ struct ResultScreen: View {
                             if let amp = amplitudeDegrees {
                                 Text("\(Int(amp))°")
                                     .font(.system(.title3, design: .rounded, weight: .bold))
-                            } else if coordinator.liftAngleDegrees == nil {
-                                Text("Enter Lift Angle")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
                             } else {
                                 Text("---")
                                     .font(.system(.title3, design: .rounded, weight: .bold))
@@ -453,9 +463,7 @@ struct ResultScreen: View {
             }
         }
         .onAppear {
-            if let la = coordinator.liftAngleDegrees {
-                liftAngleText = String(format: "%.0f", la)
-            }
+            liftAngleText = String(format: "%.0f", coordinator.liftAngleDegrees)
         }
     }
 }

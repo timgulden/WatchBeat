@@ -61,8 +61,11 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var state: State = .idle
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
-    /// User-entered lift angle for amplitude calculation. Persists for the session.
-    @Published var liftAngleDegrees: Double? = nil
+    /// User-entered lift angle for amplitude calculation. Persists across sessions.
+    /// Defaults to 52° (most common value used by timegraphers).
+    @Published var liftAngleDegrees: Double {
+        didSet { UserDefaults.standard.set(liftAngleDegrees, forKey: "liftAngleDegrees") }
+    }
 
     /// Best quality seen so far during this recording session.
     private(set) var bestQualitySoFar: Int = 0
@@ -90,6 +93,13 @@ final class MeasurementCoordinator: ObservableObject {
     private let amplitudeEstimator = AmplitudeEstimator()
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
+
+    private static let defaultLiftAngle: Double = 52.0
+
+    init() {
+        let stored = UserDefaults.standard.double(forKey: "liftAngleDegrees")
+        self.liftAngleDegrees = stored > 0 ? stored : Self.defaultLiftAngle
+    }
 
     // MARK: - Lifecycle
 
