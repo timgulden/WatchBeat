@@ -241,26 +241,28 @@ Wraps `AVAudioEngine` with a `RollingCollector` actor maintaining a 60-second ci
 - Input: built-in mic, bottom data source, omnidirectional polar pattern
 - Input gain: maximum (1.0)
 
-Provides `getRecentAudio(duration:)` to extract the most recent N seconds for rolling analysis.
+Provides `getRecentAudio(duration:)` to extract the most recent N seconds for rolling analysis. Cleans up AVAudioEngine in deinit to prevent mic leaks.
 
 ### FrequencyMonitor
 
-Real-time envelope FFT visualization. Maintains a 5-second rolling buffer, analyzes ~4 times per second. During monitoring, runs its own AVAudioEngine. During recording, switches to external feed from AudioCaptureService (buffer preserved for seamless transition).
+Real-time envelope FFT visualization. Maintains a 5-second rolling buffer, analyzes ~4 times per second. During monitoring, runs its own AVAudioEngine. During recording, switches to external feed from AudioCaptureService (buffer preserved for seamless transition). Cleans up AVAudioEngine in deinit to prevent mic leaks.
 
-Publishes power at each standard rate for the frequency bar display, allowing users to see which rate is dominant before and during recording.
+Publishes power at each standard rate for the frequency bar display, allowing users to see which rate is dominant before and during recording. Uses a narrow ±0.2 Hz FFT search window to prevent visual overlap between adjacent beat rates (the closest pair, 5.0 Hz and 5.5 Hz, are only 0.5 Hz apart). Note: the measurement pipeline intentionally uses a wider ±0.5 Hz window so adjacent rates score similarly, triggering the more thorough try-all-rates validation path.
 
 ### MeasurementCoordinator
 
-State machine: idle → monitoring → recording → result/error.
+State machine: idle → monitoring → recording → result/error. `MeasurementConstants` enum centralizes shared thresholds (quality percentages, timing windows, quality color logic).
 
-- **Monitoring**: FrequencyMonitor runs, frequency bars show real-time rates.
-- **Recording**: AudioCaptureService captures continuously. Analysis runs every 3 seconds on most recent 15-second window. Auto-stops at 80% quality. 60-second timeout.
-- **Result**: Shown if best quality >= 30%. Otherwise "try again" with tips.
+- **Monitoring**: FrequencyMonitor runs, frequency bars show real-time rates. `needsSweep` flag controls whether the balance wheel animates from 11:00→12:00 (first session only) or starts at 12:00 (subsequent sessions).
+- **Recording**: AudioCaptureService captures continuously. Analysis runs every 3 seconds on most recent 15-second window. Tracks both current and best quality. Auto-stops at 80% quality. 60-second timeout. Results rejected if rate error exceeds ±999 s/day (industry-standard sanity check — anything beyond this is a measurement error, not a real watch rate).
+- **Result**: Shown if best quality >= 30% and rate is physically plausible. Otherwise "try again" with tips.
+- **Lifecycle**: `handleBackgrounded()` stops audio when the app enters the background, releasing the microphone.
 
 ### SwiftUI Views
 
-- **ContentView**: All screens in a single view with GeometryReader + ZStack absolute positioning. TimelineView(.animation) for 60fps timer and balance wheel animation during recording.
-- **ResultViews**: Rate dial (±120 s/day range, blue=fast, red=slow), timegraph (fixed ±60 s/day Y scale with wrapping), quality badge, GMT hand and marker views.
+- **ContentView**: Top-level state switch plus all screen views (IdleScreen, MonitoringScreen, RecordingScreen, AnalyzingScreen, ResultScreen, ErrorScreen). Uses `ScreenLayout` generic view for consistent stack-based adaptive layout: title at top, flexible logo area, text/bars zone, fixed-height bottom control zone so buttons stay in the same position across screens. `WatchLogo` always renders the same view hierarchy (wheel + hand + marker) with opacity toggles to prevent layout differences between screens. Observes `scenePhase` to release the mic when backgrounded. TimelineView(.animation) for 60fps recording animation.
+- **FrequencyBarsView**: Bar chart visualization of power at each standard beat rate. Includes `formatOscHz` utility. VoiceOver accessible.
+- **ResultViews**: Rate dial (±120 s/day range, blue=fast, red=slow, with beat error label: GOOD/FAIR/HIGH), timegraph (golden-ratio aspect), quality badge, GMT hand and marker views. All have VoiceOver accessibility labels.
 
 ## 9. Package Structure
 
@@ -303,6 +305,7 @@ WatchBeat/                          (Xcode project, depends on WatchBeatCore)
         MeasurementCoordinator.swift
         AudioCaptureService.swift
         FrequencyMonitor.swift
+        FrequencyBarsView.swift
         ResultViews.swift
         Info.plist
         Assets.xcassets/

@@ -49,6 +49,8 @@ final class MeasurementCoordinator: ObservableObject {
         let tickCount: Int
         let diagnosticText: String
         let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
+        /// Escapement pulse widths for amplitude estimation (independent of lift angle).
+        let pulseWidths: PulseWidthEstimate?
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.rateBPH == rhs.rateBPH && lhs.rateError == rhs.rateError &&
@@ -59,6 +61,8 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var state: State = .idle
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
+    /// User-entered lift angle for amplitude calculation. Persists for the session.
+    @Published var liftAngleDegrees: Double? = nil
 
     /// Best quality seen so far during this recording session.
     private(set) var bestQualitySoFar: Int = 0
@@ -83,6 +87,7 @@ final class MeasurementCoordinator: ObservableObject {
     private let captureService = AudioCaptureService()
     private let frequencyMonitor = FrequencyMonitor()
     private let pipeline = MeasurementPipeline()
+    private let amplitudeEstimator = AmplitudeEstimator()
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
@@ -182,7 +187,7 @@ final class MeasurementCoordinator: ObservableObject {
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError
-        var bestResult: (MeasurementResult, PipelineDiagnostics)?
+        var bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer)?
         var bestQuality: Double = 0
 
         // Timer task: updates frequency bars every 200ms.
@@ -220,7 +225,7 @@ final class MeasurementCoordinator: ObservableObject {
 
                 if quality > bestQuality && plausible {
                     bestQuality = quality
-                    bestResult = (result, diagnostics)
+                    bestResult = (result, diagnostics, buffer)
                 }
 
                 if quality >= qualityThreshold && plausible {
@@ -244,9 +249,20 @@ final class MeasurementCoordinator: ObservableObject {
         }
 
         // Show result or error — must meet quality threshold and be physically plausible
-        if let (result, diagnostics) = bestResult,
+        if let (result, diagnostics, audioBuffer) = bestResult,
            result.qualityScore >= minimumDisplayQuality,
            abs(result.rateErrorSecondsPerDay) <= maxRate {
+
+            // Run amplitude pulse width estimation on a background thread
+            let pulseWidths = await Task.detached { [amplitudeEstimator] in
+                amplitudeEstimator.measurePulseWidths(
+                    input: audioBuffer,
+                    rate: result.snappedRate,
+                    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+                    tickTimings: result.tickTimings
+                )
+            }.value
+
             let scoresText = diagnostics.rateScores
                 .sorted { $0.magnitude > $1.magnitude }
                 .prefix(3)
@@ -275,7 +291,8 @@ final class MeasurementCoordinator: ObservableObject {
                 qualityPercent: Int(result.qualityScore * 100),
                 tickCount: result.tickCount,
                 diagnosticText: diagText,
-                tickResiduals: tickResiduals
+                tickResiduals: tickResiduals,
+                pulseWidths: pulseWidths
             )
             state = .result(displayData)
         } else {

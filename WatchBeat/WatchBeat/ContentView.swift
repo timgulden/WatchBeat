@@ -312,6 +312,20 @@ struct AnalyzingScreen: View {
 struct ResultScreen: View {
     let data: MeasurementCoordinator.MeasurementDisplayData
     @ObservedObject var coordinator: MeasurementCoordinator
+    @State private var liftAngleText: String = ""
+    @FocusState private var liftAngleFocused: Bool
+
+    /// Compute amplitude on the fly from stored pulse widths + current lift angle.
+    private var amplitudeDegrees: Double? {
+        guard let la = coordinator.liftAngleDegrees,
+              let pw = data.pulseWidths else { return nil }
+        return AmplitudeEstimator.combinedAmplitude(
+            pulseWidths: pw,
+            beatRate: StandardBeatRate.nearest(toHz: Double(data.rateBPH) / 3600.0),
+            rateErrorSecondsPerDay: data.rateError,
+            liftAngleDegrees: la
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -343,6 +357,59 @@ struct ResultScreen: View {
                 RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
                     .frame(maxHeight: 310)
                     .padding(.top, -8)
+
+                // Lift Angle / Amplitude row
+                if data.pulseWidths != nil {
+                    HStack(alignment: .top) {
+                        // Lift Angle input (left)
+                        VStack(spacing: 2) {
+                            Text("Lift Angle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 2) {
+                                TextField("", text: $liftAngleText)
+                                    .keyboardType(.decimalPad)
+                                    .font(.system(.body, design: .rounded, weight: .bold))
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: 56, height: 36)
+                                    .background(Color(.systemGray6))
+                                    .cornerRadius(6)
+                                    .focused($liftAngleFocused)
+                                    .onChange(of: liftAngleText) { _, newValue in
+                                        if let val = Double(newValue), val > 0 && val <= 90 {
+                                            coordinator.liftAngleDegrees = val
+                                        }
+                                    }
+                                Text("°")
+                                    .font(.body.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        // Amplitude display (right)
+                        VStack(spacing: 2) {
+                            Text("Amplitude")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let amp = amplitudeDegrees {
+                                Text("\(Int(amp))°")
+                                    .font(.system(.title3, design: .rounded, weight: .bold))
+                            } else if coordinator.liftAngleDegrees == nil {
+                                Text("Enter Lift Angle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("---")
+                                    .font(.system(.title3, design: .rounded, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.top, -4)
+                }
 
                 // Timegraph — centered between dial and button
                 Spacer(minLength: 8)
@@ -377,6 +444,18 @@ struct ResultScreen: View {
                 .padding(.bottom, 20)
             }
             .padding(.horizontal, 20)
+        }
+        .ignoresSafeArea(.keyboard)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { liftAngleFocused = false }
+            }
+        }
+        .onAppear {
+            if let la = coordinator.liftAngleDegrees {
+                liftAngleText = String(format: "%.0f", la)
+            }
         }
     }
 }
