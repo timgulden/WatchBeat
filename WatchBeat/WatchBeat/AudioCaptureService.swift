@@ -11,7 +11,16 @@ enum AudioSessionConfigurator {
 
         var info = "Mode: measurement"
 
-        if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+        // Prefer a plugged-in external mic (wired headset, USB/Lightning audio,
+        // line-in) over the built-in mic. Bluetooth HFP is excluded — its 8 kHz
+        // compressed audio is unusable for tick DSP.
+        let externalTypes: [AVAudioSession.Port] = [.headsetMic, .usbAudio, .lineIn]
+        let inputs = session.availableInputs ?? []
+
+        if let external = inputs.first(where: { externalTypes.contains($0.portType) }) {
+            try session.setPreferredInput(external)
+            info += ", Mic: \(external.portName)"
+        } else if let builtInMic = inputs.first(where: { $0.portType == .builtInMic }) {
             if let bottomSource = builtInMic.dataSources?.first(where: { $0.orientation == .bottom }) {
                 try builtInMic.setPreferredDataSource(bottomSource)
                 info += ", Mic: bottom"
@@ -83,6 +92,11 @@ final class AudioCaptureService: @unchecked Sendable {
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        // Belt-and-suspenders: some routes (notably wired headset mics) leave
+        // AGC/noise-suppression enabled even with AVAudioSession mode .measurement.
+        // Envelope shape survives it, but individual tick transients get smeared,
+        // which tanks regression quality.
+        try? inputNode.setVoiceProcessingEnabled(false)
         let format = inputNode.outputFormat(forBus: 0)
         sampleRate = format.sampleRate
 

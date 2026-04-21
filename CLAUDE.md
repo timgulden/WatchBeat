@@ -26,10 +26,10 @@ Open `WatchBeat/WatchBeat.xcodeproj` in Xcode. Build with Cmd+B, run on device f
 
 1. **WatchBeatCore must never import AVFoundation, UIKit, or SwiftUI.** The DSP pipeline operates on plain `[Float]` buffers with a known sample rate. All platform concerns live in the app layer.
 2. **DSP components are pure functions of their inputs.** No singletons, no global state, no side effects. Each stage takes data in and returns results.
-3. **Pipeline stages**: Envelope FFT (rate identification) -> Try-all-rates with guided tick extraction -> Linear regression -> MeasurementResult
+3. **Pipeline stages**: 5 kHz highpass (pre-filter) -> Envelope FFT (rate identification) -> Try-all-rates with guided tick extraction -> Linear regression -> MeasurementResult
 4. **Precision lives in the right place.** Period estimation uses decimated envelope (lower rate is fine). Tick localization uses full-rate raw signal (sub-sample precision matters).
 5. **Synthetic signal generator is first-class.** Tests use `SyntheticTickGenerator` to produce signals with known ground truth. All pipeline tests should work without a microphone or device.
-6. **No bandpass filtering on tick extraction path.** Empirically validated — bandpass loses signal on quiet movements. Envelope FFT handles rate ID without it.
+6. **5 kHz highpass at the pipeline entry, no bandpass.** Empirically validated across a mix of marginal internal-mic and headphone-mic recordings: 5 kHz HP recovered every previously-failing file (14/17 → 17/17 passing) without hurting any strong one. Tick energy lives almost entirely above 4 kHz; room rumble, hum, and mic self-noise below that band actively confuse the envelope FFT's rate decision. Bandpass remains out — cutting the high end loses the sharp-transient content that makes sub-sample tick localization possible. The cutoff is `MeasurementPipeline.highpassCutoffHz`.
 
 ## Standard Beat Rates
 

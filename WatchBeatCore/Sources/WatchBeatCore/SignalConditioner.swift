@@ -61,6 +61,11 @@ public struct SignalConditioner {
         return bandpassed
     }
 
+    /// 4th-order Butterworth highpass.
+    public func highpassFilter(_ samples: [Float], sampleRate: Double, cutoff: Double) -> [Float] {
+        applyBiquadCascade(samples, coefficients: butterworthHighpass(cutoff: cutoff, sampleRate: sampleRate))
+    }
+
     // MARK: - Envelope extraction
 
     func fullWaveRectify(_ samples: [Float]) -> [Float] {

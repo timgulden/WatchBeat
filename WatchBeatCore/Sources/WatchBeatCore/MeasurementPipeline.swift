@@ -23,6 +23,15 @@ public struct PipelineDiagnostics: Sendable {
 ///    Deviation from nominal = rate error in s/day. Even/odd residuals = beat error.
 public struct MeasurementPipeline {
 
+    /// Highpass cutoff applied to the raw signal before any other processing.
+    /// Watch-tick energy lives almost entirely above ~4 kHz; room rumble, hum,
+    /// and mic self-noise dominate below that. Empirically validated across a
+    /// mix of quiet-mic and marginal recordings: 5 kHz highpass recovered every
+    /// previously-failing file without hurting any strong one.
+    public static let highpassCutoffHz: Double = 5000.0
+
+    private let conditioner = SignalConditioner()
+
     public init() {}
 
     /// Run the pipeline with optional manual rate override.
@@ -34,8 +43,8 @@ public struct MeasurementPipeline {
 
     /// Run the pipeline with diagnostics and optional manual rate override.
     public func measureWithDiagnostics(_ input: AudioBuffer, knownRate: StandardBeatRate? = nil) -> (MeasurementResult, PipelineDiagnostics) {
-        let samples = input.samples
         let sampleRate = input.sampleRate
+        let samples = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = samples.count
 
         // Step 1: Compute envelope and FFT it for rate identification.
@@ -165,7 +174,7 @@ public struct MeasurementPipeline {
         )
 
         let diagnostics = PipelineDiagnostics(
-            rawPeakAmplitude: samples.map { abs($0) }.max() ?? 0,
+            rawPeakAmplitude: input.samples.map { abs($0) }.max() ?? 0,
             periodEstimate: periodEstimate,
             tickCount: tickResult.confirmedCount,
             sampleRate: sampleRate,

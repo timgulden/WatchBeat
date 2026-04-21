@@ -14,9 +14,10 @@ enum MeasurementConstants {
     static let analysisInterval: Double = 3.0
     /// Maximum recording duration in seconds.
     static let maxRecordingTime: Double = 60.0
-    /// Maximum plausible rate error in s/day. Matches industry standard (±999).
-    /// Anything beyond this is a measurement error, not a real watch rate.
-    static let maxPlausibleRateError: Double = 999.0
+    /// Maximum plausible rate error in s/day. Above this we assume a snapping
+    /// error (wrong rate chosen), which produces errors in the tens of thousands.
+    /// Set generously to accommodate badly-worn movements that still run.
+    static let maxPlausibleRateError: Double = 2000.0
 
     /// Quality color thresholds for UI display.
     static func qualityColor(_ percent: Int) -> Color {
@@ -233,7 +234,7 @@ final class MeasurementCoordinator: ObservableObject {
                 currentQuality = Int(quality * 100)
                 bestQualitySoFar = max(bestQualitySoFar, currentQuality)
 
-                if quality > bestQuality && plausible {
+                if quality > bestQuality {
                     bestQuality = quality
                     bestResult = (result, diagnostics, buffer)
                 }
@@ -258,56 +259,82 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Show result or error — must meet quality threshold and be physically plausible
-        if let (result, diagnostics, audioBuffer) = bestResult,
-           result.qualityScore >= minimumDisplayQuality,
-           abs(result.rateErrorSecondsPerDay) <= maxRate {
-
-            // Run amplitude pulse width estimation on a background thread
-            let pulseWidths = await Task.detached { [amplitudeEstimator] in
-                amplitudeEstimator.measurePulseWidths(
-                    input: audioBuffer,
-                    rate: result.snappedRate,
-                    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
-                    tickTimings: result.tickTimings
-                )
-            }.value
-
-            let scoresText = diagnostics.rateScores
-                .sorted { $0.magnitude > $1.magnitude }
-                .prefix(3)
-                .map { "\($0.rate.rawValue)bph: \(String(format: "%.1f", $0.magnitude))" }
-                .joined(separator: ", ")
-
-            let diagText = """
-            Audio: \(captureService.lastConfigInfo)
-            Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
-            Period: \(String(format: "%.4f", diagnostics.periodEstimate.measuredHz)) Hz
-            Confidence: \(String(format: "%.1f%%", diagnostics.periodEstimate.confidence * 100))
-            Ticks: \(diagnostics.tickCount)
-            Top rates: \(scoresText)
-            """
-
-            let tickResiduals = result.tickTimings.map {
-                (index: $0.beatIndex, residualMs: $0.residualMs, isEven: $0.isEvenBeat)
+        // Three outcomes: implausibly-far-off (high quality but rate out of range),
+        // signal-too-weak (never got a usable fit), or a normal result.
+        guard let (result, diagnostics, audioBuffer) = bestResult,
+              result.qualityScore >= minimumDisplayQuality else {
+            if let (r, _, buf) = bestResult {
+                saveRawAudio(buf, result: r)
             }
-
-            let displayData = MeasurementDisplayData(
-                rateBPH: result.snappedRate.rawValue,
-                rateError: result.rateErrorSecondsPerDay,
-                rateErrorFormatted: formatRateError(result.rateErrorSecondsPerDay),
-                beatErrorMs: result.beatErrorMilliseconds,
-                beatErrorFormatted: result.beatErrorMilliseconds.map { formatBeatError($0) },
-                qualityPercent: Int(result.qualityScore * 100),
-                tickCount: result.tickCount,
-                diagnosticText: diagText,
-                tickResiduals: tickResiduals,
-                pulseWidths: pulseWidths
-            )
-            state = .result(displayData)
-        } else {
-            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.")
+            let q = Int((bestResult?.0.qualityScore ?? 0) * 100)
+            let sr = Int(captureService.sampleRate)
+            let peak = String(format: "%.3f", bestResult?.1.rawPeakAmplitude ?? 0)
+            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.\n\nDiag: q=\(q)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
+            return
         }
+
+        saveRawAudio(audioBuffer, result: result)
+
+        // Snap-confusion: the tick regression's measured rate disagrees sharply
+        // with the chosen standard rate. Adjacent standard rates differ by 10-20%,
+        // so a >7% mismatch means we locked onto the wrong rate. A badly-worn but
+        // correctly-identified watch only drifts a few percent (2000 s/day ≈ 2.3%).
+        let measuredOscHz = diagnostics.periodEstimate.measuredHz / 2.0
+        let snappedOscHz = result.snappedRate.oscillationHz
+        if abs(measuredOscHz - snappedOscHz) / snappedOscHz > 0.07 {
+            let hzStr = String(format: "%.2f", measuredOscHz)
+            state = .error("Measuring \(hzStr) Hz, but that doesn't seem right. If you know the watch's beat rate, check whether this matches. Otherwise try repositioning the phone against the caseback.")
+            return
+        }
+
+        if abs(result.rateErrorSecondsPerDay) > maxRate {
+            let secs = Int(result.rateErrorSecondsPerDay.rounded())
+            let sign = secs >= 0 ? "+" : ""
+            state = .error("Watch is running \(sign)\(secs) s/day — outside the ±\(Int(maxRate)) s/day display range. The movement likely needs service.")
+            return
+        }
+
+        let pulseWidths = await Task.detached { [amplitudeEstimator] in
+            amplitudeEstimator.measurePulseWidths(
+                input: audioBuffer,
+                rate: result.snappedRate,
+                rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+                tickTimings: result.tickTimings
+            )
+        }.value
+
+        let scoresText = diagnostics.rateScores
+            .sorted { $0.magnitude > $1.magnitude }
+            .prefix(3)
+            .map { "\($0.rate.rawValue)bph: \(String(format: "%.1f", $0.magnitude))" }
+            .joined(separator: ", ")
+
+        let diagText = """
+        Audio: \(captureService.lastConfigInfo)
+        Raw peak: \(String(format: "%.4f", diagnostics.rawPeakAmplitude))
+        Period: \(String(format: "%.4f", diagnostics.periodEstimate.measuredHz)) Hz
+        Confidence: \(String(format: "%.1f%%", diagnostics.periodEstimate.confidence * 100))
+        Ticks: \(diagnostics.tickCount)
+        Top rates: \(scoresText)
+        """
+
+        let tickResiduals = result.tickTimings.map {
+            (index: $0.beatIndex, residualMs: $0.residualMs, isEven: $0.isEvenBeat)
+        }
+
+        let displayData = MeasurementDisplayData(
+            rateBPH: result.snappedRate.rawValue,
+            rateError: result.rateErrorSecondsPerDay,
+            rateErrorFormatted: formatRateError(result.rateErrorSecondsPerDay),
+            beatErrorMs: result.beatErrorMilliseconds,
+            beatErrorFormatted: result.beatErrorMilliseconds.map { formatBeatError($0) },
+            qualityPercent: Int(result.qualityScore * 100),
+            tickCount: result.tickCount,
+            diagnosticText: diagText,
+            tickResiduals: tickResiduals,
+            pulseWidths: pulseWidths
+        )
+        state = .result(displayData)
     }
 
     // MARK: - File saving (disabled, call from performContinuousMeasurement to re-enable)

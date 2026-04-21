@@ -15,6 +15,7 @@ final class FrequencyMonitor: @unchecked Sendable {
 
     private var engine: AVAudioEngine?
     private(set) var configInfo: String = ""
+    private let conditioner = SignalConditioner()
 
     deinit {
         engine?.stop()
@@ -33,6 +34,7 @@ final class FrequencyMonitor: @unchecked Sendable {
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        try? inputNode.setVoiceProcessingEnabled(false)
         let format = inputNode.outputFormat(forBus: 0)
         sampleRate = format.sampleRate
         rollingBufferSize = Int(rollingBufferDuration * sampleRate)
@@ -114,16 +116,24 @@ final class FrequencyMonitor: @unchecked Sendable {
         // Don't analyze until we have a full buffer
         guard samplesAccumulated >= rollingBufferSize else { return }
 
-        // Raw peak
+        // Raw peak (on unfiltered buffer, for mic-level diagnostic)
         var peak: Float = 0
         vDSP_maxv(rollingBuffer, 1, &peak, vDSP_Length(rollingBufferSize))
         var negPeak: Float = 0
         vDSP_minv(rollingBuffer, 1, &negPeak, vDSP_Length(rollingBufferSize))
         let rawPeakVal = max(peak, -negPeak)
 
+        // Highpass filter to match the main pipeline — removes rumble/hum that
+        // would otherwise bias the envelope FFT's rate scores.
+        let filtered = conditioner.highpassFilter(
+            rollingBuffer,
+            sampleRate: sampleRate,
+            cutoff: MeasurementPipeline.highpassCutoffHz
+        )
+
         // Compute envelope: rectify + lowpass (moving average) + decimate
         var rectified = [Float](repeating: 0, count: rollingBufferSize)
-        vDSP_vabs(rollingBuffer, 1, &rectified, 1, vDSP_Length(rollingBufferSize))
+        vDSP_vabs(filtered, 1, &rectified, 1, vDSP_Length(rollingBufferSize))
 
         let avgWindow = max(3, Int(sampleRate / 100.0)) // ~100 Hz lowpass
         let smoothedCount = rollingBufferSize - avgWindow + 1

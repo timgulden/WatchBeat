@@ -21,6 +21,10 @@ let package = Package(
             name: "AmplitudeExperiment",
             targets: ["AmplitudeExperiment"]
         ),
+        .executable(
+            name: "CompareMics",
+            targets: ["CompareMics"]
+        ),
     ],
     targets: [
         .target(
@@ -36,6 +40,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AmplitudeExperiment",
+            dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "CompareMics",
             dependencies: ["WatchBeatCore"]
         ),
         .testTarget(

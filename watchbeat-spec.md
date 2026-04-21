@@ -28,7 +28,7 @@
 
 **Package boundary as enforcement.** The DSP core lives in a standalone Swift Package that does not depend on AVFoundation, UIKit, or any iOS-specific framework. This makes the separation structural rather than conventional — violations fail to compile.
 
-**Trust the FFT, don't over-filter.** Envelope FFT is the primary rate identification method. No bandpass filtering on the tick extraction path — empirically validated that bandpass loses too much signal on quiet vintage movements. The envelope (rectify + lowpass + decimate) is sufficient to isolate the beat rate from the carrier.
+**Trust the FFT for rate identification.** Envelope FFT is the primary rate identification method. A 5 kHz Butterworth highpass at the pipeline entry removes LF rumble, hum, and mic self-noise that would otherwise bias the envelope FFT's rate decision; tick energy lives almost entirely above 4 kHz. Bandpass is avoided because the high-end content carries the sharp-transient information that makes sub-sample tick localization possible.
 
 **Precision lives in the right place.** Period estimation uses a decimated envelope because it only needs to find a repetition rate. Tick localization uses the full-rate raw signal because that is where sub-sample precision comes from. Each stage uses the representation best suited to its job.
 
