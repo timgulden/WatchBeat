@@ -145,22 +145,30 @@ public struct MeasurementPipeline {
             // regression period locks cleanly to the sub-period while the
             // fundamental's regression drifts. The envelope FFT still sees the
             // fundamental as the dominant bin. Use that spectral evidence to
-            // override when:
-            //   1. A candidate at exactly winner.hz / 2 confirmed enough ticks
-            //      to be a plausible rate (recoveryRate >= 0.5), AND
-            //   2. its envelope FFT magnitude clearly exceeds the winner's
-            //      (envMag ratio > 1.2).
-            // We deliberately do NOT gate on the candidate's full score, since
-            // its periodConsistency collapses in exactly the failure mode we
-            // are trying to catch. Only exact 2× relationships among standard
-            // rates trigger this (currently 18000 ↔ 36000 is the only pair).
+            // override when the candidate at winner.hz/2 has a strictly larger
+            // envelope FFT magnitude than the winner. A true higher-rate watch
+            // with asymmetric tick/tock strength can produce some sub-harmonic
+            // energy, but the fundamental (at the actual rate) always dominates
+            // the envelope FFT for real bi-pulse escapements — so any file with
+            // envMag@lower > envMag@winner is evidence of harmonic confusion.
+            //
+            // We deliberately do NOT gate on the candidate's own fit score or
+            // recovery rate: the failure mode we are trying to catch is exactly
+            // where the lower rate's fit collapses (confused picker alternating
+            // between tick and sub-click), which would make any threshold on
+            // its own numbers reject the very case we want to swap. The safety
+            // comes from reusing the *winner's* clean ticks reinterpreted at 2×
+            // period, not from anything the lower rate's own fit produced.
+            //
+            // Only exact 2× relationships among standard rates trigger this
+            // (currently 18000 ↔ 36000 is the only pair).
             let winnerHz = top.rate.hz
             for cand in candidates where cand.rate != top.rate {
                 let ratio = winnerHz / cand.rate.hz
                 guard abs(ratio - 2.0) < 0.01 else { continue }  // winner is 2× candidate
                 guard top.envMag > 0 else { continue }
                 let envRatio = Double(cand.envMag / top.envMag)
-                if cand.recoveryRate >= 0.5 && envRatio > 1.2 {
+                if envRatio > 1.0 {
                     // Classify as the lower rate, but reuse the winner's clean
                     // tick data reinterpreted at the lower rate. The winner's
                     // regression locked to the sub-period (e.g. 100 ms), so the
