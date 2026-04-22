@@ -25,6 +25,18 @@ let package = Package(
             name: "CompareMics",
             targets: ["CompareMics"]
         ),
+        .executable(
+            name: "TickAnatomy",
+            targets: ["TickAnatomy"]
+        ),
+        .executable(
+            name: "DiagnoseRates",
+            targets: ["DiagnoseRates"]
+        ),
+        .executable(
+            name: "DumpResiduals",
+            targets: ["DumpResiduals"]
+        ),
     ],
     targets: [
         .target(
@@ -44,6 +56,18 @@ let package = Package(
         ),
         .executableTarget(
             name: "CompareMics",
+            dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "TickAnatomy",
+            dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "DiagnoseRates",
+            dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "DumpResiduals",
             dependencies: ["WatchBeatCore"]
         ),
         .testTarget(

@@ -29,7 +29,22 @@ public struct PulseWidthEstimate: Sendable {
 /// The amplitude formula (applied separately):
 ///   A = L / (2 × sin(π × t_pulse / T_beat))
 ///
-/// Reference: vacaboja/tg open-source timegrapher.
+/// Reference: vacaboja/tg open-source timegrapher
+/// (https://github.com/vacaboja/tg, src/algo.c:745).
+///
+/// This is a *variant* of vacaboja's approach, not a direct port. Key
+/// differences (see also TickAnatomy's `vacabojaAmplitude` for a faithful
+/// port used for comparison):
+///   - vacaboja smooths with a 1 ms leaky peak-hold + 1 ms box-mean; we use
+///     a 3 ms arithmetic mean of rectified samples. The 3 ms mean broadens
+///     pulses materially vs. vacaboja's 1 ms peak-hold.
+///   - vacaboja sweeps the threshold upward from a noise-based floor until
+///     both tick and tock amplitudes fall in [135°, 360°] with |Δ| < 60°;
+///     we use a fixed 20% threshold. In vacaboja's algorithm, 20% is the
+///     upper bound of the sweep, not the operating point.
+///   - vacaboja measures pulse width as the sample distance from the first
+///     rising envelope peak (unlock) back to the lock anchor; we measure
+///     full-width at the threshold.
 public struct AmplitudeEstimator {
 
     private let conditioner = SignalConditioner()

@@ -26,4 +26,15 @@ Pods/
 # IDE
 *.xcscmblueprint
 SoundSamples/
+Screenshots/
 analyze_samples.swift
+
+# Scratch output from diagnostic tools
+*.anatomy.csv
+*.anatomy.json
+*.anatomy.png
+*.residuals.csv
+tick_anatomy_out/
+tick_anatomy_out_new/
+tick_anatomy_timex/
+WatchBeatCore/plots/

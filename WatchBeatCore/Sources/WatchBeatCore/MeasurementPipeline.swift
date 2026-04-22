@@ -25,10 +25,12 @@ public struct MeasurementPipeline {
 
     /// Highpass cutoff applied to the raw signal before any other processing.
     /// Watch-tick energy lives almost entirely above ~4 kHz; room rumble, hum,
-    /// and mic self-noise dominate below that. Empirically validated across a
-    /// mix of quiet-mic and marginal recordings: 5 kHz highpass recovered every
-    /// previously-failing file without hurting any strong one.
-    public static let highpassCutoffHz: Double = 5000.0
+    /// mic self-noise, and broadband environmental noise (HVAC, washing
+    /// machines) dominate below that. 8 kHz rejects more noise than 5 kHz and
+    /// recovers marginal noisy-environment recordings; the 2nd-harmonic
+    /// confusion it caused on 18000 bph watches is handled by always
+    /// evaluating every standard rate with the per-rate fit scorer below.
+    public static let highpassCutoffHz: Double = 8000.0
 
     private let conditioner = SignalConditioner()
 
@@ -68,28 +70,24 @@ public struct MeasurementPipeline {
         rateScores.sort { $0.magnitude > $1.magnitude }
 
         // Step 3: Determine candidate rates.
-        // If the caller specified a known rate, use it directly.
-        // If the envelope FFT has a clear winner (>30% above second place), trust it.
-        // Otherwise, try all rates and let guided extraction decide.
-        let candidateRates: [StandardBeatRate]
-        if let known = knownRate {
-            candidateRates = [known]
-        } else {
-            let topMag = rateScores.first?.magnitude ?? 0
-            let secondMag = rateScores.count > 1 ? rateScores[1].magnitude : 0
-            let fftIsClear = topMag > 0 && secondMag > 0 && (topMag / secondMag) > 1.3
+        // If the caller specified a known rate, use it directly. Otherwise
+        // always try every standard rate — the per-rate fit scoring below is
+        // what actually picks the winner, and it catches harmonic confusion
+        // that an FFT-magnitude-only shortcut would miss.
+        let candidateRates: [StandardBeatRate] = knownRate.map { [$0] } ?? StandardBeatRate.allCases
 
-            if fftIsClear {
-                candidateRates = [rateScores.first!.rate]
-            } else {
-                candidateRates = StandardBeatRate.allCases
-            }
-        }
-
-        var bestResult: MeasurementResult?
         var bestTickResult: TickExtractionResult?
-        var bestScore: Double = -1
         var bestRate = knownRate ?? rateScores.first?.rate ?? StandardBeatRate.bph28800
+
+        // Score every candidate, then pick the winner with a harmonic-aware rule.
+        struct CandidateResult {
+            let rate: StandardBeatRate
+            let tickResult: TickExtractionResult
+            let score: Double
+            let recoveryRate: Double
+            let envMag: Float
+        }
+        var candidates: [CandidateResult] = []
 
         for rate in candidateRates {
             let measuredHz = interpolateFFTPeak(
@@ -131,10 +129,61 @@ public struct MeasurementPipeline {
 
             let score = recoveryRate * residualQuality * periodConsistency * (0.5 + 0.5 * envBoost)
 
-            if score > bestScore {
-                bestScore = score
-                bestRate = rate
-                bestTickResult = tickResult
+            candidates.append(CandidateResult(rate: rate, tickResult: tickResult, score: score, recoveryRate: recoveryRate, envMag: envMag))
+        }
+
+        // Initial winner: highest time-domain fit score.
+        if let top = candidates.max(by: { $0.score < $1.score }) {
+            bestRate = top.rate
+            bestTickResult = top.tickResult
+
+            // Harmonic-preference tiebreak.
+            // Some ticks contain secondary audible events at a sub-period (e.g. a
+            // rebound or echo ~100 ms after the main click on 18000 bph Timexes).
+            // When mic placement captures the secondary strongly, a 2× rate can
+            // fit the time domain better than the true fundamental — its
+            // regression period locks cleanly to the sub-period while the
+            // fundamental's regression drifts. The envelope FFT still sees the
+            // fundamental as the dominant bin. Use that spectral evidence to
+            // override when:
+            //   1. A candidate at exactly winner.hz / 2 confirmed enough ticks
+            //      to be a plausible rate (recoveryRate >= 0.5), AND
+            //   2. its envelope FFT magnitude clearly exceeds the winner's
+            //      (envMag ratio > 1.2).
+            // We deliberately do NOT gate on the candidate's full score, since
+            // its periodConsistency collapses in exactly the failure mode we
+            // are trying to catch. Only exact 2× relationships among standard
+            // rates trigger this (currently 18000 ↔ 36000 is the only pair).
+            let winnerHz = top.rate.hz
+            for cand in candidates where cand.rate != top.rate {
+                let ratio = winnerHz / cand.rate.hz
+                guard abs(ratio - 2.0) < 0.01 else { continue }  // winner is 2× candidate
+                guard top.envMag > 0 else { continue }
+                let envRatio = Double(cand.envMag / top.envMag)
+                if cand.recoveryRate >= 0.5 && envRatio > 1.2 {
+                    // Classify as the lower rate, but reuse the winner's clean
+                    // tick data reinterpreted at the lower rate. The winner's
+                    // regression locked to the sub-period (e.g. 100 ms), so the
+                    // true main-tick period is exactly 2× that. Beat error is
+                    // not meaningful here: the winner's even/odd split captures
+                    // main-tick-vs-sub-pulse asymmetry, not tick-vs-tock.
+                    bestRate = cand.rate
+                    if let subPeriod = top.tickResult.measuredPeriod {
+                        let doubledPeriod = subPeriod * 2.0
+                        bestTickResult = TickExtractionResult(
+                            confirmedCount: top.tickResult.confirmedCount,
+                            qualityScore: top.tickResult.qualityScore,
+                            beatErrorMs: nil,
+                            amplitudeProxy: top.tickResult.amplitudeProxy,
+                            measuredPeriod: doubledPeriod,
+                            residualStd: top.tickResult.residualStd,
+                            tickTimings: top.tickResult.tickTimings
+                        )
+                    } else {
+                        bestTickResult = cand.tickResult
+                    }
+                    break
+                }
             }
         }
 
@@ -494,7 +543,38 @@ public struct MeasurementPipeline {
         let quality = min(1.0, max(0.0, 1.0 - exp(-snr / 5.0)))
 
         // Regression on confirmed tick peak positions
-        let regression = linearRegression(times: peakTimes, indices: confirmed)
+        var regression = linearRegression(times: peakTimes, indices: confirmed)
+
+        // Lock-in pass: re-pick each confirmed tick within a tight ±2 ms window
+        // around its regression-predicted time, then refit. Fixes tick-sound
+        // substructure where a secondary peak ~5 ms from the main peak
+        // sporadically wins the initial argmax (seen on some vintage Timexes:
+        // ~20% of ticks land ~5.8 ms early otherwise, appearing as stray dots
+        // on the timegraph).
+        if confirmed.count >= 10, let slope = regression.slope, let intercept = regression.intercept, slope > 0 {
+            let lockHalf = max(4, Int(0.002 * sampleRate))
+            for i in confirmed {
+                let predicted = slope * Double(i) + intercept
+                let centerSample = Int(round(predicted * sampleRate))
+                let lo = max(0, centerSample - lockHalf)
+                let hi = min(n - 1, centerSample + lockHalf)
+                guard lo < hi else { continue }
+                var peakIdx = lo
+                var peakVal: Float = squared[lo]
+                for j in (lo + 1)...hi {
+                    if squared[j] > peakVal { peakVal = squared[j]; peakIdx = j }
+                }
+                if peakIdx > 0 && peakIdx < n - 1 {
+                    let a = squared[peakIdx - 1], b = squared[peakIdx], c = squared[peakIdx + 1]
+                    let d = a - 2.0 * b + c
+                    let off: Float = abs(d) > 1e-15 ? 0.5 * (a - c) / d : 0
+                    peakTimes[i] = (Double(peakIdx) + Double(off)) / sampleRate
+                } else {
+                    peakTimes[i] = Double(peakIdx) / sampleRate
+                }
+            }
+            regression = linearRegression(times: peakTimes, indices: confirmed)
+        }
 
         // Beat error
         let beatError: Double?
