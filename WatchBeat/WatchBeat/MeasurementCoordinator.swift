@@ -37,7 +37,16 @@ final class MeasurementCoordinator: ObservableObject {
         case recording
         case analyzing
         case result(MeasurementDisplayData)
+        case needsService(NeedsServiceData)
         case error(String)
+    }
+
+    /// Shown when a high-quality result is obtained but the rate error is
+    /// outside the normal display range. The movement works well enough to
+    /// measure confidently — it's just running far off.
+    struct NeedsServiceData: Equatable {
+        let rateBPH: Int
+        let rateErrorSecondsPerDay: Double
     }
 
     struct MeasurementDisplayData: Equatable {
@@ -230,7 +239,6 @@ final class MeasurementCoordinator: ObservableObject {
                 }.value
 
                 let quality = result.qualityScore
-                let plausible = abs(result.rateErrorSecondsPerDay) <= maxRate
                 currentQuality = Int(quality * 100)
                 bestQualitySoFar = max(bestQualitySoFar, currentQuality)
 
@@ -239,7 +247,11 @@ final class MeasurementCoordinator: ObservableObject {
                     bestResult = (result, diagnostics, buffer)
                 }
 
-                if quality >= qualityThreshold && plausible {
+                // Auto-stop on high quality regardless of rate plausibility.
+                // A 100%-quality result won't improve by running longer; if the
+                // watch is genuinely running far off, the post-loop maxRate
+                // check routes to the needs-service screen.
+                if quality >= qualityThreshold {
                     break
                 }
             }
@@ -288,9 +300,10 @@ final class MeasurementCoordinator: ObservableObject {
         }
 
         if abs(result.rateErrorSecondsPerDay) > maxRate {
-            let secs = Int(result.rateErrorSecondsPerDay.rounded())
-            let sign = secs >= 0 ? "+" : ""
-            state = .error("Watch is running \(sign)\(secs) s/day — outside the ±\(Int(maxRate)) s/day display range. The movement likely needs service.")
+            state = .needsService(NeedsServiceData(
+                rateBPH: result.snappedRate.rawValue,
+                rateErrorSecondsPerDay: result.rateErrorSecondsPerDay
+            ))
             return
         }
 
