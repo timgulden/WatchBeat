@@ -457,7 +457,16 @@ public struct MeasurementPipeline {
         rate: StandardBeatRate, measuredHz: Double
     ) -> TickExtractionResult {
         let n = samples.count
-        let period = measuredHz > 0 ? 1.0 / measuredHz : rate.nominalPeriodSeconds
+        // Use the candidate rate's nominal period for window sizing, not the
+        // FFT-interpolated peak. On sick pin-lever Timexes the envelope FFT
+        // can have a dominant peak 4-5% off the true tick rate (spurious extra
+        // impulses create a fake-rate peak). Letting measuredHz drive window
+        // size makes every candidate rate lock onto that same fake pattern,
+        // so all candidates yield the same off-rate slope and the scorer
+        // picks the rate whose nominal is closest to the fake — usually
+        // wrong. Using the nominal period means each candidate gets tested
+        // on ITS terms: the true rate finds real ticks, wrong candidates fail.
+        let period = rate.nominalPeriodSeconds
         let periodSamples = Int(round(period * sampleRate))
 
         guard periodSamples > 10 && periodSamples < n / 3 else {
