@@ -478,6 +478,21 @@ public struct MeasurementPipeline {
         var squared = [Float](repeating: 0, count: n)
         vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(n))
 
+        // Smoothed energy for coarse tick *location* only. A raw squared signal
+        // has fine sub-peak structure — the escapement click often contains two
+        // energy events ~3-5 ms apart (unlock impulse + rebound / secondary
+        // drop on worn movements). Argmax on raw squared picks whichever
+        // sub-peak happens to be louder in each tick; when that flips between
+        // sub-peaks across the recording the whole tick/tock pattern inverts
+        // mid-run and the regression slope warps. Argmax on a 5 ms centered
+        // moving-average of the squared signal gives one stable coarse peak
+        // per tick regardless of sub-peak balance. The actual sub-sample tick
+        // time is then the centroid of the *raw* squared within ±5 ms of that
+        // peak (see `extractTicksAtOffset` for why we don't centroid the
+        // smoothed signal — it plateaus and biases rate). Window is forced odd
+        // for centering.
+        let smoothed = movingAverage(of: squared, windowSamples: max(3, Int(0.005 * sampleRate)) | 1)
+
         // Try 5 evenly spaced starting offsets across one period.
         // With 5 offsets, no tick can be closer than 1/10 of a period from the
         // nearest window center. Pick whichever offset finds the most confirmed ticks.
@@ -489,7 +504,7 @@ public struct MeasurementPipeline {
         for k in 0..<numOffsets {
             let offset = k * periodSamples / numOffsets
             let result = extractTicksAtOffset(
-                squared: squared, n: n, sampleRate: sampleRate, rate: rate,
+                squared: squared, smoothed: smoothed, n: n, sampleRate: sampleRate, rate: rate,
                 periodSamples: periodSamples, startOffset: offset
             )
             if result.confirmedCount > bestResult.confirmedCount {
@@ -500,9 +515,76 @@ public struct MeasurementPipeline {
         return bestResult
     }
 
+    /// Centered moving average with clamped edges. O(n) via running sum.
+    /// Each output sample is the mean of `squared[max(0, i-half)...min(n-1, i+half)]`
+    /// where `half = windowSamples / 2`. Window widths are tracked explicitly so
+    /// edge samples are correctly averaged over their clipped window rather than
+    /// biased by a fixed divisor.
+    private func movingAverage(of x: [Float], windowSamples: Int) -> [Float] {
+        let n = x.count
+        guard windowSamples > 1, n > 0 else { return x }
+        let half = windowSamples / 2
+        var out = [Float](repeating: 0, count: n)
+        var runSum: Float = 0
+        var left = 0
+        var right = -1
+        while right + 1 <= min(n - 1, half) {
+            right += 1
+            runSum += x[right]
+        }
+        for i in 0..<n {
+            let width = right - left + 1
+            out[i] = width > 0 ? runSum / Float(width) : 0
+            let nextRight = min(n - 1, i + 1 + half)
+            while right < nextRight {
+                right += 1
+                runSum += x[right]
+            }
+            let nextLeft = max(0, i + 1 - half)
+            while left < nextLeft {
+                runSum -= x[left]
+                left += 1
+            }
+        }
+        return out
+    }
+
+    /// Centroid (first moment) of a segment of `y` with its minimum subtracted
+    /// as a baseline. Returns absolute sub-sample position, or nil if the
+    /// segment is flat (no energy above baseline). Baseline subtraction keeps
+    /// the centroid locked to the energy peak rather than drifting toward the
+    /// geometric window center when the signal has a noise floor.
+    private func centroid(in y: [Float], lo: Int, hi: Int) -> Double? {
+        guard lo <= hi, lo >= 0, hi < y.count else { return nil }
+        var minVal = y[lo]
+        for j in (lo + 1)...hi { if y[j] < minVal { minVal = y[j] } }
+        var num: Double = 0
+        var den: Double = 0
+        for j in lo...hi {
+            let w = Double(y[j] - minVal)
+            if w > 0 {
+                num += w * Double(j)
+                den += w
+            }
+        }
+        guard den > 0 else { return nil }
+        return num / den
+    }
+
     /// Extract ticks with windows starting at a specific offset.
+    ///
+    /// - Parameters:
+    ///   - squared: Raw squared signal. Used for tick-energy / gap-energy
+    ///     measurements (SNR and confirmation gating). Keeping this
+    ///     un-smoothed preserves the sharp contrast between tick bursts and
+    ///     quiet gaps, so quality scores stay accurate.
+    ///   - smoothed: Moving-averaged squared signal. Used for *location*
+    ///     only — argmax to pick the tick's search region and centroid for
+    ///     sub-sample positioning. Smoothing merges multi-sub-peak tick
+    ///     structure into one blob per tick; centroid then gives a stable
+    ///     location even when sub-peaks swap dominance between beats.
     private func extractTicksAtOffset(
-        squared: [Float], n: Int, sampleRate: Double, rate: StandardBeatRate,
+        squared: [Float], smoothed: [Float], n: Int, sampleRate: Double, rate: StandardBeatRate,
         periodSamples: Int, startOffset: Int
     ) -> TickExtractionResult {
         // Divide into windows from startOffset, find peak in each
@@ -519,6 +601,13 @@ public struct MeasurementPipeline {
             let wStart = startOffset + w * periodSamples
             var bestIdx = 0
             var bestVal: Float = 0
+            // Coarse medianOffset detection: use raw squared. The smoothed
+            // signal buries dropout windows' noise spikes in averaged energy,
+            // which can pull the median offset toward reverb-from-adjacent-tick
+            // patterns that look stable at wrong offsets. Raw squared is more
+            // random in empty windows, so its argmax distributes uniformly
+            // and the median of many windows still reflects the true tick
+            // offset from the majority of filled windows.
             for i in 0..<periodSamples {
                 if squared[wStart + i] > bestVal {
                     bestVal = squared[wStart + i]
@@ -554,23 +643,33 @@ public struct MeasurementPipeline {
                      1, &energy, vDSP_Length(tickWindow))
             tickEnergies.append(energy)
 
-            // Peak position within window (sub-sample)
+            // Tick location: argmax on *smoothed* to anchor the tick's coarse
+            // position (smoothing merges sub-peaks so this doesn't flip
+            // between them), then centroid on the *raw squared* signal within
+            // a narrow window around that anchor for sub-sample precision.
+            // Smoothing the squared signal and then centroiding it has a
+            // plateau problem when the smoothing window exceeds the tick
+            // duration (the smoothed bump flat-tops); centroiding the raw
+            // squared signal avoids that while still being stable under
+            // sub-peak flipping — the centroid of a multi-peak tick is the
+            // amplitude-weighted average of its sub-peak positions, which
+            // shifts gradually with sub-peak balance instead of jumping.
             var peakIdx = 0
             var peakVal: Float = 0
             for i in 0..<tickWindow {
-                if squared[wStart + i] > peakVal {
-                    peakVal = squared[wStart + i]
+                if smoothed[wStart + i] > peakVal {
+                    peakVal = smoothed[wStart + i]
                     peakIdx = i
                 }
             }
-            let absIdx = wStart + peakIdx
-            if absIdx > 0 && absIdx < n - 1 {
-                let a = squared[absIdx - 1], b = squared[absIdx], c = squared[absIdx + 1]
-                let d = a - 2.0 * b + c
-                let off: Float = abs(d) > 1e-15 ? 0.5 * (a - c) / d : 0
-                peakTimes.append((Double(absIdx) + Double(off)) / sampleRate)
+            let absPeak = wStart + peakIdx
+            let cHalf = max(4, Int(0.005 * sampleRate))
+            let cLo = max(0, absPeak - cHalf)
+            let cHi = min(n - 1, absPeak + cHalf)
+            if let c = centroid(in: squared, lo: cLo, hi: cHi) {
+                peakTimes.append(c / sampleRate)
             } else {
-                peakTimes.append(Double(absIdx) / sampleRate)
+                peakTimes.append(Double(absPeak) / sampleRate)
             }
 
             // Gap energy: midpoint between this tick and next
@@ -611,32 +710,22 @@ public struct MeasurementPipeline {
         // Regression on confirmed tick peak positions
         var regression = linearRegression(times: peakTimes, indices: confirmed)
 
-        // Lock-in pass: re-pick each confirmed tick within a tight ±2 ms window
-        // around its regression-predicted time, then refit. Fixes tick-sound
-        // substructure where a secondary peak ~5 ms from the main peak
-        // sporadically wins the initial argmax (seen on some vintage Timexes:
-        // ~20% of ticks land ~5.8 ms early otherwise, appearing as stray dots
-        // on the timegraph).
+        // Lock-in pass: re-pick each confirmed tick as the centroid of raw
+        // squared energy in a narrow window around the regression-predicted
+        // time, then refit. Centroid is used (not argmax) for the same reason
+        // as the first pass — stability under sub-peak flipping. Window is
+        // ±5 ms, wide enough to span a multi-sub-peak tick cluster so the
+        // centroid sees the full blob.
         if confirmed.count >= 10, let slope = regression.slope, let intercept = regression.intercept, slope > 0 {
-            let lockHalf = max(4, Int(0.002 * sampleRate))
+            let lockHalf = max(4, Int(0.005 * sampleRate))
             for i in confirmed {
                 let predicted = slope * Double(i) + intercept
                 let centerSample = Int(round(predicted * sampleRate))
                 let lo = max(0, centerSample - lockHalf)
                 let hi = min(n - 1, centerSample + lockHalf)
                 guard lo < hi else { continue }
-                var peakIdx = lo
-                var peakVal: Float = squared[lo]
-                for j in (lo + 1)...hi {
-                    if squared[j] > peakVal { peakVal = squared[j]; peakIdx = j }
-                }
-                if peakIdx > 0 && peakIdx < n - 1 {
-                    let a = squared[peakIdx - 1], b = squared[peakIdx], c = squared[peakIdx + 1]
-                    let d = a - 2.0 * b + c
-                    let off: Float = abs(d) > 1e-15 ? 0.5 * (a - c) / d : 0
-                    peakTimes[i] = (Double(peakIdx) + Double(off)) / sampleRate
-                } else {
-                    peakTimes[i] = Double(peakIdx) / sampleRate
+                if let c = centroid(in: squared, lo: lo, hi: hi) {
+                    peakTimes[i] = c / sampleRate
                 }
             }
             regression = linearRegression(times: peakTimes, indices: confirmed)
