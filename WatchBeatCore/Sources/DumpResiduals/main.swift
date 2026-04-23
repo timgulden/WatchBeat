@@ -20,6 +20,20 @@ guard let buffer = try? WAVReader.read(url: url) else {
 let pipeline = MeasurementPipeline()
 let result = pipeline.measure(buffer)
 
+// Also run forced 18000 to see candidate's view (useful in tiebreak mode)
+if CommandLine.arguments.contains("--force18") {
+    let forced = pipeline.measure(buffer, knownRate: .bph18000)
+    print("[forced 18000] rate=\(forced.snappedRate.rawValue) q=\(Int(forced.qualityScore*100))% ticks=\(forced.tickCount) rateErr=\(String(format: "%+.1f", forced.rateErrorSecondsPerDay)) beatErr=\(forced.beatErrorMilliseconds.map{String(format: "%.2fms",$0)} ?? "—")")
+    let ampEst = AmplitudeEstimator()
+    let pw = ampEst.measurePulseWidths(input: buffer, rate: forced.snappedRate, rateErrorSecondsPerDay: forced.rateErrorSecondsPerDay, tickTimings: forced.tickTimings)
+    let amp = AmplitudeEstimator.combinedAmplitude(pulseWidths: pw, beatRate: forced.snappedRate, rateErrorSecondsPerDay: forced.rateErrorSecondsPerDay, liftAngleDegrees: 52)
+    print("[forced 18000] ampl: tickPulse=\(pw.tickPulseMs.map{String(format: "%.2fms", $0)} ?? "—") tockPulse=\(pw.tockPulseMs.map{String(format: "%.2fms", $0)} ?? "—") folds=\(pw.foldCount) amp@52°=\(amp.map{String(format: "%.0f°",$0)} ?? "—")")
+    let ts = forced.tickTimings.map{$0.residualMs}.sorted()
+    if !ts.isEmpty {
+        print("[forced 18000] residuals min=\(String(format: "%+.2f",ts.first!)) med=\(String(format: "%+.2f",ts[ts.count/2])) max=\(String(format: "%+.2f",ts.last!))")
+    }
+}
+
 let periodMs = result.snappedRate.nominalPeriodSeconds * 1000.0
 let halfPeriodMs = periodMs / 2.0
 
@@ -27,6 +41,26 @@ print("file=\(url.lastPathComponent)")
 print("rate=\(result.snappedRate.rawValue) bph  period=\(String(format: "%.2f", periodMs)) ms  halfPeriod=\(String(format: "%.2f", halfPeriodMs)) ms")
 print("rateError=\(String(format: "%+.1f", result.rateErrorSecondsPerDay)) s/day  beatError=\(result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "—")")
 print("quality=\(Int(result.qualityScore * 100))%  ticks=\(result.tickCount)")
+
+// Amplitude probe — use amplitudeTickTimings (diverges from tickTimings in tiebreak)
+let ampEst = AmplitudeEstimator()
+let pw = ampEst.measurePulseWidths(
+    input: buffer,
+    rate: result.snappedRate,
+    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+    tickTimings: result.amplitudeTickTimings
+)
+let liftDeg = 52.0
+let amp = AmplitudeEstimator.combinedAmplitude(
+    pulseWidths: pw,
+    beatRate: result.snappedRate,
+    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+    liftAngleDegrees: liftDeg
+)
+let tickStr = pw.tickPulseMs.map { String(format: "%.2f", $0) } ?? "—"
+let tockStr = pw.tockPulseMs.map { String(format: "%.2f", $0) } ?? "—"
+let ampStr = amp.map { String(format: "%.0f°", $0) } ?? "—"
+print("amplitude: tickPulse=\(tickStr)ms  tockPulse=\(tockStr)ms  folds=\(pw.foldCount)  amp@52°=\(ampStr)")
 
 let timings = result.tickTimings
 if timings.isEmpty {

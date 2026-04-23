@@ -26,11 +26,14 @@ public struct MeasurementPipeline {
     /// Highpass cutoff applied to the raw signal before any other processing.
     /// Watch-tick energy lives almost entirely above ~4 kHz; room rumble, hum,
     /// mic self-noise, and broadband environmental noise (HVAC, washing
-    /// machines) dominate below that. 8 kHz rejects more noise than 5 kHz and
-    /// recovers marginal noisy-environment recordings; the 2nd-harmonic
-    /// confusion it caused on 18000 bph watches is handled by always
-    /// evaluating every standard rate with the per-rate fit scorer below.
-    public static let highpassCutoffHz: Double = 8000.0
+    /// machines) dominate below that. 5 kHz is the sweet spot: it removes
+    /// enough low-frequency clutter to recover the original corpus fully,
+    /// while preserving the 5-8 kHz band that many vintage watches (Timex
+    /// pin-levers especially) depend on. Pushing to 8 kHz briefly rescued
+    /// a noisy 2.5 Hz recording (Weak_Internal_q29: 58% → 65%) but crushed
+    /// SNR on clean Timex recordings (Timex1_Strays: 97% → 65%; muddyticks:
+    /// 88% → 47%). Not worth the trade.
+    public static let highpassCutoffHz: Double = 5000.0
 
     private let conditioner = SignalConditioner()
 
@@ -78,6 +81,9 @@ public struct MeasurementPipeline {
 
         var bestTickResult: TickExtractionResult?
         var bestRate = knownRate ?? rateScores.first?.rate ?? StandardBeatRate.bph28800
+        // Separate tickTimings for amplitude estimation. Usually the same as
+        // the display timings, but in the tiebreak path they differ (see below).
+        var amplitudeTickTimings: [TickTiming]? = nil
 
         // Score every candidate, then pick the winner with a harmonic-aware rule.
         struct CandidateResult {
@@ -187,6 +193,13 @@ public struct MeasurementPipeline {
                             residualStd: top.tickResult.residualStd,
                             tickTimings: top.tickResult.tickTimings
                         )
+                        // Amplitude needs tickTimings whose beatIndex is
+                        // spaced at the reported rate's period. The winner's
+                        // timings are at 2× rate and would throw the
+                        // phase-aligned fold off by 2×. Fall back to the
+                        // candidate's own timings (fewer, but correctly
+                        // spaced at the 18000 beat).
+                        amplitudeTickTimings = cand.tickResult.tickTimings
                     } else {
                         bestTickResult = cand.tickResult
                     }
@@ -222,7 +235,8 @@ public struct MeasurementPipeline {
             amplitudeProxy: tickResult.amplitudeProxy,
             qualityScore: tickResult.qualityScore,
             tickCount: tickResult.confirmedCount,
-            tickTimings: tickResult.tickTimings
+            tickTimings: tickResult.tickTimings,
+            amplitudeTickTimings: amplitudeTickTimings
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz

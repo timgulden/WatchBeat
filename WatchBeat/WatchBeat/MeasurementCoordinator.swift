@@ -299,7 +299,7 @@ final class MeasurementCoordinator: ObservableObject {
                 input: audioBuffer,
                 rate: result.snappedRate,
                 rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
-                tickTimings: result.tickTimings
+                tickTimings: result.amplitudeTickTimings
             )
         }.value
 

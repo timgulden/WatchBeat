@@ -26,6 +26,12 @@ public struct MeasurementResult: Sendable {
     public let tickCount: Int
     /// Tick timing data for the timegrapher plot.
     public let tickTimings: [TickTiming]
+    /// Tick timings for the amplitude estimator. Usually identical to
+    /// `tickTimings`, but in the harmonic-tiebreak path (36000→18000 swap)
+    /// the display timings are at 2× rate (so the timegraph shows the
+    /// clean main-vs-sub pattern) while amplitude needs timings at the
+    /// reported rate's beatIndex spacing.
+    public let amplitudeTickTimings: [TickTiming]
 
     public init(
         snappedRate: StandardBeatRate,
@@ -34,7 +40,8 @@ public struct MeasurementResult: Sendable {
         amplitudeProxy: Double,
         qualityScore: Double,
         tickCount: Int,
-        tickTimings: [TickTiming] = []
+        tickTimings: [TickTiming] = [],
+        amplitudeTickTimings: [TickTiming]? = nil
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -43,5 +50,6 @@ public struct MeasurementResult: Sendable {
         self.qualityScore = qualityScore
         self.tickCount = tickCount
         self.tickTimings = tickTimings
+        self.amplitudeTickTimings = amplitudeTickTimings ?? tickTimings
     }
 }
