@@ -135,38 +135,44 @@ public struct AmplitudeEstimator {
         let div = Float(foldCount)
         for i in 0..<foldLen { folded[i] /= div }
 
-        // Step 5: Smooth the folded waveform (3ms)
+        // Step 5: Two smoothings of the folded waveform.
+        //   - 3 ms: stable main-peak localization and fallback pulse-width.
+        //   - 0.15 ms (fine): preserves escapement sub-structure (unlock /
+        //     impulse / drop) so we can recover the physically meaningful
+        //     pulse even when 20%-threshold walks across it as one wide blob.
         let foldSmoothSamp = max(3, Int(0.003 * sampleRate))
         let smoothed = movingAverage(folded, windowSize: foldSmoothSamp)
+        let fineSmoothSamp = max(3, Int(0.00015 * sampleRate))
+        let fineSmoothed = movingAverage(folded, windowSize: fineSmoothSamp)
         let fN = smoothed.count
         guard fN > periodSamples else {
             return PulseWidthEstimate(tickPulseMs: nil, tockPulseMs: nil, foldCount: foldCount)
         }
 
-        // Step 6: Find tick and tock peaks
+        // Step 6: Find tick and tock peaks (on the stable 3ms smoothed fold)
         let tickPeak = findPeakNear(smoothed, target: halfPeriod, range: periodSamples / 3)
         let tockPeak = findPeakNear(smoothed, target: halfPeriod + periodSamples, range: periodSamples / 3)
 
-        // Step 7: Measure pulse widths at 20% of peak height
-        let thresholdFraction: Float = 0.20
-        let tickPulseMs: Double?
-        let tockPulseMs: Double?
-
-        if let tp = tickPeak {
-            let pw = measurePulseWidth(smoothed, peakIndex: tp, thresholdFraction: thresholdFraction,
-                                       maxExtent: periodSamples / 3, sampleRate: sampleRate)
-            tickPulseMs = pw > 0 && pw < beatPeriod / 2 ? pw * 1000 : nil
-        } else {
-            tickPulseMs = nil
-        }
-
-        if let kp = tockPeak {
-            let pw = measurePulseWidth(smoothed, peakIndex: kp, thresholdFraction: thresholdFraction,
-                                       maxExtent: periodSamples / 3, sampleRate: sampleRate)
-            tockPulseMs = pw > 0 && pw < beatPeriod / 2 ? pw * 1000 : nil
-        } else {
-            tockPulseMs = nil
-        }
+        // Step 7: Measure pulse widths. Two strategies:
+        //   A) 20% threshold on the 3ms-smoothed fold — works great for
+        //      single-event ticks but over-measures when a pin-lever Timex
+        //      has unlock / impulse / drop sub-events within a few ms (the
+        //      threshold walk spans all three as one 40+ ms "pulse").
+        //   B) Phase-span on the 0.15ms-smoothed fold — detects up to 3
+        //      prominent sub-peaks around the main peak and uses the span
+        //      from first to last. Physically correct for multi-event ticks,
+        //      but on a clean single-event tick it latches onto noise wiggles
+        //      and reports 1-2 ms spans (way too narrow → amp > 360° bogus).
+        // Neither dominates. Try threshold first; if it's missing or the
+        // resulting span is implausibly wide (>25 ms, classic multi-event
+        // smear), try phase-span. This keeps threshold's wins on the clean
+        // corpus and rescues the multi-event cases like NoAmplitude.
+        let tickPulseMs = bestPulseMs(peakIdx: tickPeak, fineSignal: fineSmoothed,
+                                      coarseSignal: smoothed, searchRadius: periodSamples / 3,
+                                      beatPeriod: beatPeriod, sampleRate: sampleRate)
+        let tockPulseMs = bestPulseMs(peakIdx: tockPeak, fineSignal: fineSmoothed,
+                                      coarseSignal: smoothed, searchRadius: periodSamples / 3,
+                                      beatPeriod: beatPeriod, sampleRate: sampleRate)
 
         return PulseWidthEstimate(tickPulseMs: tickPulseMs, tockPulseMs: tockPulseMs, foldCount: foldCount)
     }
@@ -181,7 +187,7 @@ public struct AmplitudeEstimator {
     ///   - pulseMs: Pulse width in milliseconds.
     ///   - beatPeriodSeconds: Beat period in seconds.
     ///   - liftAngleDegrees: Lift angle of the movement in degrees.
-    /// - Returns: Amplitude in degrees, or nil if out of plausible range (135-360°).
+    /// - Returns: Amplitude in degrees, or nil if out of plausible range (90-360°).
     public static func amplitude(
         pulseMs: Double, beatPeriodSeconds: Double, liftAngleDegrees: Double
     ) -> Double? {
@@ -192,7 +198,13 @@ public struct AmplitudeEstimator {
         let sinVal = sin(Double.pi * ratio)
         guard sinVal > 1e-10 else { return nil }
         let a = liftAngleDegrees / (2.0 * sinVal)
-        return (a >= 135 && a <= 360) ? a : nil
+        // Lower bound 90°: sick vintage pin-lever movements (Tim's Timex) can
+        // legitimately run at 100-130° and still tick — vacaboja's 135° floor
+        // was too tight for these. Below ~80° a watch usually stops, so 90° is
+        // a safe minimum that admits "running but sick" without letting noise
+        // through (a noise-driven wide pulse pushes ratio toward 0.25, which
+        // corresponds to amplitude near the lift angle itself — well below 90).
+        return (a >= 90 && a <= 360) ? a : nil
     }
 
     /// Compute combined amplitude from a pulse width estimate.
@@ -215,6 +227,84 @@ public struct AmplitudeEstimator {
     }
 
     // MARK: - Private Helpers
+
+    /// Measure pulse width for one side (tick or tock). Prefer the 20%
+    /// threshold width on the coarse fold; if that produces an implausibly
+    /// wide pulse (> 25 ms, typical of multi-event tick smearing) fall back
+    /// to phase-span detection on the fine fold.
+    private func bestPulseMs(
+        peakIdx: Int?, fineSignal: [Float], coarseSignal: [Float],
+        searchRadius: Int, beatPeriod: Double, sampleRate: Double
+    ) -> Double? {
+        guard let peak = peakIdx else { return nil }
+        let halfLimit = beatPeriod / 2
+
+        // Primary: threshold-based.
+        let pwSec = measurePulseWidth(coarseSignal, peakIndex: peak, thresholdFraction: 0.20,
+                                      maxExtent: searchRadius, sampleRate: sampleRate)
+        let thresholdMs: Double? = (pwSec > 0 && pwSec < halfLimit) ? pwSec * 1000 : nil
+
+        // Threshold pulses narrower than 25 ms almost always correspond to
+        // a single well-defined escapement event — trust them.
+        if let ms = thresholdMs, ms < 25.0 {
+            return ms
+        }
+
+        // Threshold pulse is either missing or suspiciously wide. Try
+        // phase-span: find up to 3 prominent sub-peaks within ±searchRadius/2
+        // of the main peak and measure the span from first to last.
+        let phaseRadius = searchRadius / 2
+        if let span = phaseSpanMs(fineSignal, around: peak, radius: phaseRadius, sampleRate: sampleRate),
+           span > 0.5, span / 1000.0 < halfLimit {
+            return span
+        }
+
+        // Neither method gave anything usable.
+        return thresholdMs
+    }
+
+    /// Detect up to three prominent local peaks around a center index and
+    /// return the span (in ms) from the first to last in time. Returns nil if
+    /// fewer than two peaks pass prominence (≥12% of local max) and minimum
+    /// separation (0.5 ms).
+    private func phaseSpanMs(_ signal: [Float], around center: Int, radius: Int, sampleRate: Double) -> Double? {
+        let n = signal.count
+        let lo = max(2, center - radius)
+        let hi = min(n - 3, center + radius)
+        guard lo + 4 < hi else { return nil }
+
+        var localMax: Float = 0
+        for i in lo...hi { if signal[i] > localMax { localMax = signal[i] } }
+        guard localMax > 0 else { return nil }
+        let threshold = localMax * 0.12
+        let minSepSamples = max(1, Int(0.0005 * sampleRate))
+
+        // 5-point local maxima above prominence floor.
+        var peaks: [(idx: Int, amp: Float)] = []
+        for i in lo...hi {
+            let v = signal[i]
+            if v < threshold { continue }
+            if v >= signal[i - 1] && v >= signal[i - 2] && v >= signal[i + 1] && v >= signal[i + 2] {
+                peaks.append((i, v))
+            }
+        }
+        guard !peaks.isEmpty else { return nil }
+
+        // Greedy: keep tallest peaks that are min-sep from already-kept ones.
+        peaks.sort { $0.amp > $1.amp }
+        var kept: [(idx: Int, amp: Float)] = []
+        for p in peaks {
+            if kept.count >= 3 { break }
+            if kept.allSatisfy({ abs($0.idx - p.idx) >= minSepSamples }) {
+                kept.append(p)
+            }
+        }
+        guard kept.count >= 2 else { return nil }
+
+        kept.sort { $0.idx < $1.idx }
+        let spanSamples = kept.last!.idx - kept.first!.idx
+        return Double(spanSamples) / sampleRate * 1000.0
+    }
 
     private func measurePulseWidth(
         _ signal: [Float], peakIndex: Int, thresholdFraction: Float,

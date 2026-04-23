@@ -26,14 +26,16 @@ public struct MeasurementPipeline {
     /// Highpass cutoff applied to the raw signal before any other processing.
     /// Watch-tick energy lives almost entirely above ~4 kHz; room rumble, hum,
     /// mic self-noise, and broadband environmental noise (HVAC, washing
-    /// machines) dominate below that. 5 kHz is the sweet spot: it removes
-    /// enough low-frequency clutter to recover the original corpus fully,
-    /// while preserving the 5-8 kHz band that many vintage watches (Timex
-    /// pin-levers especially) depend on. Pushing to 8 kHz briefly rescued
-    /// a noisy 2.5 Hz recording (Weak_Internal_q29: 58% → 65%) but crushed
-    /// SNR on clean Timex recordings (Timex1_Strays: 97% → 65%; muddyticks:
-    /// 88% → 47%). Not worth the trade.
+    /// machines) dominate below that. 5 kHz is the sweet spot for most
+    /// recordings and preserves the 5-8 kHz band that pin-lever Timexes
+    /// depend on. 8 kHz helps when there's significant mid-band noise
+    /// (HVAC, appliances, voices). We no longer commit to one cutoff — the
+    /// pipeline runs at both and picks the higher-quality result.
     public static let highpassCutoffHz: Double = 5000.0
+
+    /// Alternate highpass cutoff tried in parallel. Higher cutoff rescues
+    /// noisy-environment recordings that 5 kHz can't separate the ticks from.
+    public static let alternateHighpassCutoffHz: Double = 8000.0
 
     private let conditioner = SignalConditioner()
 
@@ -47,9 +49,32 @@ public struct MeasurementPipeline {
     }
 
     /// Run the pipeline with diagnostics and optional manual rate override.
+    ///
+    /// Runs the pipeline at both the primary (5 kHz) and alternate (8 kHz)
+    /// highpass cutoffs and returns whichever gives higher quality. The
+    /// alternate pass reuses the primary's rate decision (knownRate) so it
+    /// only needs to re-do tick extraction — much cheaper than a full second
+    /// pipeline run. The rate identification happens at the primary cutoff.
     public func measureWithDiagnostics(_ input: AudioBuffer, knownRate: StandardBeatRate? = nil) -> (MeasurementResult, PipelineDiagnostics) {
+        let primary = measureAtCutoff(input, cutoff: Self.highpassCutoffHz, knownRate: knownRate)
+
+        // Re-run at alternate cutoff using the primary's identified rate.
+        // If the alternate pass produces a higher-quality tick extraction
+        // (cleaner residuals on the same rate), prefer it.
+        let alternateRate = knownRate ?? primary.0.snappedRate
+        let alternate = measureAtCutoff(input, cutoff: Self.alternateHighpassCutoffHz, knownRate: alternateRate)
+
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_DUALHP"] != nil {
+            FileHandle.standardError.write("[dualHP] primary=\(primary.0.snappedRate.rawValue)bph q=\(Int(primary.0.qualityScore*100))% | alternate=\(alternate.0.snappedRate.rawValue)bph q=\(Int(alternate.0.qualityScore*100))% -> pick \(alternate.0.qualityScore > primary.0.qualityScore ? "alternate" : "primary")\n".data(using: .utf8)!)
+        }
+
+        return alternate.0.qualityScore > primary.0.qualityScore ? alternate : primary
+    }
+
+    /// Run the pipeline at a specific highpass cutoff.
+    private func measureAtCutoff(_ input: AudioBuffer, cutoff: Double, knownRate: StandardBeatRate?) -> (MeasurementResult, PipelineDiagnostics) {
         let sampleRate = input.sampleRate
-        let samples = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
+        let samples = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: cutoff)
         let n = samples.count
 
         // Step 1: Compute envelope and FFT it for rate identification.
@@ -118,22 +143,32 @@ public struct MeasurementPipeline {
                 ? exp(-tickResult.residualStd / (rate.nominalPeriodSeconds * 0.05))
                 : 0.0
 
-            // Period consistency: penalize if measured period is far from nominal
+            // Period consistency: penalize if measured period is far from nominal.
+            // Tolerance is 5% (≈4300 s/day) — wide enough to accept badly-worn
+            // movements running far off rate (Tim's SickWatch sits at ~4.8% drift)
+            // while still punishing the pseudo-periods that wrong harmonics
+            // produce when they lock onto reverb or sub-clicks rather than real
+            // ticks. Residual quality and env magnitude catch those cases.
             let periodConsistency: Double
             if let measuredPeriod = tickResult.measuredPeriod {
                 let periodDeviation = abs(measuredPeriod - rate.nominalPeriodSeconds) / rate.nominalPeriodSeconds
-                // Allow up to ~1% deviation (≈864 s/day); heavily penalize beyond that
-                periodConsistency = exp(-periodDeviation / 0.01)
+                periodConsistency = exp(-periodDeviation / 0.05)
             } else {
                 periodConsistency = 0.0
             }
 
-            // Also factor in envelope FFT magnitude as a tiebreaker
+            // Envelope FFT magnitude as primary tiebreak between rates that all
+            // fit the time domain. A watch's true fundamental dominates the
+            // envelope spectrum; pseudo-harmonics at other rates produce ticks
+            // but weaker envelope peaks. Weighting env magnitude fully (instead
+            // of the old 0.5 + 0.5·env blend) lets the FFT override time-domain
+            // fit when multiple rates pass — e.g. on sick watches where a wrong
+            // harmonic locks onto reverb at a cleaner period than the true rate.
             let envMag = rateScores.first(where: { $0.rate == rate })?.magnitude ?? 0
             let maxEnvMag = rateScores.first?.magnitude ?? 1
             let envBoost = maxEnvMag > 0 ? Double(envMag / maxEnvMag) : 0
 
-            let score = recoveryRate * residualQuality * periodConsistency * (0.5 + 0.5 * envBoost)
+            let score = recoveryRate * residualQuality * periodConsistency * envBoost
 
             candidates.append(CandidateResult(rate: rate, tickResult: tickResult, score: score, recoveryRate: recoveryRate, envMag: envMag))
         }
