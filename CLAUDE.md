@@ -2,6 +2,10 @@
 
 iOS app for measuring mechanical wristwatch beat rate accuracy via iPhone microphone.
 
+## Git policy
+
+This is a solo project with no PR review process. Push directly to `main` is the normal workflow — do not branch or open PRs unless explicitly asked. Tim has pre-authorized `git commit` and `git push origin main` against a clean working tree: proceed without confirmation prompts. Never force-push, never `git reset --hard` uncommitted work, never skip hooks.
+
 ## Project Structure
 
 - **`WatchBeatCore/`** — Standalone Swift Package containing the entire DSP pipeline. Has **no iOS dependencies** (no AVFoundation, UIKit, SwiftUI). Depends only on `Accelerate` and `Foundation`. This is the enforcement boundary: if it imports an iOS framework, the design is wrong.

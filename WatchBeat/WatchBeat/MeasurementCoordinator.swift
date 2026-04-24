@@ -61,6 +61,9 @@ final class MeasurementCoordinator: ObservableObject {
         let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
         /// Escapement pulse widths for amplitude estimation (independent of lift angle).
         let pulseWidths: PulseWidthEstimate?
+        /// True when tick/tock residuals both straddle zero — the rate and beat
+        /// error should be interpreted with caution (and may be wrong outright).
+        let isDisorderly: Bool
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.rateBPH == rhs.rateBPH && lhs.rateError == rhs.rateError &&
@@ -345,7 +348,8 @@ final class MeasurementCoordinator: ObservableObject {
             tickCount: result.tickCount,
             diagnosticText: diagText,
             tickResiduals: tickResiduals,
-            pulseWidths: pulseWidths
+            pulseWidths: pulseWidths,
+            isDisorderly: result.isDisorderly
         )
         state = .result(displayData)
     }

@@ -21,7 +21,19 @@ let pipeline = MeasurementPipeline()
 let result = pipeline.measure(buffer)
 
 // Also run forced 18000 to see candidate's view (useful in tiebreak mode)
-if CommandLine.arguments.contains("--force18") {
+let rateArgs: [(String, StandardBeatRate)] = [("--force18",.bph18000),("--force198",.bph19800),("--force216",.bph21600),("--force252",.bph25200),("--force288",.bph28800),("--force360",.bph36000)]
+for (flag, r) in rateArgs where CommandLine.arguments.contains(flag) {
+    let forced2 = pipeline.measure(buffer, knownRate: r)
+    let ee = forced2.tickTimings.filter{$0.isEvenBeat}.map{$0.residualMs}
+    let oo = forced2.tickTimings.filter{!$0.isEvenBeat}.map{$0.residualMs}
+    func os(_ xs:[Double])->Double {let p=xs.filter{$0>0}.count;let f=Double(p)/Double(xs.count);return max(f,1-f)}
+    print(String(format:"[force %d] q=%d%% ticks=%d | EVEN n=%d os=%.2f sd=%.2f | ODD n=%d os=%.2f sd=%.2f",
+        r.rawValue, Int(forced2.qualityScore*100), forced2.tickCount,
+        ee.count, ee.isEmpty ? 0 : os(ee), ee.isEmpty ? 0 : sqrt(ee.map{($0-ee.reduce(0,+)/Double(ee.count))*($0-ee.reduce(0,+)/Double(ee.count))}.reduce(0,+)/Double(ee.count)),
+        oo.count, oo.isEmpty ? 0 : os(oo), oo.isEmpty ? 0 : sqrt(oo.map{($0-oo.reduce(0,+)/Double(oo.count))*($0-oo.reduce(0,+)/Double(oo.count))}.reduce(0,+)/Double(oo.count))))
+}
+
+if false {
     let forced = pipeline.measure(buffer, knownRate: .bph18000)
     print("[forced 18000] rate=\(forced.snappedRate.rawValue) q=\(Int(forced.qualityScore*100))% ticks=\(forced.tickCount) rateErr=\(String(format: "%+.1f", forced.rateErrorSecondsPerDay)) beatErr=\(forced.beatErrorMilliseconds.map{String(format: "%.2fms",$0)} ?? "—")")
     let ampEst = AmplitudeEstimator()
@@ -40,7 +52,7 @@ let halfPeriodMs = periodMs / 2.0
 print("file=\(url.lastPathComponent)")
 print("rate=\(result.snappedRate.rawValue) bph  period=\(String(format: "%.2f", periodMs)) ms  halfPeriod=\(String(format: "%.2f", halfPeriodMs)) ms")
 print("rateError=\(String(format: "%+.1f", result.rateErrorSecondsPerDay)) s/day  beatError=\(result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "—")")
-print("quality=\(Int(result.qualityScore * 100))%  ticks=\(result.tickCount)")
+print("quality=\(Int(result.qualityScore * 100))%  ticks=\(result.tickCount)  disorderly=\(result.isDisorderly)")
 
 // Amplitude probe — use amplitudeTickTimings (diverges from tickTimings in tiebreak)
 let ampEst = AmplitudeEstimator()

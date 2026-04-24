@@ -38,3 +38,7 @@ tick_anatomy_out/
 tick_anatomy_out_new/
 tick_anatomy_timex/
 WatchBeatCore/plots/
+*.timegraph.svg
+
+# Claude Code (local, per-user permissions and task state)
+.claude/

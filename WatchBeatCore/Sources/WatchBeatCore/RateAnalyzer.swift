@@ -168,28 +168,14 @@ public struct RateAnalyzer {
 
     // MARK: - Beat error
 
-    /// Beat error: timing asymmetry between even and odd beat numbers.
     private func computeBeatError(times: [Double], beatNumbers: [Int],
                                    slope: Double, intercept: Double, mask: [Bool]) -> Double {
-        var evenResiduals: [Double] = []
-        var oddResiduals: [Double] = []
-
+        var residualByBeat: [Int: Double] = [:]
         for i in 0..<times.count where mask[i] {
             let predicted = slope * Double(beatNumbers[i]) + intercept
-            let residual = times[i] - predicted
-            if beatNumbers[i] % 2 == 0 {
-                evenResiduals.append(residual)
-            } else {
-                oddResiduals.append(residual)
-            }
+            residualByBeat[beatNumbers[i]] = times[i] - predicted
         }
-
-        guard !evenResiduals.isEmpty && !oddResiduals.isEmpty else { return 0 }
-
-        let evenMean = evenResiduals.reduce(0, +) / Double(evenResiduals.count)
-        let oddMean = oddResiduals.reduce(0, +) / Double(oddResiduals.count)
-
-        return abs(evenMean - oddMean) * 1000.0
+        return (BeatError.meanPairedAbsDifference(residualsByBeat: residualByBeat) ?? 0) * 1000.0
     }
 
     // MARK: - Statistics

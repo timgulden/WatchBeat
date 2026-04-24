@@ -37,6 +37,10 @@ let package = Package(
             name: "DumpResiduals",
             targets: ["DumpResiduals"]
         ),
+        .executable(
+            name: "TimegraphPlot",
+            targets: ["TimegraphPlot"]
+        ),
     ],
     targets: [
         .target(
@@ -68,6 +72,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "DumpResiduals",
+            dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "TimegraphPlot",
             dependencies: ["WatchBeatCore"]
         ),
         .testTarget(

@@ -32,6 +32,12 @@ public struct MeasurementResult: Sendable {
     /// clean main-vs-sub pattern) while amplitude needs timings at the
     /// reported rate's beatIndex spacing.
     public let amplitudeTickTimings: [TickTiming]
+    /// True when the tick/tock distribution is too scrambled to trust
+    /// beat error (and, at the extreme, rate). Both parities straddle
+    /// the regression centerline roughly 50/50 instead of forming
+    /// distinct tick and tock bands. The UI surfaces this as a caution
+    /// so the user can look at the timegraph and judge for themselves.
+    public let isDisorderly: Bool
 
     public init(
         snappedRate: StandardBeatRate,
@@ -41,7 +47,8 @@ public struct MeasurementResult: Sendable {
         qualityScore: Double,
         tickCount: Int,
         tickTimings: [TickTiming] = [],
-        amplitudeTickTimings: [TickTiming]? = nil
+        amplitudeTickTimings: [TickTiming]? = nil,
+        isDisorderly: Bool = false
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -51,5 +58,6 @@ public struct MeasurementResult: Sendable {
         self.tickCount = tickCount
         self.tickTimings = tickTimings
         self.amplitudeTickTimings = amplitudeTickTimings ?? tickTimings
+        self.isDisorderly = isDisorderly
     }
 }

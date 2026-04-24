@@ -174,6 +174,7 @@ public struct MeasurementPipeline {
         }
 
         // Initial winner: highest time-domain fit score.
+        var tiebreakFired = false
         if let top = candidates.max(by: { $0.score < $1.score }) {
             bestRate = top.rate
             bestTickResult = top.tickResult
@@ -238,6 +239,38 @@ public struct MeasurementPipeline {
                     } else {
                         bestTickResult = cand.tickResult
                     }
+                    tiebreakFired = true
+                    break
+                }
+            }
+
+            // Orderliness fallback. On watches where two rates have nearly-
+            // identical envelope FFT magnitudes, the multiplicative score can
+            // flip to the wrong rate even though the resulting timegraph shows
+            // scrambled tick/tock parities. Check whether the winner's parities
+            // are orderly (one-sided distribution relative to zero on at least
+            // one parity — the other may straddle if the regression center is
+            // slightly off). If the winner is scrambled, walk rates from
+            // lowest to highest and pick the first rate whose tick/tock
+            // distribution is orderly, even if quality is poor. Skipped when
+            // the harmonic tiebreak fired or when the caller pinned a rate.
+            if !tiebreakFired, candidateRates.count > 1,
+               let top = candidates.max(by: { $0.score < $1.score }),
+               top.tickResult.qualityScore < 0.30,
+               let current = bestTickResult, !isOrderly(timings: current.tickTimings) {
+                let others = candidates
+                    .filter { $0.rate != bestRate }
+                    .sorted { $0.rate.hz < $1.rate.hz }
+                if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_ORDER"] != nil {
+                    FileHandle.standardError.write("[orderly] winner=\(bestRate.rawValue) scrambled; trying others low→high\n".data(using: .utf8)!)
+                    for c in others {
+                        let ok = isOrderly(timings: c.tickResult.tickTimings)
+                        FileHandle.standardError.write("[orderly]   \(c.rate.rawValue): orderly=\(ok)\n".data(using: .utf8)!)
+                    }
+                }
+                for cand in others where isOrderly(timings: cand.tickResult.tickTimings) {
+                    bestRate = cand.rate
+                    bestTickResult = cand.tickResult
                     break
                 }
             }
@@ -271,7 +304,8 @@ public struct MeasurementPipeline {
             qualityScore: tickResult.qualityScore,
             tickCount: tickResult.confirmedCount,
             tickTimings: tickResult.tickTimings,
-            amplitudeTickTimings: amplitudeTickTimings
+            amplitudeTickTimings: amplitudeTickTimings,
+            isDisorderly: isDisorderly(timings: tickResult.tickTimings)
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz
@@ -515,6 +549,61 @@ public struct MeasurementPipeline {
         return bestResult
     }
 
+    /// Tick/tock orderliness test. Looks at the *distribution* of residuals
+    /// for each parity relative to the regression center (residual = 0),
+    /// not their means. In an orderly timegraph, tick residuals sit
+    /// consistently on one side of zero and tock residuals on the other —
+    /// the two parities form distinct horizontal lines. On a scrambled
+    /// assignment (wrong rate, mixed tick/tock labeling), both parities
+    /// straddle zero roughly 50/50 because the labels don't correspond to
+    /// real tick/tock structure.
+    ///
+    /// A single parity straddling is tolerated — the regression center
+    /// is a least-squares best fit, not the true tick midline, so one
+    /// cluster may sit across zero even on a clean watch. Both parities
+    /// straddling means the labels are carrying no tick/tock information.
+    /// "Straddles" = dominant side holds < 75% of the parity's samples.
+    private func isOrderly(timings: [TickTiming]) -> Bool {
+        let even = timings.filter { $0.isEvenBeat }.map { $0.residualMs }
+        let odd = timings.filter { !$0.isEvenBeat }.map { $0.residualMs }
+        guard even.count >= 5, odd.count >= 5 else { return false }
+        let straddlesE = Self.oneSidedness(even) < Self.orderlinessThreshold
+        let straddlesO = Self.oneSidedness(odd) < Self.orderlinessThreshold
+        return !(straddlesE && straddlesO)
+    }
+
+    /// Advisory flag for the UI: the reported rate/beat-error should be
+    /// interpreted with caution. Returns `false` when there are too few
+    /// ticks to judge (no data ≠ disorderly).
+    ///
+    /// Current rule: both parities straddle zero. The tick/tock labels
+    /// carry no consistent side-of-center information. Catches scrambled
+    /// recordings (SickWatch, Strong_Headphone).
+    ///
+    /// Uses a more sensitive threshold (0.68) than the rate-selection
+    /// `isOrderly` check (0.60): here we're *advising* the user to look at
+    /// the timegraph; there we're overriding the pipeline's chosen rate.
+    /// Be liberal about advising; conservative about overriding.
+    private func isDisorderly(timings: [TickTiming]) -> Bool {
+        let even = timings.filter { $0.isEvenBeat }.map { $0.residualMs }
+        let odd = timings.filter { !$0.isEvenBeat }.map { $0.residualMs }
+        guard even.count >= 5, odd.count >= 5 else { return false }
+        let straddlesE = Self.oneSidedness(even) < Self.disorderlyAdvisoryThreshold
+        let straddlesO = Self.oneSidedness(odd) < Self.disorderlyAdvisoryThreshold
+        return straddlesE && straddlesO
+    }
+
+    /// Fraction of residuals on the dominant side of zero. 1.0 = all
+    /// positive or all negative; 0.5 = perfect 50/50 split.
+    private static func oneSidedness(_ xs: [Double]) -> Double {
+        let pos = xs.filter { $0 > 0 }.count
+        let frac = Double(pos) / Double(xs.count)
+        return max(frac, 1 - frac)
+    }
+
+    private static let orderlinessThreshold: Double = 0.60
+    private static let disorderlyAdvisoryThreshold: Double = 0.68
+
     /// Centered moving average with clamped edges. O(n) via running sum.
     /// Each output sample is the mean of `squared[max(0, i-half)...min(n-1, i+half)]`
     /// where `half = windowSamples / 2`. Window widths are tracked explicitly so
@@ -731,22 +820,14 @@ public struct MeasurementPipeline {
             regression = linearRegression(times: peakTimes, indices: confirmed)
         }
 
-        // Beat error
         let beatError: Double?
         if !rate.isQuartz && confirmed.count >= 6, let slope = regression.slope, let intercept = regression.intercept {
-            var evenRes: [Double] = [], oddRes: [Double] = []
+            var residualByBeat: [Int: Double] = [:]
             for i in confirmed {
                 let predicted = slope * Double(i) + intercept
-                let residual = peakTimes[i] - predicted
-                if i % 2 == 0 { evenRes.append(residual) } else { oddRes.append(residual) }
+                residualByBeat[i] = peakTimes[i] - predicted
             }
-            if !evenRes.isEmpty && !oddRes.isEmpty {
-                let eMean = evenRes.reduce(0, +) / Double(evenRes.count)
-                let oMean = oddRes.reduce(0, +) / Double(oddRes.count)
-                beatError = abs(eMean - oMean) * 1000.0
-            } else {
-                beatError = nil
-            }
+            beatError = BeatError.meanPairedAbsDifference(residualsByBeat: residualByBeat).map { $0 * 1000.0 }
         } else {
             beatError = nil
         }

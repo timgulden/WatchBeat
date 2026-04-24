@@ -374,6 +374,29 @@ struct ResultScreen: View {
                     .frame(maxHeight: 310)
                     .padding(.top, -8)
 
+                // Disorderly warning
+                if data.isDisorderly {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Text("Tick/tock pattern is disorderly — rate and beat error may be unreliable. Check the timegraph below.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(8)
+                    .background(Color.red.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.red, lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                    .padding(.top, 4)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Warning: tick and tock pattern is disorderly. Rate and beat error may be unreliable. Check the timegraph.")
+                }
+
                 // Lift Angle / Amplitude row
                 if data.pulseWidths != nil {
                     HStack(alignment: .top) {
