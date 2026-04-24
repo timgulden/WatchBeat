@@ -119,11 +119,12 @@ final class AudioCaptureService: @unchecked Sendable {
         self.engine = engine
     }
 
-    /// Stop recording.
+    /// Stop recording and release the audio session so the mic indicator turns off.
     func stopRecording() {
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// Get the most recent `duration` seconds of audio. Returns nil if not enough collected.

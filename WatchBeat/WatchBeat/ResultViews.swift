@@ -5,6 +5,8 @@ import SwiftUI
 struct RateDialView: View {
     let rateError: Double  // s/day
     let beatErrorMs: Double?  // shown in the gap at bottom
+    var isDisorderly: Bool = false  // replaces beat-error display with ---/ERROR
+    var watchPosition: WatchPosition? = nil  // shown above the rate number
 
     private let maxDisplayError: Double = 120.0
     private let maxArcDegrees: Double = 150.0  // each direction from 12:00
@@ -49,6 +51,13 @@ struct RateDialView: View {
 
                 // Rate error number in the center
                 VStack(spacing: 0) {
+                    if let pos = watchPosition {
+                        Text(pos.displayName)
+                            .font(.system(size: size * 0.07, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.bottom, 2)
+                    }
+
                     Text(formatError(rateError))
                         .font(.system(size: errorFontSize(rateError, dialSize: size),
                                       weight: .bold, design: .rounded))
@@ -69,7 +78,20 @@ struct RateDialView: View {
                 .position(center)
 
                 // Beat error in the gap between 5:00 and 7:00
-                if let be = beatErrorMs {
+                if isDisorderly {
+                    VStack(spacing: 1) {
+                        Text("---")
+                            .font(.system(size: size * 0.09, weight: .bold, design: .rounded))
+                            .foregroundStyle(.red)
+                        Text("beat error")
+                            .font(.system(size: size * 0.05))
+                            .foregroundStyle(.secondary)
+                        Text("ERROR")
+                            .font(.system(size: size * 0.055, weight: .semibold))
+                            .foregroundStyle(.red)
+                    }
+                    .position(x: center.x, y: center.y + radius * 0.85)
+                } else if let be = beatErrorMs {
                     VStack(spacing: 1) {
                         Text(String(format: "%.1f ms", be))
                             .font(.system(size: size * 0.09, weight: .bold, design: .rounded))
@@ -94,7 +116,12 @@ struct RateDialView: View {
     private var rateErrorAccessibilityDescription: String {
         let direction = rateError > 0 ? "fast" : rateError < 0 ? "slow" : "accurate"
         var desc = "\(formatError(rateError)) seconds per day, \(direction)"
-        if let be = beatErrorMs {
+        if let pos = watchPosition {
+            desc = "Position \(pos.displayName). " + desc
+        }
+        if isDisorderly {
+            desc += ". Beat error unavailable — tick pattern is disorderly"
+        } else if let be = beatErrorMs {
             desc += ". Beat error \(String(format: "%.1f", be)) milliseconds, \(beatErrorLabel(be).lowercased())"
         }
         return desc
@@ -188,18 +215,111 @@ struct TimegraphView: View {
                     // Fixed Y scale: ±60 s/day over 15 seconds = ±10.4 ms.
                     // Never expands — values beyond ±60 wrap top-to-bottom.
                     let yWindowMs = 60.0 / 86400.0 * 15.0 * 1000.0 * 2.0  // 20.8ms total
-                    let yCenter = (yValues.first ?? 0 + (yValues.last ?? 0)) / 2.0
+                    let yCenter = ((yValues.first ?? 0) + (yValues.last ?? 0)) / 2.0
 
-                    // Center line
                     let centerY = h / 2.0
+                    let margin: CGFloat = 4.0
+                    let plotHeight = max(1, h - 2 * margin)
+                    let pixPerMs = plotHeight / yWindowMs
+
+                    // Regression line spans the first to last visible beat,
+                    // representing the measured rate slope through the data.
+                    let firstIdx = Double(residuals.first?.index ?? 0)
+                    let lastIdx = Double(residuals.last?.index ?? 0)
+                    let firstCumDrift = driftPerBeatMs * firstIdx
+                    let lastCumDrift = driftPerBeatMs * lastIdx
+
+                    let firstX: CGFloat = margin
+                    let lastX: CGFloat = w - margin
+                    let firstY = centerY - CGFloat((firstCumDrift - yCenter) / yWindowMs) * plotHeight
+                    let lastY = centerY - CGFloat((lastCumDrift - yCenter) / yWindowMs) * plotHeight
+
+                    // Bands and regression line wrap modulo yWindowMs in dev
+                    // space, exactly like the dots. The regression line is
+                    // split into segments at each wrap boundary so it forms a
+                    // sawtooth the dots ride on.
+                    let devStart = firstCumDrift - yCenter
+                    let devEnd = lastCumDrift - yCenter
+                    let slopeDevPerX = (lastX > firstX)
+                        ? (devEnd - devStart) / Double(lastX - firstX)
+                        : 0.0
+                    let halfWindow = yWindowMs / 2.0
+
+                    // Collect x-coordinates where the wrapped dev flips sign
+                    // (crossings of (k + 0.5)·yWindowMs in unwrapped dev).
+                    var boundaries: [CGFloat] = []
+                    if abs(slopeDevPerX) > 1e-12 {
+                        let devMin = min(devStart, devEnd)
+                        let devMax = max(devStart, devEnd)
+                        var k = Int(floor((devMin - halfWindow) / yWindowMs)) - 1
+                        let kEnd = Int(ceil((devMax - halfWindow) / yWindowMs)) + 1
+                        while k <= kEnd {
+                            let boundary = halfWindow + Double(k) * yWindowMs
+                            if boundary > devMin && boundary < devMax {
+                                let xCross = firstX + CGFloat((boundary - devStart) / slopeDevPerX)
+                                boundaries.append(xCross)
+                            }
+                            k += 1
+                        }
+                        boundaries.sort()
+                    }
+                    let segXs = [firstX] + boundaries + [lastX]
+
+                    // Draw wrapped bands and line. Orange FAIR (±1.5 ms →
+                    // 3 ms total) first, green GOOD (±0.5 ms → 1 ms total)
+                    // on top, regression line on top of both.
+                    func drawBand(halfWidthMs: Double, color: Color) {
+                        let off = CGFloat(halfWidthMs) * pixPerMs
+                        for i in 0..<(segXs.count - 1) {
+                            let x0 = segXs[i]
+                            let x1 = segXs[i + 1]
+                            guard x1 > x0 else { continue }
+                            let midX = (x0 + x1) / 2
+                            let devMid = devStart + slopeDevPerX * Double(midX - firstX)
+                            let kShift = (devMid / yWindowMs).rounded()
+                            let dev0 = devStart + slopeDevPerX * Double(x0 - firstX) - kShift * yWindowMs
+                            let dev1 = devStart + slopeDevPerX * Double(x1 - firstX) - kShift * yWindowMs
+                            let y0 = centerY - CGFloat(dev0 / yWindowMs) * plotHeight
+                            let y1 = centerY - CGFloat(dev1 / yWindowMs) * plotHeight
+                            var p = Path()
+                            p.move(to: CGPoint(x: x0, y: y0 - off))
+                            p.addLine(to: CGPoint(x: x1, y: y1 - off))
+                            p.addLine(to: CGPoint(x: x1, y: y1 + off))
+                            p.addLine(to: CGPoint(x: x0, y: y0 + off))
+                            p.closeSubpath()
+                            context.fill(p, with: .color(color))
+                        }
+                    }
+
+                    drawBand(halfWidthMs: 1.5, color: .orange.opacity(0.15))
+                    drawBand(halfWidthMs: 0.5, color: .green.opacity(0.22))
+
+                    for i in 0..<(segXs.count - 1) {
+                        let x0 = segXs[i]
+                        let x1 = segXs[i + 1]
+                        guard x1 > x0 else { continue }
+                        let midX = (x0 + x1) / 2
+                        let devMid = devStart + slopeDevPerX * Double(midX - firstX)
+                        let kShift = (devMid / yWindowMs).rounded()
+                        let dev0 = devStart + slopeDevPerX * Double(x0 - firstX) - kShift * yWindowMs
+                        let dev1 = devStart + slopeDevPerX * Double(x1 - firstX) - kShift * yWindowMs
+                        let y0 = centerY - CGFloat(dev0 / yWindowMs) * plotHeight
+                        let y1 = centerY - CGFloat(dev1 / yWindowMs) * plotHeight
+                        var seg = Path()
+                        seg.move(to: CGPoint(x: x0, y: y0))
+                        seg.addLine(to: CGPoint(x: x1, y: y1))
+                        context.stroke(seg, with: .color(.primary.opacity(0.7)), lineWidth: 0.75)
+                    }
+
+
+                    // Horizontal reference line (nominal / perfection)
                     var centerLine = Path()
                     centerLine.move(to: CGPoint(x: 0, y: centerY))
                     centerLine.addLine(to: CGPoint(x: w, y: centerY))
-                    context.stroke(centerLine, with: .color(.gray.opacity(0.2)), lineWidth: 0.5)
+                    context.stroke(centerLine, with: .color(.gray.opacity(0.35)), lineWidth: 0.5)
 
                     // Plot dots
                     let dotSize: CGFloat = 3.0
-                    let margin: CGFloat = 4.0
 
                     for (i, tick) in residuals.enumerated() {
                         let x = margin + (w - 2 * margin) * CGFloat(i) / CGFloat(max(n - 1, 1))
@@ -211,7 +331,7 @@ struct TimegraphView: View {
                         if dev > halfWindow { dev -= yWindowMs }
                         if dev < -halfWindow { dev += yWindowMs }
                         let yNorm = dev / yWindowMs  // -0.5 to +0.5
-                        let y = centerY - CGFloat(yNorm) * max(1, h - 2 * margin)
+                        let y = centerY - CGFloat(yNorm) * plotHeight
 
                         let color: Color = tick.isEven ? .blue : .cyan
                         let rect = CGRect(x: x - dotSize/2, y: y - dotSize/2,

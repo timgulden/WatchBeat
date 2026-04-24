@@ -62,21 +62,26 @@ final class FrequencyMonitor: @unchecked Sendable {
         rollingBuffer = []
     }
 
-    /// Switch to external feed mode, preserving the existing buffer so there's
-    /// no gap in the frequency bars when transitioning from listening to recording.
+    /// Switch to external-feed mode and fully reset all buffered state. Used
+    /// when (re-)entering the Listening screen — we don't want stale bars
+    /// from a previous session to flash before fresh audio has accumulated.
+    /// Bars stay hidden until `samplesAccumulated >= rollingBufferSize`
+    /// (5 s), at which point `appendAndAnalyze` starts publishing again.
     func initializeForExternalFeed(sampleRate: Double) {
-        // Only reset if sample rate changed or buffer not yet initialized
-        if self.sampleRate != sampleRate || rollingBuffer.isEmpty {
+        analysisQueue.sync {
             self.sampleRate = sampleRate
-            rollingBufferSize = Int(rollingBufferDuration * sampleRate)
-            rollingBuffer = [Float](repeating: 0, count: rollingBufferSize)
-            samplesAccumulated = 0
+            self.rollingBufferSize = Int(rollingBufferDuration * sampleRate)
+            self.rollingBuffer = [Float](repeating: 0, count: self.rollingBufferSize)
+            self.samplesAccumulated = 0
+            self.analysisCooldown = 0
         }
-        // Stop the engine (external source will call feedSamples) but keep the buffer
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
-        analysisCooldown = 0
+        Task { @MainActor in
+            self.ratePowers = [:]
+            self.rawPeak = 0
+        }
     }
 
     func feedSamples(_ samples: [Float]) {

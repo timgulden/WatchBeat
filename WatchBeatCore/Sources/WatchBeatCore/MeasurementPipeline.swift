@@ -602,7 +602,7 @@ public struct MeasurementPipeline {
     }
 
     private static let orderlinessThreshold: Double = 0.60
-    private static let disorderlyAdvisoryThreshold: Double = 0.68
+    private static let disorderlyAdvisoryThreshold: Double = 0.75
 
     /// Centered moving average with clamped edges. O(n) via running sum.
     /// Each output sample is the mean of `squared[max(0, i-half)...min(n-1, i+half)]`

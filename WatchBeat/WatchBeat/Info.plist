@@ -6,5 +6,7 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSMotionUsageDescription</key>
+	<string>WatchBeat uses motion sensing to detect which watch position (dial up, crown down, etc.) you're measuring in.</string>
 </dict>
 </plist>

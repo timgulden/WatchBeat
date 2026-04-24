@@ -34,56 +34,63 @@ struct ContentView: View {
 
 // MARK: - Shared Layout
 
-/// Consistent screen layout used by idle, monitoring, recording, and error screens.
-/// Anchors the button area at a fixed distance from the bottom so buttons don't
-/// shift between screens. The logo area flexes to fill remaining space.
-struct ScreenLayout<Logo: View, TextContent: View, Bars: View, Controls: View>: View {
-    @ViewBuilder var logo: Logo
-    @ViewBuilder var textContent: TextContent
-    @ViewBuilder var bars: Bars
+/// Two-square layout used by idle, listening, and measuring screens.
+///
+/// The bottom content is a near-screen-width square (graph + caption); the
+/// top content is a smaller square (wheel + 12-o'clock marker) that centers
+/// in the remaining space above it. Both squares counter-rotate together by
+/// `rotation` so the content reads upright regardless of phone pose —
+/// squares are chosen so their bounding boxes are invariant under 90°
+/// rotation. The title and bottom controls never rotate.
+struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>: View {
+    var rotation: Double = 0
+    @ViewBuilder var smallSquare: SmallContent
+    @ViewBuilder var bigSquare: BigContent
     @ViewBuilder var controls: Controls
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Title
-            Text("WatchBeat")
-                .font(.largeTitle.bold())
-                .padding(.top, 12)
+        GeometryReader { outer in
+            let bigSide = min(outer.size.width - 16, 400)
+            VStack(spacing: 0) {
+                Text("WatchBeat")
+                    .font(.largeTitle.bold())
+                    .padding(.top, 12)
 
-            // Logo — fills available space
-            logo
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Small square area — fills remaining vertical space between
+                // title and big square, with the square content centered.
+                smallSquare
+                    .rotationEffect(.degrees(rotation))
+                    .animation(.easeInOut(duration: 0.28), value: rotation)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Text area — top-aligned with minimum height so the headline stays
-            // in the same position regardless of caption length. 80pt covers
-            // 2 lines at subheadline size on all iPhone widths.
-            textContent
-                .padding(.horizontal, 20)
-                .frame(minHeight: 80, alignment: .top)
-                .padding(.bottom, 12)
+                // Big square — fixed square footprint, centered horizontally.
+                bigSquare
+                    .frame(width: bigSide, height: bigSide)
+                    .rotationEffect(.degrees(rotation))
+                    .animation(.easeInOut(duration: 0.28), value: rotation)
+                    .frame(maxWidth: .infinity)
 
-            // Frequency bars
-            bars
-                .padding(.horizontal, 20)
-
-            // Bottom controls — fixed height region
-            controls
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 20)
-                .frame(height: 110)
+                // Bottom controls — fixed height, never rotates.
+                controls
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 20)
+                    .frame(height: 110)
+            }
         }
     }
 }
 
 // MARK: - Logo Helpers
 
-/// Watch logo with optional GMT hand overlay. Always renders the same view
-/// hierarchy (wheel + hand + marker) so layout is identical regardless of
-/// whether the hand is visible. Hand and marker are hidden via opacity.
+/// Watch logo with optional GMT hand overlay and optional dial backdrop
+/// (workflow wedges). The backdrop lives inside the wheel's own geometry
+/// reader so its size tracks the wheel exactly — there is no risk of it
+/// changing the wheel's own layout compared to the idle screen.
 struct WatchLogo: View {
     var showHand: Bool = false
     var angle: Double = 0
+    var showDialBackdrop: Bool = false
 
     var body: some View {
         GeometryReader { geo in
@@ -91,19 +98,33 @@ struct WatchLogo: View {
             let radius = size / 2
 
             ZStack {
-                // Wheel + hand always in same ZStack — rotate together
+                // Dial wedges sit behind the wheel, sized so their outer edge
+                // is fully concealed by the wheel's rim (which is fully opaque).
+                if showDialBackdrop {
+                    DialWedges(size: size * 0.85)
+                }
+
+                // Wheel + hand always in same ZStack — rotate together.
+                // The wheel image carries an extra +25° so one spoke sits on
+                // the Buffering/Measuring boundary (~1:00); the hand is
+                // unaffected by that offset, so at angle=0 it points at 12:00.
                 ZStack {
                     Image("WatchBeatMark")
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: size, height: size)
-                        .opacity(0.85)
+                        .rotationEffect(.degrees(25))
 
                     GMTHandView(radius: radius * 0.85)
-                        .rotationEffect(.degrees(-30))
                         .opacity(showHand ? 1 : 0)
                 }
                 .rotationEffect(.degrees(angle))
+
+                // Dial labels sit ON TOP of the wheel so the spokes don't
+                // obscure the text.
+                if showDialBackdrop {
+                    DialLabels(size: size * 0.90)
+                }
 
                 // 12:00 marker stays fixed
                 GMTMarkerView()
@@ -114,9 +135,96 @@ struct WatchLogo: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .aspectRatio(1, contentMode: .fit)
-        .frame(maxWidth: 280, maxHeight: 280)
-        .padding(30)
+        .padding(8)
         .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Dial Backdrop
+
+/// A pie slice from `startAngleCW` → `endAngleCW`, where 0° = 12:00 and
+/// angles sweep clockwise.
+struct Wedge: Shape {
+    var startAngleCW: Double
+    var endAngleCW: Double
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        let start = Angle.degrees(startAngleCW - 90)
+        let end = Angle.degrees(endAngleCW - 90)
+        path.move(to: center)
+        path.addArc(center: center, radius: radius,
+                    startAngle: start, endAngle: end, clockwise: false)
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Colored wedges (Buffering / Measuring / Analyzing / Refining) drawn
+/// behind the wheel. Angles are clock-CW from 12:00, at 6°/sec wheel pace:
+/// - Buffering  0°– 30°  (12:00 → 1:00,   5 s)
+/// - Measuring  30°–120°  (1:00 → 4:00,  15 s)
+/// - Analyzing 120°–168°  (4:00 → ~5:36,  8 s)
+/// - Refining  168°–360°  (~5:36 → 12:00, 32 s)
+struct DialWedges: View {
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Wedge(startAngleCW: 0, endAngleCW: 30)
+                .fill(Color.white)
+            Wedge(startAngleCW: 30, endAngleCW: 120)
+                .fill(Color.blue.opacity(0.12))
+            Wedge(startAngleCW: 120, endAngleCW: 168)
+                .fill(Color.orange.opacity(0.12))
+            Wedge(startAngleCW: 168, endAngleCW: 360)
+                .fill(Color(.systemGray6))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Wedge labels drawn ON TOP of the wheel so the spokes don't obscure them.
+struct DialLabels: View {
+    let size: CGFloat
+
+    var body: some View {
+        let radius = size / 2
+        ZStack {
+            // Radial labels along each wedge midline, centered in the
+            // annulus between inner hub and outer rim.
+            radialLabel("Buffering", midCW: 15, radius: radius, radialFraction: 0.55)
+            radialLabel("Measuring", midCW: 75, radius: radius, radialFraction: 0.55)
+            radialLabel("Analyzing", midCW: 144, radius: radius, radialFraction: 0.55)
+
+            // Refining — horizontal text at the 9:00 position (left of hub).
+            Text("Refining")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .offset(x: -radius * 0.55)
+        }
+        .frame(width: size, height: size)
+    }
+
+    private func radialLabel(_ text: String, midCW: Double, radius: CGFloat,
+                             radialFraction: CGFloat) -> some View {
+        let r = radius * radialFraction
+        let theta = (midCW - 90) * .pi / 180
+        let x = r * cos(CGFloat(theta))
+        let y = r * sin(CGFloat(theta))
+        // Outward-radial rotation — text reads from center toward the rim
+        // for all wedges, matching Buffering and Measuring.
+        let rotation = midCW - 90
+
+        return Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            .rotationEffect(.degrees(rotation))
+            .offset(x: x, y: y)
     }
 }
 
@@ -144,28 +252,29 @@ struct IdleScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
     var body: some View {
-        ScreenLayout {
+        SquareScreenLayout {
             WatchLogo()
-        } textContent: {
-            Text("Place mic against watch caseback")
-                .font(.headline)
-                .multilineTextAlignment(.center)
-        } bars: {
-            VStack(alignment: .leading, spacing: 12) {
+        } bigSquare: {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Place mic against watch caseback")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.bottom, 4)
                 tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
                 tipRow(icon: "arrow.down.to.line", text: "Place the watch face-down on a hard surface. Use a soft cloth to protect the crystal.")
                 tipRow(icon: "iphone.gen3", text: "Press the bottom edge of your iPhone firmly against the caseback.")
                 tipRow(icon: "chart.bar.fill", text: "Adjust position to maximize the frequency bar at your watch's beat rate.")
                 tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 4)
-            .offset(y: -20)
-            .frame(height: 240)
+            .padding(12)
         } controls: {
             VStack(spacing: 10) {
                 ActionButton(title: "Listen") {
                     coordinator.startMonitoring()
                 }
+                BottomRow()
             }
         }
     }
@@ -186,49 +295,100 @@ struct IdleScreen: View {
 
 // MARK: - Monitoring Screen
 
+/// Shared caption block for the listening and measuring screens. A bold
+/// position label sits above "Listening..." — when no position is
+/// unambiguous, the slot stays reserved (rendered with a space) so the
+/// line below never shifts. Since this block lives in ScreenLayout's
+/// fixed-minHeight text slot, the wheel above it never moves either.
+struct ListeningCaption: View {
+    let subtitle: String
+    let position: WatchPosition?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text("Position: \(position?.displayName ?? "Undefined")")
+                .font(.title3.weight(.bold))
+                .multilineTextAlignment(.center)
+            Text("Listening...")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+    }
+}
+
+/// Persistent grip reminder pinned to the bottom-left of the controls
+/// area, and (on Listening/Measuring) a centered Cancel button overlaid on
+/// the same row. Fixed height so the primary action button above it lands
+/// in the same vertical position on Idle, Listening, and Measuring.
+struct BottomRow: View {
+    var cancelAction: (() -> Void)? = nil
+
+    var body: some View {
+        ZStack {
+            HStack {
+                Text("← CROWN LEFT")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            if let cancel = cancelAction {
+                Button("Cancel", action: cancel)
+                    .foregroundStyle(.red)
+            }
+        }
+        .frame(height: 30)
+    }
+}
+
 struct MonitoringScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
     var body: some View {
         TimelineView(.animation) { _ in
-            ScreenLayout {
-                WatchLogo(showHand: true, angle: wheelAngle())
-            } textContent: {
-                VStack(spacing: 6) {
-                    Text("Place mic against watch caseback")
-                        .font(.headline)
-                        .multilineTextAlignment(.center)
-                    Text("Look for a peak at your watch's beat rate")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+            let elapsed = sweepElapsed()
+            let ready = elapsed >= MeasurementConstants.listenSweepDuration
+            SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
+                WatchLogo(showHand: true,
+                          angle: wheelAngle(elapsed: elapsed),
+                          showDialBackdrop: true)
+            } bigSquare: {
+                VStack(spacing: 8) {
+                    ListeningCaption(subtitle: ready
+                                     ? "Look for the peak at your watch's beat rate"
+                                     : "Buffering...",
+                                     position: coordinator.currentPosition)
+                    FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                        .frame(maxHeight: .infinity)
                 }
-            } bars: {
-                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                    .frame(height: 240)
+                .padding(12)
             } controls: {
                 VStack(spacing: 10) {
                     ActionButton(title: "Measure") {
                         coordinator.startMeasurement()
                     }
-                    Button("Cancel") { coordinator.stopMonitoring() }
-                        .foregroundStyle(.red)
+                    .disabled(!ready)
+                    BottomRow(cancelAction: { coordinator.stopMonitoring() })
                 }
             }
         }
     }
 
-    private func wheelAngle() -> Double {
-        // After the first monitoring session, always start at 12:00
-        guard coordinator.needsSweep else { return 30 }
+    /// Seconds since monitoring began (for the 12:00→1:00 sweep).
+    private func sweepElapsed() -> Double {
         guard let start = coordinator.monitoringStartTime else { return 0 }
-        let hasData = coordinator.ratePowers.values.contains { $0 > 0 }
-        // Once data arrives, lock to 12:00 — sweep is done
-        if hasData { return 30 }
-        // Cold start: 1-second pause, then 5-second sweep from 11:00 to 12:00
-        let elapsed = (ContinuousClock.now - start).asSeconds
-        let sweepElapsed = max(0, elapsed - 1.0)
-        let progress = min(sweepElapsed / 5.0, 1.0)
+        return (ContinuousClock.now - start).asSeconds
+    }
+
+    /// Wheel starts at angle 0 (matching the idle screen — one spoke slightly
+    /// clockwise of vertical, hand at 12:00) and sweeps to 1:00 (angle 30) over
+    /// `listenSweepDuration` while the rolling buffer fills. Holds at 1:00
+    /// until the user presses Measure.
+    private func wheelAngle(elapsed: Double) -> Double {
+        let progress = min(elapsed / MeasurementConstants.listenSweepDuration, 1.0)
         return progress * 30
     }
 }
@@ -244,20 +404,18 @@ struct RecordingScreen: View {
             let current = coordinator.currentQuality
             let best = coordinator.bestQualitySoFar
 
-            ScreenLayout {
-                WatchLogo(showHand: true, angle: 30 + (elapsed / coordinator.maxRecordingTime) * 360)
-            } textContent: {
-                VStack(spacing: 6) {
-                    Text("Listening...")
-                        .font(.headline)
-                    Text(liveCaption(elapsed: elapsed, quality: best))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+            SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
+                WatchLogo(showHand: true,
+                          angle: recordingWheelAngle(elapsed: elapsed),
+                          showDialBackdrop: true)
+            } bigSquare: {
+                VStack(spacing: 8) {
+                    ListeningCaption(subtitle: liveCaption(elapsed: elapsed, best: best),
+                                     position: coordinator.currentPosition)
+                    FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                        .frame(maxHeight: .infinity)
                 }
-            } bars: {
-                FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
-                    .frame(height: 240)
+                .padding(12)
             } controls: {
                 VStack(spacing: 10) {
                     VStack(spacing: 4) {
@@ -287,8 +445,7 @@ struct RecordingScreen: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Measurement quality")
                     .accessibilityValue("Current \(current) percent, best \(best) percent")
-                    Button("Cancel") { coordinator.cancelMeasurement() }
-                        .foregroundStyle(.red)
+                    BottomRow(cancelAction: { coordinator.cancelMeasurement() })
                 }
             }
         }
@@ -299,11 +456,22 @@ struct RecordingScreen: View {
         return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
     }
 
-    private func liveCaption(elapsed: Double, quality: Int) -> String {
-        if elapsed < 15 { return "Collecting..." }
-        if quality >= 80 { return "Great signal! Finishing..." }
-        if quality > 0 { return "Searching for good contact..." }
-        return "Waiting for first analysis..."
+    /// Wheel resumes at 1:00 (angle 30) and sweeps 330° clockwise back to
+    /// 12:00 (angle 360) over `maxRecordingTime`, maintaining the same 6°/sec
+    /// pace as the listening sweep.
+    private func recordingWheelAngle(elapsed: Double) -> Double {
+        let progress = min(elapsed / coordinator.maxRecordingTime, 1.0)
+        return 30 + progress * 330
+    }
+
+    /// Caption mirrors the wheel's current wedge:
+    /// - 0–15 s post-Measure: "Measuring..."
+    /// - 15 s until the first result returns: "Analyzing..."
+    /// - Thereafter: "Refining..."
+    private func liveCaption(elapsed: Double, best: Int) -> String {
+        if elapsed < MeasurementConstants.analysisWindow { return "Measuring..." }
+        if best == 0 { return "Analyzing..." }
+        return "Refining..."
     }
 
 }
@@ -370,7 +538,10 @@ struct ResultScreen: View {
                 }
 
                 // Dial
-                RateDialView(rateError: data.rateError, beatErrorMs: data.beatErrorMs)
+                RateDialView(rateError: data.rateError,
+                             beatErrorMs: data.beatErrorMs,
+                             isDisorderly: data.isDisorderly,
+                             watchPosition: data.watchPosition)
                     .frame(maxHeight: 310)
                     .padding(.top, -8)
 
@@ -463,12 +634,16 @@ struct ResultScreen: View {
                         }
                     }
 
-                    TimegraphView(
-                        residuals: data.tickResiduals,
-                        rateErrorPerDay: data.rateError,
-                        beatRateHz: Double(data.rateBPH) / 3600.0
-                    )
-                    .aspectRatio(1.618, contentMode: .fit)
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        TimegraphView(
+                            residuals: data.tickResiduals,
+                            rateErrorPerDay: data.rateError,
+                            beatRateHz: Double(data.rateBPH) / 3600.0
+                        )
+                        .aspectRatio(1.618, contentMode: .fit)
+                        Spacer(minLength: 0)
+                    }
                 }
 
                 Spacer(minLength: 8)

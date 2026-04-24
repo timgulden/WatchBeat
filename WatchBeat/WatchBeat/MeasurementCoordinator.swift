@@ -12,8 +12,12 @@ enum MeasurementConstants {
     static let analysisWindow: Double = 15.0
     /// Seconds between analysis passes during recording.
     static let analysisInterval: Double = 3.0
-    /// Maximum recording duration in seconds.
-    static let maxRecordingTime: Double = 60.0
+    /// Duration of the 12:00→1:00 listening sweep while the 5 s rolling buffer
+    /// fills. Measure button is disabled until the sweep completes.
+    static let listenSweepDuration: Double = 5.0
+    /// Maximum duration of the post-Measure recording phase (1:00→12:00).
+    /// Combined with `listenSweepDuration` this matches the 60 s wheel cycle.
+    static let maxRecordingTime: Double = 55.0
     /// Maximum plausible rate error in s/day. Above this we assume a snapping
     /// error (wrong rate chosen), which produces errors in the tens of thousands.
     /// Set generously to accommodate badly-worn movements that still run.
@@ -64,6 +68,10 @@ final class MeasurementCoordinator: ObservableObject {
         /// True when tick/tock residuals both straddle zero — the rate and beat
         /// error should be interpreted with caution (and may be wrong outright).
         let isDisorderly: Bool
+        /// Watch position held throughout the analysis window that produced
+        /// this result, or nil if the phone moved between positions during
+        /// that window (in which case no position is displayed).
+        let watchPosition: WatchPosition?
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.rateBPH == rhs.rateBPH && lhs.rateError == rhs.rateError &&
@@ -74,6 +82,14 @@ final class MeasurementCoordinator: ObservableObject {
     @Published var state: State = .idle
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
+    /// Live watch position (from accelerometer). Nil while the phone is
+    /// between positions or motion isn't running.
+    @Published var currentPosition: WatchPosition?
+    /// Counter-rotation (degrees) to apply to the Listening/Measuring content
+    /// so it reads upright regardless of phone pose. Latched: only updates
+    /// when a new unambiguous position arrives — intermediate nil states
+    /// hold the last confirmed rotation to avoid snap-backs during transits.
+    @Published var latchedUIRotation: Double = 0
     /// User-entered lift angle for amplitude calculation. Persists across sessions.
     /// Defaults to 52° (most common value used by timegraphers).
     @Published var liftAngleDegrees: Double {
@@ -84,15 +100,12 @@ final class MeasurementCoordinator: ObservableObject {
     private(set) var bestQualitySoFar: Int = 0
     /// Quality from the most recent analysis pass (may be lower than best).
     private(set) var currentQuality: Int = 0
-    /// When recording started — the view uses this to compute elapsed time per frame.
+    /// When recording started (user pressed Measure) — drives the post-Measure wheel sweep.
     private(set) var recordingStartTime: ContinuousClock.Instant?
-    /// When monitoring (listening) started — for the initial hand sweep.
+    /// When monitoring (listening) started — drives the 12:00→1:00 buffer-fill sweep.
     private(set) var monitoringStartTime: ContinuousClock.Instant?
     /// Guards the timer task from overwriting state after recording ends.
     private var isRecording: Bool = false
-    /// True only for the first monitoring session. Drives the 11:00→12:00 sweep animation.
-    /// Subsequent returns to monitoring start the hand at 12:00 with no sweep.
-    private(set) var needsSweep: Bool = true
 
     let analysisWindow = MeasurementConstants.analysisWindow
     let qualityThreshold = MeasurementConstants.autoStopQuality
@@ -104,6 +117,7 @@ final class MeasurementCoordinator: ObservableObject {
     private let frequencyMonitor = FrequencyMonitor()
     private let pipeline = MeasurementPipeline()
     private let amplitudeEstimator = AmplitudeEstimator()
+    private let orientationMonitor = OrientationMonitor()
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
@@ -112,6 +126,24 @@ final class MeasurementCoordinator: ObservableObject {
     init() {
         let stored = UserDefaults.standard.double(forKey: "liftAngleDegrees")
         self.liftAngleDegrees = stored > 0 ? stored : Self.defaultLiftAngle
+        orientationMonitor.onPositionChange = { [weak self] pos in
+            self?.currentPosition = pos
+        }
+        orientationMonitor.onClosestPositionChange = { [weak self] closest in
+            self?.latchedUIRotation = Self.rotation(for: closest)
+        }
+    }
+
+    /// Map a watch position to the counter-rotation needed so UI reads
+    /// upright. Both flat poses (face-up, face-down) keep portrait since
+    /// gravity along ±Z gives no meaningful "up" direction for the viewer.
+    private static func rotation(for position: WatchPosition) -> Double {
+        switch position {
+        case .dialDown, .twelveUp, .sixUp: return 0
+        case .dialUp:    return 180
+        case .crownUp:   return -90
+        case .crownDown: return  90
+        }
     }
 
     // MARK: - Lifecycle
@@ -131,42 +163,67 @@ final class MeasurementCoordinator: ObservableObject {
 
     // MARK: - Monitoring
 
+    /// Start listening. AudioCaptureService owns the mic and feeds the
+    /// FrequencyMonitor via its external-feed path, so there is a single
+    /// audio engine across listening + measuring — buffer carries over.
     func startMonitoring() {
-        do {
-            ratePowers = [:]
-            try frequencyMonitor.start()
-            state = .monitoring
-            monitoringStartTime = ContinuousClock.now
-            monitorTask = Task {
+        ratePowers = [:]
+        state = .monitoring
+        monitoringStartTime = ContinuousClock.now
+        orientationMonitor.start()
+
+        Task { [weak self] in
+            guard let self else { return }
+            let granted = await self.captureService.requestPermission()
+            guard granted else {
+                self.state = .error("Microphone access denied.")
+                return
+            }
+            // Fresh buffer on every entry — the previous session's tail is not
+            // part of this new listen.
+            await self.captureService.resetBuffer()
+            self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+            self.captureService.onSamples = { [weak self] samples in
+                self?.frequencyMonitor.feedSamples(samples)
+            }
+            do {
+                try self.captureService.startRecording()
+            } catch {
+                self.state = .error("Could not start audio: \(error.localizedDescription)")
+                return
+            }
+            // Re-init with the real sample rate now that the engine is up.
+            self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+
+            self.monitorTask?.cancel()
+            self.monitorTask = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(100))
+                    guard let self else { break }
                     self.ratePowers = self.frequencyMonitor.ratePowers
                     self.rawPeak = self.frequencyMonitor.rawPeak
                 }
             }
-        } catch {
-            state = .error("Could not start audio: \(error.localizedDescription)")
         }
     }
 
     func stopMonitoring() {
         monitorTask?.cancel()
         monitorTask = nil
-        frequencyMonitor.stop()
-        needsSweep = false
+        captureService.onSamples = nil
+        captureService.stopRecording()
+        orientationMonitor.stop()
         state = .idle
         ratePowers = [:]
     }
 
     // MARK: - Recording
 
+    /// User pressed Measure. Capture is already running from the listening
+    /// phase — just transition state and begin the analysis loop. The buffer
+    /// already holds the pre-Measure listening audio so the first 15 s window
+    /// becomes available roughly 10 s after this call.
     func startMeasurement() {
-        // Cancel the monitoring poll task, but don't call frequencyMonitor.stop()
-        // which would clear the buffer. initializeForExternalFeed() will stop
-        // the engine but preserve the buffer for seamless bars.
-        monitorTask?.cancel()
-        monitorTask = nil
-        needsSweep = false
         recordingTask?.cancel()
         recordingTask = Task { await performContinuousMeasurement() }
     }
@@ -174,34 +231,21 @@ final class MeasurementCoordinator: ObservableObject {
     func cancelMeasurement() {
         recordingTask?.cancel()
         recordingTask = nil
-        captureService.stopRecording()
         monitorTask?.cancel()
         monitorTask = nil
-        frequencyMonitor.stop()
+        captureService.onSamples = nil
+        captureService.stopRecording()
+        orientationMonitor.stop()
         state = .idle
         ratePowers = [:]
     }
 
     private func performContinuousMeasurement() async {
-        let granted = await captureService.requestPermission()
-        guard granted else {
-            state = .error("Microphone access denied.")
-            return
-        }
-
-        frequencyMonitor.initializeForExternalFeed(sampleRate: 48000)
-        captureService.onSamples = { [weak self] samples in
-            self?.frequencyMonitor.feedSamples(samples)
-        }
-
-        do {
-            await captureService.resetBuffer()
-            try captureService.startRecording()
-        } catch {
-            state = .error(error.localizedDescription)
-            return
-        }
-
+        // Capture is already running from monitoring — keep the mic hot but
+        // discard the Buffering audio. The 5 s buffer let the user dial in
+        // placement; the real sample starts fresh at Measure press so the
+        // first 15 s analysis completes at the wheel's 4:00 mark.
+        await captureService.resetBuffer()
         state = .recording
         bestQualitySoFar = 0
         currentQuality = 0
@@ -210,28 +254,30 @@ final class MeasurementCoordinator: ObservableObject {
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError
-        var bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer)?
+        var bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer, ContinuousClock.Instant)?
         var bestQuality: Double = 0
 
-        // Timer task: updates frequency bars every 200ms.
-        // Does NOT update state — the view uses TimelineView to read elapsed time
-        // directly from recordingStartTime at 60fps.
-        monitorTask = Task {
+        // Keep the bars live during recording. Polls frequencyMonitor's
+        // rate powers at ~5 Hz; the view reads elapsed time via TimelineView.
+        monitorTask?.cancel()
+        monitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
-                guard self.isRecording else { break }
+                guard let self, self.isRecording else { break }
                 self.ratePowers = self.frequencyMonitor.ratePowers
             }
         }
 
-        // Wait for enough audio
+        // Wait until the buffer holds a full analysis window.
         while !Task.isCancelled {
             let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed >= analysisWindow || elapsed > maxRecordingTime { break }
-            try? await Task.sleep(for: .milliseconds(500))
+            if elapsed > maxRecordingTime { break }
+            let secs = await captureService.secondsCollected()
+            if secs >= analysisWindow { break }
+            try? await Task.sleep(for: .milliseconds(200))
         }
 
-        // Analysis loop
+        // Analysis loop — hard stop at exactly maxRecordingTime.
         while !Task.isCancelled {
             let elapsed = (ContinuousClock.now - startTime).asSeconds
             if elapsed > maxRecordingTime { break }
@@ -247,7 +293,10 @@ final class MeasurementCoordinator: ObservableObject {
 
                 if quality > bestQuality {
                     bestQuality = quality
-                    bestResult = (result, diagnostics, buffer)
+                    // Stamp the moment this analysis window ended so we can
+                    // later ask the orientation monitor whether the phone
+                    // stayed in one position across its 15-second span.
+                    bestResult = (result, diagnostics, buffer, ContinuousClock.now)
                 }
 
                 // Auto-stop on high quality regardless of rate plausibility.
@@ -259,7 +308,11 @@ final class MeasurementCoordinator: ObservableObject {
                 }
             }
 
-            try? await Task.sleep(for: .seconds(analysisInterval))
+            // Sleep until next analysis, capped by remaining budget so we
+            // never overshoot the hard stop.
+            let remaining = maxRecordingTime - (ContinuousClock.now - startTime).asSeconds
+            let sleepSec = min(analysisInterval, max(0.05, remaining))
+            try? await Task.sleep(for: .seconds(sleepSec))
         }
 
         // Stop the timer from updating state, THEN cancel it
@@ -267,7 +320,17 @@ final class MeasurementCoordinator: ObservableObject {
         monitorTask?.cancel()
         monitorTask = nil
 
+        captureService.onSamples = nil
         captureService.stopRecording()
+
+        // Capture a position snapshot now, while the orientation monitor is
+        // still running, then tear it down. We only need to query it once.
+        let windowPosition: WatchPosition? = {
+            guard let (_, _, _, windowEnd) = bestResult else { return nil }
+            return orientationMonitor.position(endingAt: windowEnd,
+                                               duration: analysisWindow)
+        }()
+        orientationMonitor.stop()
 
         guard !Task.isCancelled else {
             state = .idle
@@ -276,9 +339,9 @@ final class MeasurementCoordinator: ObservableObject {
 
         // Three outcomes: implausibly-far-off (high quality but rate out of range),
         // signal-too-weak (never got a usable fit), or a normal result.
-        guard let (result, diagnostics, audioBuffer) = bestResult,
+        guard let (result, diagnostics, audioBuffer, _) = bestResult,
               result.qualityScore >= minimumDisplayQuality else {
-            if let (r, _, buf) = bestResult {
+            if let (r, _, buf, _) = bestResult {
                 saveRawAudio(buf, result: r)
             }
             let q = Int((bestResult?.0.qualityScore ?? 0) * 100)
@@ -349,7 +412,8 @@ final class MeasurementCoordinator: ObservableObject {
             diagnosticText: diagText,
             tickResiduals: tickResiduals,
             pulseWidths: pulseWidths,
-            isDisorderly: result.isDisorderly
+            isDisorderly: result.isDisorderly,
+            watchPosition: windowPosition
         )
         state = .result(displayData)
     }

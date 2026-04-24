@@ -2,116 +2,185 @@ import Foundation
 import Accelerate
 import WatchBeatCore
 
-let dir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "."
-let files = try FileManager.default.contentsOfDirectory(atPath: dir)
-    .filter { $0.hasSuffix(".wav") }
-    .sorted()
+// Usage: swift run AnalyzeSamples <path-to-wav>
+// For each beat, locate the main envelope peak and count secondary peaks
+// WITHIN ±3 ms of the main. A high fraction of ticks with a near-equal
+// secondary peak inside this window is the fingerprint of picker wobble.
 
-guard !files.isEmpty else { print("No WAV files"); exit(1) }
+let arg = CommandLine.arguments.count > 1
+    ? CommandLine.arguments[1]
+    : "../SoundSamples/Timex1CrownUp_18000bph_q98.wav"
+let url = URL(fileURLWithPath: arg)
 
-// Simplified tick extraction with configurable window
-func testWindow(samples: [Float], sr: Double, windowFrac: Double) -> (ticks: Int, quality: Int, error: Int) {
-    let rate = StandardBeatRate.bph21600
-    let period = rate.nominalPeriodSeconds
-    let ps = Int(round(period * sr))
-    let n = samples.count
-    guard ps > 10 && ps < n / 3 else { return (0, 0, 0) }
-
-    var sq = [Float](repeating: 0, count: n)
-    vDSP_vsq(samples, 1, &sq, 1, vDSP_Length(n))
-
-    let tw = max(10, Int(Double(ps) * windowFrac))
-    let ht = tw / 2
-
-    var bestT = 0; var bestQ = 0.0; var bestE = 0.0
-    for k in 0..<5 {
-        let off = k * ps / 5
-        let nw = (n - off) / ps
-        guard nw >= 3 else { continue }
-
-        var po = [Int]()
-        for w in 0..<nw {
-            let ws = off + w * ps
-            var bi = 0; var bv: Float = 0
-            for i in 0..<ps { if sq[ws+i] > bv { bv = sq[ws+i]; bi = i } }
-            po.append(bi)
-        }
-        let mo = po.sorted()[po.count/2]
-
-        var te = [Float](); var ge = [Float](); var pt = [Double]()
-        for w in 0..<nw {
-            let c = off + w*ps + mo
-            guard c >= ht && c+ht < n else { continue }
-            let ws = c - ht
-            var e: Float = 0
-            for i in 0..<tw { e += sq[ws+i] }
-            te.append(e)
-            var pi = 0; var pv: Float = 0
-            for i in 0..<tw { if sq[ws+i] > pv { pv = sq[ws+i]; pi = i } }
-            let ai = ws + pi
-            if ai > 0 && ai < n-1 {
-                let a=sq[ai-1],b=sq[ai],c2=sq[ai+1]; let d=a-2*b+c2
-                let o2: Float = abs(d)>1e-15 ? 0.5*(a-c2)/d : 0
-                pt.append((Double(ai)+Double(o2))/sr)
-            } else { pt.append(Double(ai)/sr) }
-            let gc = c + ps/2
-            if gc >= ht && gc+ht < n {
-                var g: Float = 0; let gs = gc-ht
-                for i in 0..<tw { g += sq[gs+i] }
-                ge.append(g)
-            }
-        }
-        guard te.count >= 3 else { continue }
-        let mg = ge.sorted()[ge.count/2]
-        var cf = [Int]()
-        for i in 0..<te.count { if te[i] > mg*2 || mg == 0 { cf.append(i) } }
-        guard cf.count >= 3 else { continue }
-        let mt = te.sorted()[te.count/2]
-        let snr = mg > 0 ? Double(mt/mg) : 100
-        let q = min(1, max(0, 1-exp(-snr/5)))
-        var sx=0.0,sy=0.0,sxy=0.0,sxx=0.0,cnt=0.0
-        for i in cf { guard i<pt.count else{continue}; let x=Double(i),y=pt[i]; sx+=x;sy+=y;sxy+=x*y;sxx+=x*x;cnt+=1 }
-        let dn = cnt*sxx-sx*sx
-        guard abs(dn)>1e-20 && cnt>=3 else{continue}
-        let slope = (cnt*sxy-sx*sy)/dn
-        guard abs(slope-period)/period < 0.02 else{continue}
-        let err = (period-slope)/period*86400
-        if cf.count > bestT { bestT=cf.count; bestQ=q; bestE=err }
-    }
-    return (bestT, Int(bestQ*100), Int(bestE))
+guard let buffer = try? WAVReader.read(url: url) else {
+    print("Could not read \(arg)"); exit(1)
 }
 
-print("=== w20 vs w40 on 15-second segments ===\n")
+let sr = buffer.sampleRate
+let raw = buffer.samples
+print("=== \(url.lastPathComponent) ===")
 
-var w20pass = 0; var w40pass = 0; var total = 0
+let pipeline = MeasurementPipeline()
+let (result, _) = pipeline.measureWithDiagnostics(buffer)
+print(String(format: "Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  disord=%@",
+             result.snappedRate.rawValue,
+             result.rateErrorSecondsPerDay,
+             result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "nil",
+             result.qualityScore * 100,
+             result.isDisorderly ? "Y" : "N"))
 
-func processFile(_ filename: String) {
-    let url = URL(fileURLWithPath: dir).appendingPathComponent(filename)
-    guard let buffer = try? WAVReader.read(url: url) else { return }
-    let raw = buffer.samples
-    let sr = buffer.sampleRate
-    let short = String(filename.dropFirst(10).dropLast(4))
-    let seg15 = Int(15 * sr)
+// Build the highpass + squared envelope the pipeline operates on.
+let conditioner = SignalConditioner()
+let hp = conditioner.highpassFilter(raw, sampleRate: sr,
+                                    cutoff: MeasurementPipeline.highpassCutoffHz)
+var sq = [Float](repeating: 0, count: hp.count)
+vDSP_vsq(hp, 1, &sq, 1, vDSP_Length(hp.count))
 
-    let starts = [0, Int(7.5*sr), Int(15*sr)]
-    let names = ["first15", "mid15  ", "last15 "]
+// 0.2 ms moving-avg smooth — keeps sub-ms structure visible.
+let sw = max(1, Int(0.2e-3 * sr))
+var env = [Float](repeating: 0, count: sq.count)
+var acc: Float = 0
+for i in 0..<min(sw, sq.count) { acc += sq[i] }
+for i in sw..<sq.count {
+    acc += sq[i] - sq[i - sw]
+    env[i] = acc / Float(sw)
+}
 
-    for (i, s) in starts.enumerated() {
-        let e = min(s + seg15, raw.count)
-        guard e - s > seg15/2 else { continue }
-        let slice = Array(raw[s..<e])
+// Walk period-sized windows from the first strong-energy sample and pick
+// each window's max. This gives us one tick position per beat.
+let period = 3600.0 / Double(result.snappedRate.rawValue)
+let periodN = Int(period * sr)
+let envMed = env.sorted()[env.count / 2]
+var firstStrong = 0
+for i in 0..<env.count { if env[i] > envMed * 50 { firstStrong = i; break } }
 
-        let r20 = testWindow(samples: slice, sr: sr, windowFrac: 0.2)
-        let r40 = testWindow(samples: slice, sr: sr, windowFrac: 0.4)
-        total += 1
-        if r20.quality >= 30 { w20pass += 1 }
-        if r40.quality >= 30 { w40pass += 1 }
+var tickSamples: [Int] = []
+var cursor = firstStrong
+let tol = periodN / 4
+while cursor < env.count - periodN {
+    let lo = max(0, cursor - tol)
+    let hi = min(env.count, cursor + periodN + tol)
+    var mi = lo; var mv: Float = -1
+    for j in lo..<hi { if env[j] > mv { mv = env[j]; mi = j } }
+    tickSamples.append(mi)
+    cursor = mi + periodN
+}
+print("Walked \(tickSamples.count) tick positions")
 
-        let t20 = r20.quality >= 30 ? "OK" : "xx"
-        let t40 = r40.quality >= 30 ? "OK" : "xx"
-        print("\(short) \(names[i])  w20:\(r20.quality)% \(t20) e=\(r20.error)  w40:\(r40.quality)% \(t40) e=\(r40.error)")
+// For each tick, find all prominent peaks within ±3ms of the main peak.
+// "Prominent" = within 40% of the main peak amplitude, separated by ≥0.3 ms.
+let winMs: Double = 3.0
+let winN = Int(winMs * 1e-3 * sr)
+let minSepN = max(1, Int(0.3e-3 * sr))
+
+var allSecRatios: [Double] = []
+var allSecSeparations: [Double] = []
+var multiCount = 0
+var peakCountHist: [Int: Int] = [:]
+
+for cs in tickSamples {
+    let lo = max(1, cs - winN)
+    let hi = min(env.count - 1, cs + winN)
+    // Main peak amplitude = max inside ±winMs
+    var mv: Float = -1
+    for j in lo..<hi { if env[j] > mv { mv = env[j] } }
+    // All local maxima in window
+    var candidates: [(i: Int, amp: Float)] = []
+    for j in (lo+1)..<hi {
+        if env[j] > env[j-1] && env[j] >= env[j+1] && env[j] >= mv * 0.4 {
+            candidates.append((j, env[j]))
+        }
+    }
+    candidates.sort { $0.amp > $1.amp }
+    var kept: [(i: Int, amp: Float)] = []
+    for c in candidates where !kept.contains(where: { abs($0.i - c.i) < minSepN }) {
+        kept.append(c)
+    }
+    peakCountHist[kept.count, default: 0] += 1
+    if kept.count >= 2 {
+        multiCount += 1
+        let main = kept[0]
+        let sec = kept[1]
+        allSecRatios.append(Double(sec.amp / main.amp))
+        allSecSeparations.append(Double(sec.i - main.i) / sr * 1000)
     }
 }
 
-for f in files { processFile(f) }
-print("\nAbove 30%:  w20: \(w20pass)/\(total)  w40: \(w40pass)/\(total)")
+print(String(format: "\n%d of %d ticks have ≥2 prominent peaks within ±3ms (%.1f%%)",
+             multiCount, tickSamples.count,
+             Double(multiCount) / Double(max(1, tickSamples.count)) * 100))
+print("\nPeak-count histogram (per-tick, ±3ms window):")
+for (k, v) in peakCountHist.sorted(by: { $0.key < $1.key }) {
+    print(String(format: "  %d peak(s): %3d  %@",
+                 k, v, String(repeating: "*", count: v)))
+}
+
+// Tick-to-tick peak-amplitude variability: how uniform are the ticks?
+var tickPeaks: [Double] = []
+for cs in tickSamples {
+    let lo = max(0, cs - Int(2e-3 * sr))
+    let hi = min(env.count, cs + Int(2e-3 * sr))
+    var mv: Float = 0
+    for j in lo..<hi { if env[j] > mv { mv = env[j] } }
+    tickPeaks.append(Double(mv))
+}
+// Also background: median of envelope between ticks (≥periodN/3 away from any tick)
+var bgSamples: [Float] = []
+for cs in tickSamples.dropFirst() {
+    let bgCenter = cs - periodN / 2
+    let lo = max(0, bgCenter - Int(5e-3 * sr))
+    let hi = min(env.count, bgCenter + Int(5e-3 * sr))
+    for j in lo..<hi { bgSamples.append(env[j]) }
+}
+bgSamples.sort()
+let bgMedian = bgSamples.isEmpty ? 1.0 : Double(bgSamples[bgSamples.count / 2])
+let tpSorted = tickPeaks.sorted()
+let tpMedian = tpSorted[tpSorted.count / 2]
+let tpMin = tpSorted.first ?? 0
+let tpMax = tpSorted.last ?? 0
+let tpP10 = tpSorted[max(0, tpSorted.count / 10)]
+let tpP90 = tpSorted[min(tpSorted.count - 1, (tpSorted.count * 9) / 10)]
+print(String(format: "\nTick peak amplitude (env units):"))
+print(String(format: "  median=%.4g  min=%.4g  max=%.4g",
+             tpMedian, tpMin, tpMax))
+print(String(format: "  p10=%.4g  p90=%.4g  p90/p10=%.2f  max/min=%.2f",
+             tpP10, tpP90, tpP90 / max(tpP10, 1e-12), tpMax / max(tpMin, 1e-12)))
+print(String(format: "  median tick/background S/N: %.1f×",
+             tpMedian / max(bgMedian, 1e-12)))
+print(String(format: "  weakest tick / background:   %.1f×",
+             tpMin / max(bgMedian, 1e-12)))
+
+if !allSecRatios.isEmpty {
+    let ratSorted = allSecRatios.sorted()
+    let sepSorted = allSecSeparations.sorted()
+    let meanRatio = allSecRatios.reduce(0, +) / Double(allSecRatios.count)
+    let medRatio = ratSorted[ratSorted.count / 2]
+    let medSep = sepSorted[sepSorted.count / 2]
+    print(String(format: "\nSecondary peak — mean amp ratio: %.2f  median: %.2f",
+                 meanRatio, medRatio))
+    print(String(format: "Secondary peak — median |separation| from main: %.2f ms  range: [%.2f, %.2f]",
+                 abs(medSep),
+                 allSecSeparations.map { abs($0) }.min() ?? 0,
+                 allSecSeparations.map { abs($0) }.max() ?? 0))
+}
+
+// Dump residuals in beat order — the most direct view of "disorderly".
+// An honest galloping escapement will show a clean ±alternation; a worn
+// pivot with random jitter will be noise; a stick-slip or amplitude
+// modulation will show a low-frequency wiggle under the alternation.
+print("\nResiduals by beat index (ms, tick=T, tock=t):")
+for t in result.tickTimings {
+    let marker = t.isEvenBeat ? "T" : "t"
+    let bars = String(repeating: " ", count: max(0, min(40, 20 + Int(t.residualMs * 4))))
+    print(String(format: "  %3d %@ %+.2f%@|", t.beatIndex, marker, t.residualMs, bars))
+}
+
+// Adjacent-beat differences: "instantaneous period" minus nominal, ms.
+// Galloping shows as ± alternation. Slow wobble shows as smooth drift.
+print("\nAdjacent-tick intervals (ms deviation from expected period):")
+let sorted = result.tickTimings.sorted { $0.beatIndex < $1.beatIndex }
+for k in 1..<sorted.count {
+    let di = sorted[k].beatIndex - sorted[k-1].beatIndex
+    let dr = sorted[k].residualMs - sorted[k-1].residualMs
+    print(String(format: "  Δidx=%d  Δresid=%+.2f ms", di, dr))
+}
