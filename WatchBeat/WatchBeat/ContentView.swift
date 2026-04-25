@@ -255,20 +255,21 @@ struct IdleScreen: View {
         SquareScreenLayout {
             WatchLogo()
         } bigSquare: {
+            // Bullets at the top, diagram anchored to the bottom near the
+            // Listen button. The square's size is fixed by SquareScreenLayout
+            // so contents here never shift the wheel above.
             VStack(alignment: .leading, spacing: 10) {
-                Text("Place mic against watch caseback")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.bottom, 4)
                 tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
-                tipRow(icon: "arrow.down.to.line", text: "Place the watch face-down on a hard surface. Use a soft cloth to protect the crystal.")
-                tipRow(icon: "iphone.gen3", text: "Press the bottom edge of your iPhone firmly against the caseback.")
-                tipRow(icon: "chart.bar.fill", text: "Adjust position to maximize the frequency bar at your watch's beat rate.")
                 tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
-                Spacer(minLength: 0)
+                tipRow(icon: "arrow.down", text: "Hold the watch against your iPhone as shown below.")
+                Image("WatchPositioningDiagram")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
             }
-            .padding(12)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 12)
         } controls: {
             VStack(spacing: 10) {
                 ActionButton(title: "Listen") {
@@ -324,15 +325,31 @@ struct ListeningCaption: View {
 /// area, and (on Listening/Measuring) a centered Cancel button overlaid on
 /// the same row. Fixed height so the primary action button above it lands
 /// in the same vertical position on Idle, Listening, and Measuring.
+/// The grip reminder is tappable — it opens a diagram of the correct grip.
 struct BottomRow: View {
     var cancelAction: (() -> Void)? = nil
+    @State private var showingDiagram = false
 
     var body: some View {
         ZStack {
             HStack {
-                Text("← CROWN LEFT")
-                    .font(.footnote.weight(.bold))
+                Button {
+                    showingDiagram = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("← CROWN LEFT")
+                            .font(.footnote.weight(.bold))
+                        Image(systemName: "info.circle")
+                            .font(.footnote)
+                    }
                     .foregroundStyle(.primary)
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .background(Color(.systemGray6))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show watch positioning diagram")
                 Spacer()
             }
             if let cancel = cancelAction {
@@ -341,6 +358,43 @@ struct BottomRow: View {
             }
         }
         .frame(height: 30)
+        .sheet(isPresented: $showingDiagram) {
+            WatchPositioningSheet()
+        }
+    }
+}
+
+/// Modal sheet showing the SVG diagram of how to hold the watch against
+/// the iPhone's bottom edge with the crown pointing left.
+struct WatchPositioningSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                Text("Hold the watch caseback against the bottom edge of your iPhone, with the crown pointing left.")
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+
+                Image("WatchPositioningDiagram")
+                    .resizable()
+                    .scaledToFit()
+                    .padding(.horizontal, 16)
+                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left toward the phone's left side. The phone's bottom microphone contacts the caseback.")
+
+                Spacer(minLength: 0)
+            }
+            .navigationTitle("Holding the Watch")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 
@@ -679,38 +733,30 @@ struct ErrorScreen: View {
                 .font(.largeTitle.bold())
                 .padding(.top, 12)
 
-            Spacer()
-
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.title2)
-                        .foregroundStyle(.orange)
-                    Text("Signal too weak")
-                        .font(.title3.bold())
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
-
-                Text("Tips for a better reading:")
-                    .font(.subheadline.bold())
-                    .padding(.top, 4)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
-                    tipRow(icon: "arrow.down.to.line", text: "Place the watch face-down on a hard surface. Use a soft cloth to protect the crystal.")
-                    tipRow(icon: "iphone.gen3", text: "Press the bottom edge of your iPhone firmly against the caseback.")
-                    tipRow(icon: "chart.bar.fill", text: "Adjust position to maximize the frequency bar at your watch's beat rate.")
-                    tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
-                }
-
-                Text("Some watches are very quiet and may require several attempts.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                Text("Signal too weak")
+                    .font(.title3.bold())
             }
-            .padding(.horizontal, 24)
+            .padding(.top, 12)
 
-            Spacer()
+            VStack(alignment: .leading, spacing: 10) {
+                tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
+                tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
+                tipRow(icon: "arrow.down", text: "Hold the watch against your iPhone as shown below.")
+                tipRow(icon: "arrow.left.and.right", text: "Slide the watch slightly left or right of center to maximize the bar at your watch's beat rate.")
+                tipRow(icon: "earpods", text: "Wired earbuds with a mic can pick up quiet watches better, but you'll lose automatic position detection.")
+
+                Image("WatchPositioningDiagram")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
 
             ActionButton(title: "Try Again") {
                 coordinator.startMonitoring()
