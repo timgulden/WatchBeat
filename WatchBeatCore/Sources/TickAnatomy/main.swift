@@ -286,6 +286,91 @@ struct PerTickAmps {
     }
 }
 
+/// Per-tick trace with candidate picker positions. One entry per individual
+/// tick; used to compare centroid (current production) vs onset (proposed)
+/// detectors visually. Traces are stored downsampled for plotting size.
+struct PerTickTrace {
+    let beatIndex: Int
+    let isEven: Bool
+    let centerSampleAbs: Int          // absolute sample index of original argmax
+    let envSamples: [Float]           // 0.5ms-smoothed envelope, downsampled
+    let fluxSamples: [Float]          // spectral flux detection function, same grid
+    let envSampleRate: Double         // effective sample rate of env/flux samples
+    let envHalfMs: Double             // half-width of samples in ms
+    // Picker candidate offsets, all in ms relative to centerSampleAbs.
+    let argmaxMs: Double              // smoothed-envelope argmax (anchor)
+    let centroidMs: Double?           // centroid in ±5ms of squared (production)
+    let onsetMs20pct: Double?         // walk-back from argmax to 20% of peak
+    let onsetMs5sigma: Double?        // walk-back from argmax to baseline + 5σ
+    let fluxPeakMs: Double?           // spectral-flux peak inside ±10ms window
+    let fluxOnsetMs: Double?          // leading edge of the flux peak (50% of flux max)
+    let fluxFirstMs: Double?          // first flux peak above 30% of window max (early-stopping)
+}
+
+/// Short-time spectral flux on a real-valued signal. For each STFT frame, sums
+/// positive magnitude differences across all bins, which gives a high score on
+/// fast broadband attacks (ticks) and a low score on sustained narrowband
+/// ringing. Returns (flux per frame, hop in samples) — frame center for frame f
+/// is f*hop + window/2 in the input.
+///
+/// Window/hop chosen for tick-grain time resolution: at 44.1 kHz, window=128
+/// ≈ 2.9 ms, hop=32 ≈ 0.73 ms. Window is short enough that a single tick
+/// occupies ~1-2 frames so its onset shows as a sharp flux spike rather than
+/// being smeared across many frames; hop is short enough for sub-ms peak
+/// localization after parabolic interpolation.
+func spectralFlux(_ signal: [Float], window: Int = 128, hop: Int = 32) -> [Float] {
+    let n = signal.count
+    guard n > window + hop else { return [] }
+    let nFrames = (n - window) / hop + 1
+    let log2n = vDSP_Length(log2(Double(window)))
+    guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
+    defer { vDSP_destroy_fftsetup(setup) }
+
+    // Hann window (precomputed).
+    var hann = [Float](repeating: 0, count: window)
+    vDSP_hann_window(&hann, vDSP_Length(window), Int32(vDSP_HANN_NORM))
+
+    var prevMag = [Float](repeating: 0, count: window / 2)
+    var flux = [Float](repeating: 0, count: nFrames)
+
+    var frame = [Float](repeating: 0, count: window)
+    var real = [Float](repeating: 0, count: window / 2)
+    var imag = [Float](repeating: 0, count: window / 2)
+    var mag = [Float](repeating: 0, count: window / 2)
+
+    for f in 0..<nFrames {
+        let start = f * hop
+        // Window the input into `frame`.
+        signal.withUnsafeBufferPointer { sp in
+            vDSP_vmul(sp.baseAddress! + start, 1,
+                      hann, 1, &frame, 1, vDSP_Length(window))
+        }
+        // FFT inside one explicit pointer scope so DSPSplitComplex's raw
+        // pointers stay valid through ctoz, fft, and zvabs.
+        real.withUnsafeMutableBufferPointer { rp in
+        imag.withUnsafeMutableBufferPointer { ip in
+        mag.withUnsafeMutableBufferPointer { mp in
+            var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+            frame.withUnsafeBufferPointer { fp in
+                fp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: window / 2) { cp in
+                    vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(window / 2))
+                }
+            }
+            vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+            vDSP_zvabs(&split, 1, mp.baseAddress!, 1, vDSP_Length(window / 2))
+        }}}
+        // Sum positive magnitude differences across bins.
+        var s: Float = 0
+        for k in 1..<(window / 2) {
+            let d = mag[k] - prevMag[k]
+            if d > 0 { s += d }
+        }
+        flux[f] = s
+        for k in 0..<(window / 2) { prevMag[k] = mag[k] }
+    }
+    return flux
+}
+
 struct AnatomyResult {
     let filename: String
     let sampleRate: Double
@@ -300,6 +385,8 @@ struct AnatomyResult {
     let tockPerTick3: PerTickWidths?
     let tickPerTickVac: PerTickAmps?   // vacaboja's method, per individual tick
     let tockPerTickVac: PerTickAmps?
+    let tickTraces: [PerTickTrace]
+    let tockTraces: [PerTickTrace]
 }
 
 func processFile(_ path: String) -> AnatomyResult? {
@@ -467,6 +554,244 @@ func processFile(_ path: String) -> AnatomyResult? {
     let tickPerTickVac = perTickVacaboja(isEven: true)
     let tockPerTickVac = perTickVacaboja(isEven: false)
 
+    // Per-tick traces: for each candidate, save a downsampled envelope window
+    // around the original-argmax center and compute candidate picker positions
+    // (centroid vs two onset variants). Used by plot_onsets.py to visualize
+    // whether onset is more stable than centroid on multi-sub-event watches.
+    func perTickTraces(isEven: Bool, maxCount: Int = 60) -> [PerTickTrace] {
+        // Restrict to the highest-SNR candidates so the trace overlay isn't
+        // dominated by noisy ticks. SNR-sort then truncate.
+        let pool = candidates
+            .filter { $0.isEven == isEven }
+            .sorted { $0.snr > $1.snr }
+            .prefix(maxCount)
+
+        // Onset detection lives on the raw squared signal smoothed at 0.5 ms —
+        // tight enough that the onset isn't smeared past the actual rise but
+        // wide enough that single-sample noise doesn't trip the threshold.
+        let onsetSmoothMs = 0.5
+        let onsetSmoothSamples = max(3, Int(onsetSmoothMs / 1000.0 * sampleRate))
+
+        // Display downsample: cap stored envelope at ~600 samples per trace so
+        // the JSON stays modest. Half-window is 15 ms = 1323 samples at 44.1k;
+        // factor-2 keeps it visually adequate.
+        let displayHalfMs: Double = 10.0
+        let displayPoints = 400
+        let displaySamplePeriodMs = (2.0 * displayHalfMs) / Double(displayPoints)
+
+        // Spectral-flux STFT geometry: window=128 (~2.9ms @44.1k), hop=32
+        // (~0.73ms). Frame center for frame f is f*hop + window/2.
+        let fftWindow = 128
+        let fftHop = 32
+
+        var out: [PerTickTrace] = []
+        for c in pool {
+            let lo = max(0, c.center - halfWindow)
+            let hi = min(filtered.count - 1, c.center + halfWindow)
+            guard hi > lo + 4 else { continue }
+
+            // Squared signal in absolute window.
+            var sq = [Float](repeating: 0, count: hi - lo + 1)
+            for i in 0...(hi - lo) { let v = filtered[lo + i]; sq[i] = v * v }
+            let env = movingAvg(sq, window: onsetSmoothSamples)
+            let centerLocal = c.center - lo
+
+            // Argmax in env restricted to ±5ms around the candidate center.
+            let searchHalf = max(4, Int(0.005 * sampleRate))
+            let aLo = max(0, centerLocal - searchHalf)
+            let aHi = min(env.count - 1, centerLocal + searchHalf)
+            var argIdx = aLo; var argVal: Float = env[aLo]
+            for i in aLo...aHi { if env[i] > argVal { argVal = env[i]; argIdx = i } }
+            let argmaxMs = Double(argIdx - centerLocal) / sampleRate * 1000.0
+
+            // Centroid (production behavior): centroid of raw squared in ±5ms
+            // around argmax. Mirrors `centroid(in:lo:hi:)` minus baseline.
+            let cHalfS = max(4, Int(0.005 * sampleRate))
+            let cLo = max(0, argIdx - cHalfS)
+            let cHi = min(sq.count - 1, argIdx + cHalfS)
+            var minVal = sq[cLo]
+            for j in (cLo + 1)...cHi { if sq[j] < minVal { minVal = sq[j] } }
+            var num: Double = 0; var den: Double = 0
+            for j in cLo...cHi {
+                let w = Double(sq[j] - minVal)
+                if w > 0 { num += w * Double(j); den += w }
+            }
+            let centroidMs: Double? = den > 0
+                ? Double((num / den) - Double(centerLocal)) / sampleRate * 1000.0
+                : nil
+
+            // Onset (20% of peak): walk back from argmax until env drops below
+            // 20% of the argmax value. Stable on multi-sub-event ticks because
+            // it locks to the *first* event regardless of amplitude balance.
+            let thresh20 = argVal * 0.20
+            var lead20 = argIdx
+            while lead20 > 0 && env[lead20 - 1] >= thresh20 { lead20 -= 1 }
+            let onset20Ms = Double(lead20 - centerLocal) / sampleRate * 1000.0
+
+            // Onset (baseline + 5σ): estimate quiet baseline from the outer
+            // 4 ms of the window, walk back from argmax until env drops below
+            // baseline + 5σ for at least 0.1ms continuously.
+            let baselineWidthSamples = max(1, Int(0.004 * sampleRate))
+            let leftEnd = min(env.count, baselineWidthSamples)
+            let rightStart = max(0, env.count - baselineWidthSamples)
+            var bAcc: Float = 0; var bN: Int = 0
+            for i in 0..<leftEnd { bAcc += env[i]; bN += 1 }
+            for i in rightStart..<env.count { bAcc += env[i]; bN += 1 }
+            let baseline = bN > 0 ? bAcc / Float(bN) : 0
+            var vAcc: Float = 0
+            for i in 0..<leftEnd { let d = env[i] - baseline; vAcc += d * d }
+            for i in rightStart..<env.count { let d = env[i] - baseline; vAcc += d * d }
+            let baseStd = bN > 1 ? sqrt(vAcc / Float(bN)) : 0
+            let thresh5 = baseline + 5.0 * baseStd
+            let onset5Ms: Double? = {
+                guard argVal > thresh5 else { return nil }
+                let minRun = max(1, Int(0.0001 * sampleRate))
+                var lead = argIdx; var below = 0
+                while lead > 0 {
+                    if env[lead] < thresh5 { below += 1 } else { below = 0 }
+                    if below >= minRun { lead += below; break }
+                    lead -= 1
+                }
+                return Double(lead - centerLocal) / sampleRate * 1000.0
+            }()
+
+            // Spectral flux: take a wider raw-signal slice so STFT framing
+            // around centerLocal is well-defined, then resample frame
+            // centers to the same display grid as env.
+            let fluxWindowSamples = Int(0.020 * sampleRate)  // ±20 ms search context
+            let fluxLo = max(0, centerLocal - fluxWindowSamples)
+            let fluxHi = min(filtered.count - lo, centerLocal + fluxWindowSamples + 1)
+            let rawSlice = Array(filtered[(lo + fluxLo)..<min(filtered.count, lo + fluxHi)])
+            let fluxArr = spectralFlux(rawSlice, window: fftWindow, hop: fftHop)
+            // Frame f is centered at fluxLo + f*fftHop + fftWindow/2 (sample
+            // index relative to `env` / centerLocal).
+            func fluxAtMs(_ ms: Double) -> Float {
+                guard !fluxArr.isEmpty else { return 0 }
+                let targetSample = Double(centerLocal) + ms / 1000.0 * sampleRate
+                let frameF = (targetSample - Double(fluxLo) - Double(fftWindow / 2)) / Double(fftHop)
+                let f0 = Int(floor(frameF))
+                let f1 = f0 + 1
+                if f0 < 0 || f1 >= fluxArr.count { return 0 }
+                let frac = Float(frameF - Double(f0))
+                return fluxArr[f0] * (1 - frac) + fluxArr[f1] * frac
+            }
+
+            // Downsample env + flux into displayPoints over ±displayHalfMs.
+            var dispEnv = [Float](repeating: 0, count: displayPoints)
+            var dispFlux = [Float](repeating: 0, count: displayPoints)
+            for k in 0..<displayPoints {
+                let frac = Double(k) / Double(displayPoints - 1)
+                let msFromCenter = -displayHalfMs + frac * (2.0 * displayHalfMs)
+                let absIdx = centerLocal + Int(round(msFromCenter / 1000.0 * sampleRate))
+                if absIdx >= 0 && absIdx < env.count {
+                    dispEnv[k] = env[absIdx]
+                }
+                dispFlux[k] = fluxAtMs(msFromCenter)
+            }
+
+            // Flux peak inside ±10ms of centerLocal — argmax of the flux
+            // detection function in the search window. This is the
+            // "spectrally onset-like" candidate the picker would use.
+            var fluxPeakMs: Double? = nil
+            var fluxOnsetMs: Double? = nil
+            var fluxFirstMs: Double? = nil
+            if !fluxArr.isEmpty {
+                let searchHalfMs: Double = 10.0
+                let searchHalfSamples = searchHalfMs / 1000.0 * sampleRate
+                // Iterate frames whose centers fall in the search window.
+                var bestF = -1
+                var bestV: Float = 0
+                for f in 0..<fluxArr.count {
+                    let frameCenterLocal = Double(fluxLo) + Double(f * fftHop + fftWindow / 2)
+                    let dist = frameCenterLocal - Double(centerLocal)
+                    if abs(dist) <= searchHalfSamples {
+                        if fluxArr[f] > bestV { bestV = fluxArr[f]; bestF = f }
+                    }
+                }
+                if bestF >= 0 {
+                    // Parabolic interpolation around the peak frame for
+                    // sub-frame precision.
+                    var peakFrame = Double(bestF)
+                    if bestF > 0 && bestF < fluxArr.count - 1 {
+                        let y0 = fluxArr[bestF - 1], y1 = fluxArr[bestF], y2 = fluxArr[bestF + 1]
+                        let denom = y0 - 2 * y1 + y2
+                        if denom != 0 {
+                            let r = 0.5 * (y0 - y2) / denom
+                            if abs(r) <= 1 { peakFrame = Double(bestF) + Double(r) }
+                        }
+                    }
+                    let peakSampleLocal = Double(fluxLo) + peakFrame * Double(fftHop) + Double(fftWindow / 2)
+                    fluxPeakMs = (peakSampleLocal - Double(centerLocal)) / sampleRate * 1000.0
+
+                    // Flux onset: walk backward from peak frame until flux
+                    // drops below 50% of peak. Half-peak crossing on a sharp
+                    // attack is close to the actual rise, less jittery than
+                    // an absolute threshold.
+                    let halfPeak = bestV * 0.5
+                    var leadF = bestF
+                    while leadF > 0 && fluxArr[leadF - 1] >= halfPeak { leadF -= 1 }
+                    let leadSampleLocal = Double(fluxLo) + Double(leadF) * Double(fftHop) + Double(fftWindow / 2)
+                    fluxOnsetMs = (leadSampleLocal - Double(centerLocal)) / sampleRate * 1000.0
+
+                    // First flux peak above 30% of the window's max flux —
+                    // early-stopping search. Walks forward through frames in
+                    // the ±10ms search window, finds the first frame that
+                    // is a local maximum AND exceeds 30% of bestV. This
+                    // locks the picker onto the *first* tick-like sub-event
+                    // even when a later sub-event is louder, which is what
+                    // makes tick-vs-tock alignment consistent on watches
+                    // with multiple sub-clicks per tick.
+                    let earlyThresh = bestV * 0.30
+                    let searchHalfSamples = 10.0 / 1000.0 * sampleRate
+                    var firstF = -1
+                    for f in 1..<(fluxArr.count - 1) {
+                        let frameCenterLocal = Double(fluxLo) + Double(f * fftHop + fftWindow / 2)
+                        let dist = frameCenterLocal - Double(centerLocal)
+                        if abs(dist) > searchHalfSamples { continue }
+                        if fluxArr[f] >= earlyThresh
+                           && fluxArr[f] > fluxArr[f - 1]
+                           && fluxArr[f] >= fluxArr[f + 1] {
+                            firstF = f
+                            break
+                        }
+                    }
+                    if firstF >= 0 {
+                        var firstFrame = Double(firstF)
+                        if firstF > 0 && firstF < fluxArr.count - 1 {
+                            let y0 = fluxArr[firstF - 1], y1 = fluxArr[firstF], y2 = fluxArr[firstF + 1]
+                            let denom = y0 - 2 * y1 + y2
+                            if denom != 0 {
+                                let r = 0.5 * (y0 - y2) / denom
+                                if abs(r) <= 1 { firstFrame = Double(firstF) + Double(r) }
+                            }
+                        }
+                        let sampleLocal = Double(fluxLo) + firstFrame * Double(fftHop) + Double(fftWindow / 2)
+                        fluxFirstMs = (sampleLocal - Double(centerLocal)) / sampleRate * 1000.0
+                    }
+                }
+            }
+
+            out.append(PerTickTrace(
+                beatIndex: c.beatIndex, isEven: c.isEven,
+                centerSampleAbs: c.center,
+                envSamples: dispEnv,
+                fluxSamples: dispFlux,
+                envSampleRate: 1000.0 / displaySamplePeriodMs,
+                envHalfMs: displayHalfMs,
+                argmaxMs: argmaxMs,
+                centroidMs: centroidMs,
+                onsetMs20pct: onset20Ms,
+                onsetMs5sigma: onset5Ms,
+                fluxPeakMs: fluxPeakMs,
+                fluxOnsetMs: fluxOnsetMs,
+                fluxFirstMs: fluxFirstMs
+            ))
+        }
+        return out
+    }
+    let tickTraces = perTickTraces(isEven: true)
+    let tockTraces = perTickTraces(isEven: false)
+
     return AnatomyResult(
         filename: url.lastPathComponent,
         sampleRate: sampleRate,
@@ -480,7 +805,9 @@ func processFile(_ path: String) -> AnatomyResult? {
         tickPerTick3: tickPerTick3,
         tockPerTick3: tockPerTick3,
         tickPerTickVac: tickPerTickVac,
-        tockPerTickVac: tockPerTickVac
+        tockPerTickVac: tockPerTickVac,
+        tickTraces: tickTraces,
+        tockTraces: tockTraces
     )
 }
 
@@ -1202,6 +1529,56 @@ func writeMeasurementsJson(
     FileHandle.standardError.write("wrote \(jsonName)\n".data(using: .utf8)!)
 }
 
+/// Per-tick traces JSON: serializes the picker-candidate comparison data so
+/// `plot_onsets.py` can overlay individual ticks with their argmax/centroid/
+/// onset markers and show histograms of inter-tick spacing for each method.
+func writeOnsetsJson(_ a: AnatomyResult) {
+    func optMs(_ v: Double?) -> String {
+        if let v = v, v.isFinite { return String(format: "%.4f", v) }
+        return "null"
+    }
+    func traceBlock(_ t: PerTickTrace) -> String {
+        let env = "[" + t.envSamples.map { String(format: "%.6f", $0) }.joined(separator: ",") + "]"
+        let flux = "[" + t.fluxSamples.map { String(format: "%.6f", $0) }.joined(separator: ",") + "]"
+        return """
+        {
+          "beat_index": \(t.beatIndex),
+          "is_even": \(t.isEven),
+          "center_sample_abs": \(t.centerSampleAbs),
+          "env_half_ms": \(String(format: "%.3f", t.envHalfMs)),
+          "argmax_ms": \(String(format: "%.4f", t.argmaxMs)),
+          "centroid_ms": \(optMs(t.centroidMs)),
+          "onset_20pct_ms": \(optMs(t.onsetMs20pct)),
+          "onset_5sigma_ms": \(optMs(t.onsetMs5sigma)),
+          "flux_peak_ms": \(optMs(t.fluxPeakMs)),
+          "flux_onset_ms": \(optMs(t.fluxOnsetMs)),
+          "flux_first_ms": \(optMs(t.fluxFirstMs)),
+          "env": \(env),
+          "flux": \(flux)
+        }
+        """
+    }
+    let tickArr = a.tickTraces.map { traceBlock($0) }.joined(separator: ",\n  ")
+    let tockArr = a.tockTraces.map { traceBlock($0) }.joined(separator: ",\n  ")
+    let json = """
+    {
+      "file": "\(a.filename)",
+      "bph": \(a.snappedBph),
+      "beat_period_ms": \(String(format: "%.4f", a.beatPeriod * 1000)),
+      "sample_rate": \(Int(a.sampleRate)),
+      "ticks": [
+      \(tickArr)
+      ],
+      "tocks": [
+      \(tockArr)
+      ]
+    }
+    """
+    let name = (a.filename as NSString).deletingPathExtension + ".onsets.json"
+    try? json.write(to: URL(fileURLWithPath: name), atomically: true, encoding: .utf8)
+    FileHandle.standardError.write("wrote \(name)\n".data(using: .utf8)!)
+}
+
 // MARK: - Main
 
 print("file,bph,q%,tick_n,tick_med_snr,tock_n,tock_med_snr,tick_peak_ms,tock_peak_ms")
@@ -1271,6 +1648,7 @@ for path in files {
     )
     writeMeasurementsJson(anatomy: a, tick: tickMeas, tock: tockMeas,
                           liftAngleDeg: liftAngleDeg, vacaboja: vac)
+    writeOnsetsJson(a)
     func combine(_ a: Double?, _ b: Double?) -> (Double?, String) {
         if let a = a, let b = b { return ((a + b) / 2, String(format: "  (tick-tock=%+.0f°)", a - b)) }
         return (a ?? b, "")
