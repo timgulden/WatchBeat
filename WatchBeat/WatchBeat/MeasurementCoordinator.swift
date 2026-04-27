@@ -341,9 +341,10 @@ final class MeasurementCoordinator: ObservableObject {
         // signal-too-weak (never got a usable fit), or a normal result.
         guard let (result, diagnostics, audioBuffer, _) = bestResult,
               result.qualityScore >= minimumDisplayQuality else {
-            if let (r, _, buf, _) = bestResult {
-                saveRawAudio(buf, result: r)
-            }
+            // Disabled for release — uncomment to capture failed-measurement audio for analysis.
+            // if let (r, _, buf, _) = bestResult {
+            //     saveRawAudio(buf, result: r)
+            // }
             let q = Int((bestResult?.0.qualityScore ?? 0) * 100)
             let sr = Int(captureService.sampleRate)
             let peak = String(format: "%.3f", bestResult?.1.rawPeakAmplitude ?? 0)
@@ -351,7 +352,8 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        saveRawAudio(audioBuffer, result: result)
+        // Disabled for release — uncomment to capture successful-measurement audio for analysis.
+        // saveRawAudio(audioBuffer, result: result)
 
         // Snap-confusion: the tick regression's measured rate disagrees sharply
         // with the chosen standard rate. Adjacent standard rates differ by 10-20%,

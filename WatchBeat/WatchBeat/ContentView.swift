@@ -20,8 +20,8 @@ struct ContentView: View {
                 ResultScreen(data: data, coordinator: coordinator)
             case .needsService(let data):
                 NeedsServiceScreen(data: data, coordinator: coordinator)
-            case .error:
-                ErrorScreen(coordinator: coordinator)
+            case .error(let message):
+                ErrorScreen(message: message, coordinator: coordinator)
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -325,31 +325,15 @@ struct ListeningCaption: View {
 /// area, and (on Listening/Measuring) a centered Cancel button overlaid on
 /// the same row. Fixed height so the primary action button above it lands
 /// in the same vertical position on Idle, Listening, and Measuring.
-/// The grip reminder is tappable — it opens a diagram of the correct grip.
 struct BottomRow: View {
     var cancelAction: (() -> Void)? = nil
-    @State private var showingDiagram = false
 
     var body: some View {
         ZStack {
             HStack {
-                Button {
-                    showingDiagram = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("← CROWN LEFT")
-                            .font(.footnote.weight(.bold))
-                        Image(systemName: "info.circle")
-                            .font(.footnote)
-                    }
+                Text("← CROWN LEFT")
+                    .font(.footnote.weight(.bold))
                     .foregroundStyle(.primary)
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 8)
-                    .background(Color(.systemGray6))
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Show watch positioning diagram")
                 Spacer()
             }
             if let cancel = cancelAction {
@@ -358,43 +342,6 @@ struct BottomRow: View {
             }
         }
         .frame(height: 30)
-        .sheet(isPresented: $showingDiagram) {
-            WatchPositioningSheet()
-        }
-    }
-}
-
-/// Modal sheet showing the SVG diagram of how to hold the watch against
-/// the iPhone's bottom edge with the crown pointing left.
-struct WatchPositioningSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
-                Text("Hold the watch caseback against the bottom edge of your iPhone, with the crown pointing left.")
-                    .font(.callout)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 8)
-
-                Image("WatchPositioningDiagram")
-                    .resizable()
-                    .scaledToFit()
-                    .padding(.horizontal, 16)
-                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left toward the phone's left side. The phone's bottom microphone contacts the caseback.")
-
-                Spacer(minLength: 0)
-            }
-            .navigationTitle("Holding the Watch")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
     }
 }
 
@@ -725,7 +672,18 @@ struct ResultScreen: View {
 // MARK: - Error Screen
 
 struct ErrorScreen: View {
+    let message: String
     @ObservedObject var coordinator: MeasurementCoordinator
+
+    /// Mic-unavailable errors are recognized by a known prefix in the
+    /// state's message string (set by MeasurementCoordinator). Only the
+    /// "could not start" / permission paths qualify — a low-amplitude
+    /// recording that completes is still a signal-too-weak result, not
+    /// a mic availability issue.
+    private var isMicUnavailable: Bool {
+        message.hasPrefix("Microphone access denied")
+            || message.hasPrefix("Could not start audio")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -733,6 +691,44 @@ struct ErrorScreen: View {
                 .font(.largeTitle.bold())
                 .padding(.top, 12)
 
+            if isMicUnavailable {
+                micUnavailableContent
+            } else {
+                signalTooWeakContent
+            }
+
+            ActionButton(title: "Try Again") {
+                coordinator.startMonitoring()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
+        }
+    }
+
+    private var micUnavailableContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "mic.slash")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                Text("Microphone unavailable")
+                    .font(.title3.bold())
+            }
+            .padding(.top, 12)
+
+            VStack(alignment: .leading, spacing: 10) {
+                tipRow(icon: "phone.down", text: "End any active phone or video call.")
+                tipRow(icon: "waveform", text: "Quit Voice Memos or any other recording app that may be holding the microphone.")
+                tipRow(icon: "lock.open", text: "Confirm WatchBeat has microphone permission in Settings → Privacy & Security → Microphone.")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var signalTooWeakContent: some View {
+        VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.title2)
@@ -757,12 +753,6 @@ struct ErrorScreen: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-
-            ActionButton(title: "Try Again") {
-                coordinator.startMonitoring()
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 40)
         }
     }
 
