@@ -181,6 +181,7 @@ def beat_error_diagnostic(ticks, tocks, sample_rate, beat_period_ms):
         ("flux peak", "flux_peak_ms",      None),
         ("flux onset","flux_onset_ms",     None),
         ("flux first","flux_first_ms",     None),
+        ("matched",   "matched_ms",        None),
     ]
     out = {}
     for name, key, custom in detectors:

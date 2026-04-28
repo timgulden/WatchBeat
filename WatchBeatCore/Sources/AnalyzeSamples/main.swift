@@ -29,6 +29,67 @@ print(String(format: "Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  disord
              result.qualityScore * 100,
              result.isDisorderly ? "Y" : "N"))
 
+// Per-class μ/σ + one-sidedness — direct read of what the disorderly rule sees.
+// Also test the "label-flip" hypothesis: split the residuals by beat index
+// into early/late halves and check whether the per-class mean changes sign.
+// A sign flip means an off-by-one beat assignment somewhere in the window —
+// after which "tick" is physically a tock and vice versa.
+do {
+    func stats(_ xs: [Double]) -> (mean: Double, sd: Double, oneSided: Double) {
+        guard xs.count > 1 else { return (0, 0, 1) }
+        let m = xs.reduce(0, +) / Double(xs.count)
+        let v = xs.reduce(0) { $0 + ($1 - m) * ($1 - m) } / Double(xs.count - 1)
+        let pos = Double(xs.filter { $0 > 0 }.count) / Double(xs.count)
+        return (m, sqrt(v), max(pos, 1 - pos))
+    }
+    let timings = result.tickTimings.sorted(by: { $0.beatIndex < $1.beatIndex })
+    let split = timings.count / 2
+    let early = Array(timings.prefix(split))
+    let late = Array(timings.suffix(timings.count - split))
+    let evenAll = timings.filter { $0.isEvenBeat }.map { $0.residualMs }
+    let oddAll = timings.filter { !$0.isEvenBeat }.map { $0.residualMs }
+    let evenEarly = early.filter { $0.isEvenBeat }.map { $0.residualMs }
+    let oddEarly = early.filter { !$0.isEvenBeat }.map { $0.residualMs }
+    let evenLate = late.filter { $0.isEvenBeat }.map { $0.residualMs }
+    let oddLate = late.filter { !$0.isEvenBeat }.map { $0.residualMs }
+    let eA = stats(evenAll), oA = stats(oddAll)
+    let eE = stats(evenEarly), oE = stats(oddEarly)
+    let eL = stats(evenLate), oL = stats(oddLate)
+    print(String(format: "  even: μ=%+.2fms σ=%.2fms 1side=%.2f  (n=%d)  early μ=%+.2f late μ=%+.2f",
+                 eA.mean, eA.sd, eA.oneSided, evenAll.count, eE.mean, eL.mean))
+    print(String(format: "  odd:  μ=%+.2fms σ=%.2fms 1side=%.2f  (n=%d)  early μ=%+.2f late μ=%+.2f",
+                 oA.mean, oA.sd, oA.oneSided, oddAll.count, oE.mean, oL.mean))
+    let flip = (eE.mean * eL.mean < 0) || (oE.mean * oL.mean < 0)
+    if flip {
+        print("  *** SIGN FLIP across halves — possible off-by-one label swap ***")
+    }
+
+    // Pair-abs σ: the right disorderly metric. Clean watches and label-swap
+    // recordings both give tight |even-odd| pair clusters ≈ 2*BE; only true
+    // sub-event flipping spreads them out.
+    var beatToRes: [Int: Double] = [:]
+    for t in timings { beatToRes[t.beatIndex] = t.residualMs }
+    var pairAbs: [Double] = []
+    for (beat, ev) in beatToRes where beat % 2 == 0 {
+        if let od = beatToRes[beat + 1] { pairAbs.append(abs(ev - od)) }
+    }
+    if pairAbs.count >= 5 {
+        let sorted = pairAbs.sorted()
+        let median = sorted[sorted.count / 2]
+        let absDev = pairAbs.map { abs($0 - median) }.sorted()
+        let mad = absDev[absDev.count / 2] * 1.4826  // robust σ
+        let mean = pairAbs.reduce(0, +) / Double(pairAbs.count)
+        let v = pairAbs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(pairAbs.count - 1)
+        let sd = sqrt(v)
+        // "Wild" pair count: pairs more than 3·MAD above the median.
+        // Sub-event flipping should produce a small number of these.
+        let wildThresh = median + 3 * mad
+        let wild = pairAbs.filter { $0 > wildThresh }.count
+        print(String(format: "  pair-abs:  μ=%.2f  σ=%.2f  median=%.2f  MAD=%.2f  σ/MAD=%.1f  wild=%d/%d",
+                     mean, sd, median, mad, sd / max(mad, 0.01), wild, pairAbs.count))
+    }
+}
+
 // Build the highpass + squared envelope the pipeline operates on.
 let conditioner = SignalConditioner()
 let hp = conditioner.highpassFilter(raw, sampleRate: sr,

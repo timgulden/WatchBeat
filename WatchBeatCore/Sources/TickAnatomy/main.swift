@@ -305,6 +305,89 @@ struct PerTickTrace {
     let fluxPeakMs: Double?           // spectral-flux peak inside ±10ms window
     let fluxOnsetMs: Double?          // leading edge of the flux peak (50% of flux max)
     let fluxFirstMs: Double?          // first flux peak above 30% of window max (early-stopping)
+    let matchedMs: Double?            // matched-filter alignment vs class-template (sub-event-flip-resistant)
+}
+
+/// Build an average envelope template from a set of per-tick traces, with
+/// each trace's envelope first sub-sample-shifted so the supplied `offset`
+/// (in ms from argmax) lies at the array center. With `offset = centroidMs`
+/// this gives a centroid-aligned template; on iteration passes the offset
+/// becomes the matched-filter refined position from the previous pass.
+/// Each contribution is peak-normalized so loud ticks don't dominate.
+func buildAlignedTemplate(
+    _ traces: [PerTickTrace],
+    offsetMs: (PerTickTrace) -> Double?
+) -> [Float] {
+    guard let first = traces.first else { return [] }
+    let n = first.envSamples.count
+    guard n > 0 else { return [] }
+    let halfLen = n / 2
+    var sum = [Float](repeating: 0, count: n)
+    var contributors: Float = 0
+    for t in traces {
+        guard t.envSamples.count == n, let off = offsetMs(t) else { continue }
+        let msPerPoint = 1000.0 / t.envSampleRate
+        let centerSample = Double(halfLen) + off / msPerPoint
+        let aligned = shiftedCopy(source: t.envSamples,
+                                  centerSample: centerSample,
+                                  length: n)
+        let peak = aligned.max() ?? 0
+        guard peak > 0 else { continue }
+        let inv = 1.0 / peak
+        for i in 0..<n { sum[i] += aligned[i] * inv }
+        contributors += 1
+    }
+    if contributors > 0 { for i in 0..<n { sum[i] /= contributors } }
+    return sum
+}
+
+/// One pass of matched-filter refinement: align each trace by `offsetMs` so
+/// the current best-guess reference lies at center, cross-correlate against
+/// the template, and store the refined offset (`old offset + lag`) into
+/// `matchedMs`. `searchHalfMs` controls how far the lag is allowed to roam
+/// — small (±2 ms) for normal iterations where the template inherits the
+/// candidate's reference; large (±10 ms) for the outlier-rescue pass where
+/// the template is built from inliers only and outlier ticks need to
+/// migrate to the dominant sub-event.
+func matchedFilterPass(
+    _ traces: [PerTickTrace],
+    template: [Float],
+    offsetMs: (PerTickTrace) -> Double?,
+    searchHalfMs: Double = 2.0
+) -> [PerTickTrace] {
+    guard !template.isEmpty else { return traces }
+    return traces.map { t in
+        let n = t.envSamples.count
+        guard n == template.count, let off = offsetMs(t) else {
+            return PerTickTrace(beatIndex: t.beatIndex, isEven: t.isEven,
+                centerSampleAbs: t.centerSampleAbs, envSamples: t.envSamples,
+                fluxSamples: t.fluxSamples, envSampleRate: t.envSampleRate,
+                envHalfMs: t.envHalfMs, argmaxMs: t.argmaxMs,
+                centroidMs: t.centroidMs, onsetMs20pct: t.onsetMs20pct,
+                onsetMs5sigma: t.onsetMs5sigma, fluxPeakMs: t.fluxPeakMs,
+                fluxOnsetMs: t.fluxOnsetMs, fluxFirstMs: t.fluxFirstMs,
+                matchedMs: nil)
+        }
+        let msPerPoint = 1000.0 / t.envSampleRate
+        let halfLen = n / 2
+        let centerSample = Double(halfLen) + off / msPerPoint
+        let aligned = shiftedCopy(source: t.envSamples,
+                                  centerSample: centerSample,
+                                  length: n)
+        let maxLagPoints = max(1, Int(searchHalfMs / msPerPoint))
+        let lagPoints = subSampleLag(template: template,
+                                     candidate: aligned,
+                                     maxLag: maxLagPoints)
+        let lagMs = lagPoints * msPerPoint
+        return PerTickTrace(beatIndex: t.beatIndex, isEven: t.isEven,
+            centerSampleAbs: t.centerSampleAbs, envSamples: t.envSamples,
+            fluxSamples: t.fluxSamples, envSampleRate: t.envSampleRate,
+            envHalfMs: t.envHalfMs, argmaxMs: t.argmaxMs,
+            centroidMs: t.centroidMs, onsetMs20pct: t.onsetMs20pct,
+            onsetMs5sigma: t.onsetMs5sigma, fluxPeakMs: t.fluxPeakMs,
+            fluxOnsetMs: t.fluxOnsetMs, fluxFirstMs: t.fluxFirstMs,
+            matchedMs: off + lagMs)
+    }
 }
 
 /// Short-time spectral flux on a real-valued signal. For each STFT frame, sums
@@ -784,13 +867,133 @@ func processFile(_ path: String) -> AnatomyResult? {
                 onsetMs5sigma: onset5Ms,
                 fluxPeakMs: fluxPeakMs,
                 fluxOnsetMs: fluxOnsetMs,
-                fluxFirstMs: fluxFirstMs
+                fluxFirstMs: fluxFirstMs,
+                matchedMs: nil
             ))
         }
         return out
     }
-    let tickTraces = perTickTraces(isEven: true)
-    let tockTraces = perTickTraces(isEven: false)
+    var tickTraces = perTickTraces(isEven: true)
+    var tockTraces = perTickTraces(isEven: false)
+
+    // Matched-filter refinement, centroid-bootstrapped + iterated.
+    //
+    // Pass 0 aligns each trace to its centroid (class-unbiased reference)
+    // and builds a shared template from all traces. Subsequent passes use
+    // the previous pass's matched-filter offset as the alignment reference,
+    // sharpening the template each round. Convergence: stop when the max
+    // per-tick offset change is < 0.01 ms or the iteration cap is reached.
+    //
+    // Cost is bounded — each pass is two array shifts + one cross-correlation
+    // per tick (≈ 90 ticks × 400 samples × 80 lags ≈ 3M float ops per pass).
+    // We cap at 5 iterations and report the wall-clock cost so we can budget
+    // it for the production pipeline.
+    let mfStart = Date()
+    var mfIters = 0
+    do {
+        let maxIters = 5
+        let convergeMs = 0.01
+        for iter in 0..<maxIters {
+            let getOffset: (PerTickTrace) -> Double? = iter == 0
+                ? { $0.centroidMs }
+                : { $0.matchedMs }
+            let template = buildAlignedTemplate(tickTraces + tockTraces, offsetMs: getOffset)
+            let prevTick = tickTraces, prevTock = tockTraces
+            tickTraces = matchedFilterPass(tickTraces, template: template, offsetMs: getOffset)
+            tockTraces = matchedFilterPass(tockTraces, template: template, offsetMs: getOffset)
+            mfIters = iter + 1
+            var maxDelta = 0.0
+            for (a, b) in zip(prevTick + prevTock, tickTraces + tockTraces) {
+                let prev = (iter == 0 ? a.centroidMs : a.matchedMs) ?? 0
+                let curr = b.matchedMs ?? prev
+                maxDelta = max(maxDelta, abs(curr - prev))
+            }
+            if maxDelta < convergeMs { break }
+        }
+    }
+
+    // 1.5σ iterated class-wise trimming. After matched-filter convergence,
+    // joint-regress matched_ms positions, compute per-class residuals, and
+    // null matched_ms on ticks more than 1.5σ from the per-class mean. Re-fit
+    // on survivors; iterate until stable. The 1.5σ threshold cracks bimodal
+    // distributions that 2σ misses (when σ is inflated by the bimodality
+    // itself) while preserving 50%+ of ticks across the OmegaStudy corpus.
+    let trimK = 1.5
+    let trimIters = 4
+    let allTracesPostMF = tickTraces + tockTraces
+    var keptFlags = [Bool](repeating: true, count: allTracesPostMF.count)
+    for _ in 0..<trimIters {
+        var n = 0
+        var meanBi = 0.0, meanPos = 0.0
+        var positions = [Double](repeating: 0, count: allTracesPostMF.count)
+        for (i, t) in allTracesPostMF.enumerated() {
+            guard keptFlags[i], let m = t.matchedMs else { continue }
+            positions[i] = Double(t.centerSampleAbs) / sampleRate * 1000.0 + m
+            meanBi += Double(t.beatIndex); meanPos += positions[i]; n += 1
+        }
+        guard n >= 4 else { break }
+        meanBi /= Double(n); meanPos /= Double(n)
+        var sxx = 0.0, sxy = 0.0
+        for (i, t) in allTracesPostMF.enumerated() where keptFlags[i] && t.matchedMs != nil {
+            let dx = Double(t.beatIndex) - meanBi
+            let dy = positions[i] - meanPos
+            sxx += dx * dx; sxy += dx * dy
+        }
+        let slope = sxx > 0 ? sxy / sxx : 0
+        let intercept = meanPos - slope * meanBi
+        var sumE = 0.0, sumO = 0.0; var ne = 0, no = 0
+        var residuals = [Double](repeating: 0, count: allTracesPostMF.count)
+        for (i, t) in allTracesPostMF.enumerated() where keptFlags[i] && t.matchedMs != nil {
+            residuals[i] = positions[i] - (slope * Double(t.beatIndex) + intercept)
+            if t.isEven { sumE += residuals[i]; ne += 1 } else { sumO += residuals[i]; no += 1 }
+        }
+        let muE = ne > 0 ? sumE / Double(ne) : 0
+        let muO = no > 0 ? sumO / Double(no) : 0
+        var ssE = 0.0, ssO = 0.0
+        for (i, t) in allTracesPostMF.enumerated() where keptFlags[i] && t.matchedMs != nil {
+            let mu = t.isEven ? muE : muO
+            let d = residuals[i] - mu
+            if t.isEven { ssE += d * d } else { ssO += d * d }
+        }
+        let sdE = ne > 1 ? sqrt(ssE / Double(ne)) : 0
+        let sdO = no > 1 ? sqrt(ssO / Double(no)) : 0
+        var changed = false
+        for (i, t) in allTracesPostMF.enumerated() where keptFlags[i] && t.matchedMs != nil {
+            let mu = t.isEven ? muE : muO
+            let sd = t.isEven ? sdE : sdO
+            if sd > 0 && abs(residuals[i] - mu) > trimK * sd {
+                keptFlags[i] = false; changed = true
+            }
+        }
+        if !changed { break }
+    }
+    // Apply the trim by nulling matched_ms on dropped traces. Plot and
+    // BE diagnostic both already skip nil matched_ms.
+    var trimTickDropped = 0, trimTockDropped = 0
+    func nulled(_ t: PerTickTrace) -> PerTickTrace {
+        return PerTickTrace(beatIndex: t.beatIndex, isEven: t.isEven,
+            centerSampleAbs: t.centerSampleAbs, envSamples: t.envSamples,
+            fluxSamples: t.fluxSamples, envSampleRate: t.envSampleRate,
+            envHalfMs: t.envHalfMs, argmaxMs: t.argmaxMs,
+            centroidMs: t.centroidMs, onsetMs20pct: t.onsetMs20pct,
+            onsetMs5sigma: t.onsetMs5sigma, fluxPeakMs: t.fluxPeakMs,
+            fluxOnsetMs: t.fluxOnsetMs, fluxFirstMs: t.fluxFirstMs,
+            matchedMs: nil)
+    }
+    for i in 0..<tickTraces.count where !keptFlags[i] {
+        tickTraces[i] = nulled(tickTraces[i]); trimTickDropped += 1
+    }
+    let tockBase = tickTraces.count
+    for j in 0..<tockTraces.count where !keptFlags[tockBase + j] {
+        tockTraces[j] = nulled(tockTraces[j]); trimTockDropped += 1
+    }
+
+    let mfElapsedMs = Date().timeIntervalSince(mfStart) * 1000
+    let logLine = "matched-filter: \(mfIters) iters + 1.5σ trim, "
+        + "dropped tick=\(trimTickDropped)/\(tickTraces.count) "
+        + "tock=\(trimTockDropped)/\(tockTraces.count), "
+        + "\(String(format: "%.1f", mfElapsedMs))ms\n"
+    FileHandle.standardError.write(logLine.data(using: .utf8)!)
 
     return AnatomyResult(
         filename: url.lastPathComponent,
@@ -1553,6 +1756,7 @@ func writeOnsetsJson(_ a: AnatomyResult) {
           "flux_peak_ms": \(optMs(t.fluxPeakMs)),
           "flux_onset_ms": \(optMs(t.fluxOnsetMs)),
           "flux_first_ms": \(optMs(t.fluxFirstMs)),
+          "matched_ms": \(optMs(t.matchedMs)),
           "env": \(env),
           "flux": \(flux)
         }
