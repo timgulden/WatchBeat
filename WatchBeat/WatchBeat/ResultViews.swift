@@ -69,7 +69,14 @@ struct RateDialView: View {
                         .font(.system(size: size * 0.07, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    if abs(rateError) > 0.5 {
+                    if let tier = rateTier(rateError) {
+                        Text(tier)
+                            .font(.system(size: size * 0.052, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                            .padding(.horizontal, size * 0.04)
+                    } else if abs(rateError) > 0.5 {
                         Text(rateError > 0 ? "FAST" : "SLOW")
                             .font(.system(size: size * 0.055, weight: .semibold))
                             .foregroundStyle(rateError > 0 ? .blue : .red)
@@ -116,6 +123,9 @@ struct RateDialView: View {
     private var rateErrorAccessibilityDescription: String {
         let direction = rateError > 0 ? "fast" : rateError < 0 ? "slow" : "accurate"
         var desc = "\(formatError(rateError)) seconds per day, \(direction)"
+        if let tier = rateTier(rateError) {
+            desc += ". \(tier)"
+        }
         if let pos = watchPosition {
             desc = "Position \(pos.displayName). " + desc
         }
@@ -125,6 +135,19 @@ struct RateDialView: View {
             desc += ". Beat error \(String(format: "%.1f", be)) milliseconds, \(beatErrorLabel(be).lowercased())"
         }
         return desc
+    }
+
+    /// Highest accuracy tier the measured rate qualifies for. Returns nil
+    /// if the rate is outside the loosest tier (±60 s/day) — caller should
+    /// fall back to the FAST/SLOW indicator. Tiers are picked from strict
+    /// to lenient; chronometer-grade preserves COSC/ISO-3159's asymmetric
+    /// tolerance (−4 / +6).
+    private func rateTier(_ rate: Double) -> String? {
+        if rate >= -4 && rate <= 6 { return "Chronometer-grade" }
+        if abs(rate) <= 10 { return "Strong" }
+        if abs(rate) <= 30 { return "Healthy" }
+        if abs(rate) <= 60 { return "Serviceable" }
+        return nil
     }
 
     private func beatErrorLabel(_ ms: Double) -> String {

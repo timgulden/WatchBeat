@@ -652,6 +652,13 @@ struct ResultScreen: View {
                 ActionButton(title: "Measure Again") {
                     coordinator.startMonitoring()
                 }
+                HStack {
+                    Text("← CROWN LEFT")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                }
+                .padding(.top, 6)
                 .padding(.bottom, 20)
             }
             .padding(.horizontal, 20)
