@@ -43,6 +43,18 @@ public struct MeasurementResult: Sendable {
     /// showing a number the user shouldn't trust.
     public let isLowConfidence: Bool
 
+    /// Measured period (seconds per beat) from the regression. Combined
+    /// with `regressionIntercept` and a tick's `beatIndex` + `residualMs`,
+    /// the tick's absolute time in the recording is reconstructable as
+    /// `measuredPeriod * beatIndex + regressionIntercept + residualMs/1000`.
+    /// Exposed for diagnostic tools that need to overlay ticks on the
+    /// audio timeline. Production code reads this only via the derived
+    /// `rateErrorSecondsPerDay`.
+    public let measuredPeriod: Double?
+
+    /// Regression intercept (seconds). See `measuredPeriod`.
+    public let regressionIntercept: Double?
+
     public init(
         snappedRate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
@@ -52,7 +64,9 @@ public struct MeasurementResult: Sendable {
         tickCount: Int,
         tickTimings: [TickTiming] = [],
         amplitudeTickTimings: [TickTiming]? = nil,
-        isLowConfidence: Bool = false
+        isLowConfidence: Bool = false,
+        measuredPeriod: Double? = nil,
+        regressionIntercept: Double? = nil
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -63,5 +77,7 @@ public struct MeasurementResult: Sendable {
         self.tickTimings = tickTimings
         self.amplitudeTickTimings = amplitudeTickTimings ?? tickTimings
         self.isLowConfidence = isLowConfidence
+        self.measuredPeriod = measuredPeriod
+        self.regressionIntercept = regressionIntercept
     }
 }

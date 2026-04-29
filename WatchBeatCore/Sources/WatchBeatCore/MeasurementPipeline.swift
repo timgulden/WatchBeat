@@ -316,7 +316,9 @@ public struct MeasurementPipeline {
             tickCount: tickResult.confirmedCount,
             tickTimings: tickResult.tickTimings,
             amplitudeTickTimings: amplitudeTickTimings,
-            isLowConfidence: tickResult.isLowConfidence
+            isLowConfidence: tickResult.isLowConfidence,
+            measuredPeriod: tickResult.measuredPeriod,
+            regressionIntercept: tickResult.regressionIntercept
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz

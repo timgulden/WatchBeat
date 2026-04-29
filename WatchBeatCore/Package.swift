@@ -41,6 +41,10 @@ let package = Package(
             name: "TimegraphPlot",
             targets: ["TimegraphPlot"]
         ),
+        .executable(
+            name: "OnsetTimeline",
+            targets: ["OnsetTimeline"]
+        ),
     ],
     targets: [
         .target(
@@ -77,6 +81,13 @@ let package = Package(
         .executableTarget(
             name: "TimegraphPlot",
             dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "OnsetTimeline",
+            dependencies: ["WatchBeatCore"],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+            ]
         ),
         .testTarget(
             name: "WatchBeatCoreTests",
