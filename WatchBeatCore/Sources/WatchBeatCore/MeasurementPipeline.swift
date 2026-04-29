@@ -282,6 +282,53 @@ public struct MeasurementPipeline {
             measuredPeriod: nil, residualStd: .infinity, tickTimings: []
         )
 
+        // Re-walk the winner using the regression-derived period from the
+        // initial nominal-period walk. With a fixed nominal period, watches
+        // with > ±200 s/day rate error see beats drift past the picker's
+        // ±20 ms search window at the start and end of the recording; the
+        // picker silently drops them. Re-walking at the actual period keeps
+        // every beat near its window center across the full 15 s.
+        //
+        // We use the regression slope (not the envelope FFT period) because
+        // on sick pin-lever Timexes the FFT can have a dominant peak 4-5%
+        // off the true tick rate. The regression is computed from actual
+        // confirmed tick positions in the time domain, so it accurately
+        // reflects what the watch is doing — even when the FFT doesn't.
+        //
+        // Skipped when the harmonic tiebreak fired (the tick data is
+        // already from a different rate's walk).
+        if !tiebreakFired,
+           tickResult.confirmedCount >= 10,
+           let regSlope = tickResult.measuredPeriod, regSlope > 0 {
+            let nominalPeriod = bestRate.nominalPeriodSeconds
+            // Only re-walk when the regression period differs from nominal
+            // by enough to push beats past the search-window boundary. The
+            // search width is ±20 % of period (= 40 ms total at 18000 bph),
+            // so when accumulated drift across the recording exceeds that,
+            // beats at the edges fall outside the search range. Below that
+            // threshold the first-walk picks already cover the recording
+            // and re-walking risks introducing rate bias if the first
+            // regression slope was off (e.g. on multi-sub-event watches).
+            let usableLength = Double(samples.count) / sampleRate
+            let totalBeats = usableLength / nominalPeriod
+            let driftAcrossRecording = totalBeats * abs(regSlope - nominalPeriod)
+            let searchHalfWidth = 0.040  // 40 ms = full search width at 18000 bph
+            if driftAcrossRecording > searchHalfWidth {
+                let rewalked = extractTicks(
+                    samples: samples, sampleRate: sampleRate,
+                    rate: bestRate, measuredHz: 1.0 / regSlope,
+                    walkPeriodOverride: regSlope
+                )
+                // Only adopt the re-walked result if it found at least as
+                // many ticks. The regression-derived period should always be
+                // closer to truth than nominal, but guard against pathological
+                // cases where re-walking breaks rate detection somehow.
+                if rewalked.confirmedCount >= tickResult.confirmedCount {
+                    tickResult = rewalked
+                }
+            }
+        }
+
         // Apply matched-filter refinement to the WINNING rate's tick result.
         // This is the expensive step (~5–10 ms in release per call), so it
         // runs once after rate selection rather than for every candidate
@@ -514,11 +561,12 @@ public struct MeasurementPipeline {
     /// where ticks landing near window edges split their energy and get missed.
     private func extractTicks(
         samples: [Float], sampleRate: Double,
-        rate: StandardBeatRate, measuredHz: Double
+        rate: StandardBeatRate, measuredHz: Double,
+        walkPeriodOverride: Double? = nil
     ) -> TickExtractionResult {
         let n = samples.count
-        // Use the candidate rate's nominal period for window sizing, not the
-        // FFT-interpolated peak. On sick pin-lever Timexes the envelope FFT
+        // Use the candidate rate's nominal period for window sizing during
+        // rate-selection scoring. On sick pin-lever Timexes the envelope FFT
         // can have a dominant peak 4-5% off the true tick rate (spurious extra
         // impulses create a fake-rate peak). Letting measuredHz drive window
         // size makes every candidate rate lock onto that same fake pattern,
@@ -526,7 +574,14 @@ public struct MeasurementPipeline {
         // picks the rate whose nominal is closest to the fake — usually
         // wrong. Using the nominal period means each candidate gets tested
         // on ITS terms: the true rate finds real ticks, wrong candidates fail.
-        let period = rate.nominalPeriodSeconds
+        //
+        // After rate selection picks a winner, the caller can pass
+        // `walkPeriodOverride` to re-extract with windows aligned to the
+        // watch's actual period. That avoids boundary-cutoff dropouts at the
+        // start/end of the recording on watches with large rate errors
+        // (>200 s/day at 18000 bph) where ticks would otherwise drift past
+        // the search window's ±20 ms half-width.
+        let period = walkPeriodOverride ?? rate.nominalPeriodSeconds
         let periodSamples = Int(round(period * sampleRate))
 
         guard periodSamples > 10 && periodSamples < n / 3 else {
