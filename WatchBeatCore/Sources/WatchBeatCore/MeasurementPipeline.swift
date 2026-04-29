@@ -313,7 +313,8 @@ public struct MeasurementPipeline {
             let totalBeats = usableLength / nominalPeriod
             let driftAcrossRecording = totalBeats * abs(regSlope - nominalPeriod)
             let searchHalfWidth = 0.040  // 40 ms = full search width at 18000 bph
-            if driftAcrossRecording > searchHalfWidth {
+            if driftAcrossRecording > searchHalfWidth,
+               ProcessInfo.processInfo.environment["WATCHBEAT_NO_REWALK"] == nil {
                 let rewalked = extractTicks(
                     samples: samples, sampleRate: sampleRate,
                     rate: bestRate, measuredHz: 1.0 / regSlope,
