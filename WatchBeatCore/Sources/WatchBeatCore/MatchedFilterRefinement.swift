@@ -99,20 +99,20 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
-        // 2σ class-wise iterative trim with per-class linear detrending of
+        // 3σ class-wise iterative trim with per-class cubic detrending of
         // residuals. Within each parity class (tick / tock), the watch's
-        // natural rate and BE drift cause the class mean to wander slowly
-        // across the recording (~1 ms drift over 15 s on TimexTickTick).
-        // Trimming against a static class mean would chop drifted-but-
-        // legitimate ticks; fit a linear trend per class first and trim
-        // around the detrended residuals. trimK = 2.0 keeps ~95% of
-        // normally distributed clean data — looser than 1.5σ which kept
-        // only ~87% and over-trimmed the legitimate drift, tighter than
-        // 3σ which would let real sub-event flips through.
+        // natural rate and BE drift cause the class mean to wander across
+        // the recording — sometimes monotonically, sometimes with reversals
+        // (e.g. TimexTickTick: starts +1.5, jumps to +2.3, drifts to +1.0,
+        // back to +2.1). A cubic detrend captures up-and-down wandering;
+        // linear couldn't, so it left ~10% of legitimate ticks above the
+        // 2σ trim band. With cubic detrending the residuals are tight
+        // around zero and 3σ keeps 99.7% of clean data.
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
-        let trimK = 2.0
+        let trimK = 3.0
         let trimIters = 4
+        let detrendDegree = 3
         for _ in 0..<trimIters {
             // Joint regression on (beatIndex, refined absolute time).
             var sumBi = 0.0, sumPos = 0.0; var nKept = 0
@@ -138,46 +138,49 @@ enum MatchedFilterRefinement {
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 residuals[i] = positions[i] - (slope * Double(beatIndices[i]) + intercept)
             }
-            // Per-class linear detrend: fit residual_i = a_class * idx_i + b_class
-            // separately for even and odd parities. The slope absorbs natural
-            // drift in the class mean; the intercept absorbs the static class offset.
-            var sumXE = 0.0, sumYE = 0.0, sumXXE = 0.0, sumXYE = 0.0; var nE = 0
-            var sumXO = 0.0, sumYO = 0.0, sumXXO = 0.0, sumXYO = 0.0; var nO = 0
+            // Per-class polynomial detrend at `detrendDegree`. Fit
+            //   residual_i = c0 + c1·idx_i + c2·idx_i² + c3·idx_i³ + ...
+            // separately for even and odd parity. Captures slow non-monotonic
+            // drift in the class mean. Center x for numerical stability —
+            // raw beat indices reach ~150, x⁶ exceeds 10¹³.
+            var xsE: [Double] = []; var ysE: [Double] = []
+            var xsO: [Double] = []; var ysO: [Double] = []
+            xsE.reserveCapacity(n); ysE.reserveCapacity(n)
+            xsO.reserveCapacity(n); ysO.reserveCapacity(n)
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
-                let x = Double(beatIndices[i]); let y = residuals[i]
                 if beatIndices[i] % 2 == 0 {
-                    sumXE += x; sumYE += y; sumXXE += x * x; sumXYE += x * y; nE += 1
+                    xsE.append(Double(beatIndices[i])); ysE.append(residuals[i])
                 } else {
-                    sumXO += x; sumYO += y; sumXXO += x * x; sumXYO += x * y; nO += 1
+                    xsO.append(Double(beatIndices[i])); ysO.append(residuals[i])
                 }
             }
-            func fitLine(sumX: Double, sumY: Double, sumXX: Double, sumXY: Double, n: Int)
-                -> (slope: Double, intercept: Double) {
-                let nd = Double(n)
-                let denom = nd * sumXX - sumX * sumX
-                if n < 2 || denom < 1e-12 {
-                    return (0, n > 0 ? sumY / nd : 0)
-                }
-                let s = (nd * sumXY - sumX * sumY) / denom
-                let b = (sumY - s * sumX) / nd
-                return (s, b)
-            }
-            let (aE, bE) = fitLine(sumX: sumXE, sumY: sumYE, sumXX: sumXXE, sumXY: sumXYE, n: nE)
-            let (aO, bO) = fitLine(sumX: sumXO, sumY: sumYO, sumXX: sumXXO, sumXY: sumXYO, n: nO)
+            let nE = xsE.count, nO = xsO.count
+            let fitE = fitPolynomial(xs: xsE, ys: ysE, degree: detrendDegree)
+            let fitO = fitPolynomial(xs: xsO, ys: ysO, degree: detrendDegree)
             // σ of detrended residuals per class.
             var ssE = 0.0, ssO = 0.0
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 let x = Double(beatIndices[i])
-                let predicted = (beatIndices[i] % 2 == 0) ? aE * x + bE : aO * x + bO
+                let predicted: Double
+                if beatIndices[i] % 2 == 0 {
+                    predicted = fitE.map { evalPolynomial($0, at: x) } ?? 0
+                } else {
+                    predicted = fitO.map { evalPolynomial($0, at: x) } ?? 0
+                }
                 let d = residuals[i] - predicted
                 if beatIndices[i] % 2 == 0 { ssE += d * d } else { ssO += d * d }
             }
-            let sdE = nE > 1 ? sqrt(ssE / Double(nE)) : 0
-            let sdO = nO > 1 ? sqrt(ssO / Double(nO)) : 0
+            let sdE = nE > detrendDegree ? sqrt(ssE / Double(nE)) : 0
+            let sdO = nO > detrendDegree ? sqrt(ssO / Double(nO)) : 0
             var changed = false
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 let x = Double(beatIndices[i])
-                let predicted = (beatIndices[i] % 2 == 0) ? aE * x + bE : aO * x + bO
+                let predicted: Double
+                if beatIndices[i] % 2 == 0 {
+                    predicted = fitE.map { evalPolynomial($0, at: x) } ?? 0
+                } else {
+                    predicted = fitO.map { evalPolynomial($0, at: x) } ?? 0
+                }
                 let sd = beatIndices[i] % 2 == 0 ? sdE : sdO
                 if sd > 0 && abs(residuals[i] - predicted) > trimK * sd {
                     keptFlags[i] = false; changed = true
@@ -196,6 +199,76 @@ enum MatchedFilterRefinement {
     }
 
     // MARK: - Internal helpers
+
+    /// Fit a polynomial of given degree to (xs, ys) by least squares,
+    /// using a centered x for numerical stability. Returns the
+    /// coefficients (low order first) along with the mean of x that was
+    /// subtracted before fitting. Returns nil if the system is singular
+    /// or there are not enough points.
+    private static func fitPolynomial(xs: [Double], ys: [Double], degree: Int) -> (coeffs: [Double], xMean: Double)? {
+        let p = degree + 1
+        let n = xs.count
+        guard n > p else { return nil }
+        let xMean = xs.reduce(0, +) / Double(n)
+        // Build X^T X (p×p) and X^T y (p) using centered x for stability.
+        var XtX = [[Double]](repeating: [Double](repeating: 0, count: p), count: p)
+        var Xty = [Double](repeating: 0, count: p)
+        for k in 0..<n {
+            let xc = xs[k] - xMean
+            let y = ys[k]
+            // xPows[j] = xc^j for j=0..2p-2
+            var xPows = [Double](repeating: 1.0, count: 2 * p - 1)
+            for j in 1..<(2 * p - 1) { xPows[j] = xPows[j - 1] * xc }
+            for i in 0..<p {
+                for j in 0..<p {
+                    XtX[i][j] += xPows[i + j]
+                }
+                Xty[i] += y * xPows[i]
+            }
+        }
+        guard let coeffs = gaussianSolve(XtX, Xty) else { return nil }
+        return (coeffs, xMean)
+    }
+
+    /// Evaluate a polynomial fit at x by Horner's method. The fit's
+    /// coefficients were computed against (x - xMean), so subtract first.
+    private static func evalPolynomial(_ fit: (coeffs: [Double], xMean: Double), at x: Double) -> Double {
+        let xc = x - fit.xMean
+        var y = fit.coeffs[fit.coeffs.count - 1]
+        for i in stride(from: fit.coeffs.count - 2, through: 0, by: -1) {
+            y = y * xc + fit.coeffs[i]
+        }
+        return y
+    }
+
+    /// Solve A x = b by Gaussian elimination with partial pivoting.
+    /// Returns nil if A is singular.
+    private static func gaussianSolve(_ A: [[Double]], _ b: [Double]) -> [Double]? {
+        var M = A
+        var v = b
+        let n = b.count
+        for i in 0..<n {
+            var maxRow = i
+            var maxVal = abs(M[i][i])
+            for k in (i + 1)..<n {
+                if abs(M[k][i]) > maxVal { maxRow = k; maxVal = abs(M[k][i]) }
+            }
+            if maxVal < 1e-12 { return nil }
+            if maxRow != i { M.swapAt(i, maxRow); v.swapAt(i, maxRow) }
+            for k in (i + 1)..<n {
+                let factor = M[k][i] / M[i][i]
+                for j in i..<n { M[k][j] -= factor * M[i][j] }
+                v[k] -= factor * v[i]
+            }
+        }
+        var x = [Double](repeating: 0, count: n)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            var s = v[i]
+            for j in (i + 1)..<n { s -= M[i][j] * x[j] }
+            x[i] = s / M[i][i]
+        }
+        return x
+    }
 
     /// Sample a 20 ms window around `centerSample` from the squared
     /// signal, smoothing inline by averaging ±`smoothHalf` samples around
