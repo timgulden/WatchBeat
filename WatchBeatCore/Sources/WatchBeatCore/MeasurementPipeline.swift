@@ -900,26 +900,104 @@ public struct MeasurementPipeline {
         var squared = [Float](repeating: 0, count: samples.count)
         vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(samples.count))
 
-        let confirmedTimes = tickResult.confirmed.map { tickResult.peakTimes[$0] }
+        // Rescue pass on the rate-selection winner: walk every beat slot the
+        // regression covers and try to recover ticks the per-window energy
+        // threshold rejected. The first-pass gate (`tickEnergy > 2 × medianGap`)
+        // fails on bursty recordings — a loud cluster pulls medianGap up and
+        // quiet real ticks elsewhere drop below threshold (e.g. Timex3Weak
+        // crown-up loses ~50 of 75 beats this way). With slope/intercept now
+        // locked from the rate winner's confirmed beats, we know exactly where
+        // each missing tick should land. Accept a slot if its local peak
+        // (smoothed envelope max in ±10 ms of predicted center) is at least
+        // 30 % of the median local peak among already-confirmed beats — i.e.
+        // its peak is comparable in magnitude to a typical tick on this watch.
+        // Centroid at the predicted center (not at the local argmax) so the
+        // recovered position matches the regression-aligned sub-event the
+        // confirmed ticks already encode — argmax-driven centroid would bias
+        // toward whichever sub-event happens to be loudest in this slot,
+        // warping the slope on multi-sub-event watches (Timex pin-levers,
+        // Omegas). Runs only here, after rate-selection — so wrong-rate
+        // candidates can't be lifted to win by spurious rescue.
+        var rescuedConfirmed = tickResult.confirmed
+        var rescuedPeakTimes = tickResult.peakTimes
+        var rescuedSlope = slope
+        var rescuedIntercept = intercept
+        if tickResult.confirmed.count >= 10,
+           tickResult.residualStd < 0.01,
+           slope > 0 {
+            let smoothWin = max(3, Int(0.005 * sampleRate)) | 1
+            let smoothed = movingAverage(of: squared, windowSamples: smoothWin)
+            let n = squared.count
+            let gateHalf = max(8, Int(0.010 * sampleRate))
+            let centroidHalf = max(4, Int(0.005 * sampleRate))
+            var confirmedPeaks: [Float] = []
+            confirmedPeaks.reserveCapacity(tickResult.confirmed.count)
+            for i in tickResult.confirmed {
+                let predicted = slope * Double(i) + intercept
+                let centerSample = Int(round(predicted * sampleRate))
+                let lo = max(0, centerSample - gateHalf)
+                let hi = min(n - 1, centerSample + gateHalf)
+                guard lo < hi else { continue }
+                var mx: Float = 0
+                for j in lo...hi { if smoothed[j] > mx { mx = smoothed[j] } }
+                confirmedPeaks.append(mx)
+            }
+            if confirmedPeaks.count >= 10 {
+                let medianConfirmedPeak = sortedMedian(confirmedPeaks)
+                let rescueThreshold = medianConfirmedPeak * 0.3
+                let confirmedSet = Set(tickResult.confirmed)
+                let totalSlots = tickResult.peakTimes.count
+                var rescuedSlots: [Int] = []
+                for i in 0..<totalSlots {
+                    if confirmedSet.contains(i) { continue }
+                    let predicted = slope * Double(i) + intercept
+                    let centerSample = Int(round(predicted * sampleRate))
+                    let gLo = max(0, centerSample - gateHalf)
+                    let gHi = min(n - 1, centerSample + gateHalf)
+                    guard gLo < gHi else { continue }
+                    var mx: Float = 0
+                    for j in gLo...gHi { if smoothed[j] > mx { mx = smoothed[j] } }
+                    if mx < rescueThreshold { continue }
+                    let cLo = max(0, centerSample - centroidHalf)
+                    let cHi = min(n - 1, centerSample + centroidHalf)
+                    guard cLo < cHi else { continue }
+                    if let c = centroid(in: squared, lo: cLo, hi: cHi) {
+                        rescuedPeakTimes[i] = c / sampleRate
+                        rescuedSlots.append(i)
+                    }
+                }
+                if !rescuedSlots.isEmpty {
+                    rescuedConfirmed.append(contentsOf: rescuedSlots)
+                    rescuedConfirmed.sort()
+                    let r = linearRegression(times: rescuedPeakTimes, indices: rescuedConfirmed)
+                    if let s = r.slope, let icpt = r.intercept {
+                        rescuedSlope = s
+                        rescuedIntercept = icpt
+                    }
+                }
+            }
+        }
+
+        let confirmedTimes = rescuedConfirmed.map { rescuedPeakTimes[$0] }
         let refined = MatchedFilterRefinement.refinePositions(
             squared: squared,
             sampleRate: sampleRate,
             tickPositions: confirmedTimes,
-            beatIndices: tickResult.confirmed
+            beatIndices: rescuedConfirmed
         )
         // Build per-beatIndex map of refined positions.
         var refinedByBeat: [Int: Double] = [:]
-        for (k, idx) in tickResult.confirmed.enumerated() {
+        for (k, idx) in rescuedConfirmed.enumerated() {
             if let r = refined[k] { refinedByBeat[idx] = r }
         }
         let keptCount = refinedByBeat.count
 
         // Refit regression on lock-in positions of survivors so the
         // regression reflects only the well-locked ticks.
-        var keptRegression: (slope: Double?, intercept: Double?) = (slope, intercept)
-        let kept = tickResult.confirmed.filter { refinedByBeat[$0] != nil }
+        var keptRegression: (slope: Double?, intercept: Double?) = (rescuedSlope, rescuedIntercept)
+        let kept = rescuedConfirmed.filter { refinedByBeat[$0] != nil }
         if kept.count >= 6 {
-            let r = linearRegression(times: tickResult.peakTimes, indices: kept)
+            let r = linearRegression(times: rescuedPeakTimes, indices: kept)
             keptRegression = (r.slope, r.intercept)
         }
 
@@ -928,9 +1006,9 @@ public struct MeasurementPipeline {
         let beatError: Double?
         if let s = keptRegression.slope, let i = keptRegression.intercept {
             var residualByBeat: [Int: Double] = [:]
-            for idx in tickResult.confirmed where refinedByBeat[idx] != nil {
+            for idx in rescuedConfirmed where refinedByBeat[idx] != nil {
                 let predicted = s * Double(idx) + i
-                residualByBeat[idx] = tickResult.peakTimes[idx] - predicted
+                residualByBeat[idx] = rescuedPeakTimes[idx] - predicted
             }
             beatError = BeatError.meanPairedAbsDifference(residualsByBeat: residualByBeat).map { $0 * 1000.0 }
         } else { beatError = nil }
@@ -938,28 +1016,28 @@ public struct MeasurementPipeline {
         // Survivor-only tickTimings from the refit regression.
         var timings: [TickTiming] = []
         if let s = keptRegression.slope, let i = keptRegression.intercept {
-            for idx in tickResult.confirmed where refinedByBeat[idx] != nil {
+            for idx in rescuedConfirmed where refinedByBeat[idx] != nil {
                 let predicted = s * Double(idx) + i
-                let residualMs = (tickResult.peakTimes[idx] - predicted) * 1000.0
+                let residualMs = (rescuedPeakTimes[idx] - predicted) * 1000.0
                 timings.append(TickTiming(beatIndex: idx, residualMs: residualMs, isEvenBeat: idx % 2 == 0))
             }
         }
 
         let lowConf = isLowConfidenceByKeptFraction(
-            kept: keptCount, confirmed: tickResult.confirmed.count
+            kept: keptCount, confirmed: rescuedConfirmed.count
         )
 
         return TickExtractionResult(
-            confirmedCount: tickResult.confirmed.count,
+            confirmedCount: rescuedConfirmed.count,
             qualityScore: tickResult.qualityScore,
             beatErrorMs: beatError,
             amplitudeProxy: tickResult.amplitudeProxy,
-            measuredPeriod: tickResult.measuredPeriod,
+            measuredPeriod: keptRegression.slope ?? tickResult.measuredPeriod,
             residualStd: tickResult.residualStd,
             tickTimings: timings,
-            peakTimes: tickResult.peakTimes,
-            confirmed: tickResult.confirmed,
-            regressionIntercept: tickResult.regressionIntercept,
+            peakTimes: rescuedPeakTimes,
+            confirmed: rescuedConfirmed,
+            regressionIntercept: keptRegression.intercept ?? tickResult.regressionIntercept,
             isLowConfidence: lowConf
         )
     }
