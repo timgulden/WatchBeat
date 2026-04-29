@@ -244,6 +244,7 @@ public struct MeasurementPipeline {
                 }
             }
 
+
             // Orderliness fallback. On watches where two rates have nearly-
             // identical envelope FFT magnitudes, the multiplicative score can
             // flip to the wrong rate even though the resulting timegraph shows
@@ -956,15 +957,26 @@ public struct MeasurementPipeline {
                     let gHi = min(n - 1, centerSample + gateHalf)
                     guard gLo < gHi else { continue }
                     var mx: Float = 0
-                    for j in gLo...gHi { if smoothed[j] > mx { mx = smoothed[j] } }
+                    var argmax = gLo
+                    for j in gLo...gHi {
+                        if smoothed[j] > mx { mx = smoothed[j]; argmax = j }
+                    }
                     if mx < rescueThreshold { continue }
-                    let cLo = max(0, centerSample - centroidHalf)
-                    let cHi = min(n - 1, centerSample + centroidHalf)
+                    // Centroid in ±5 ms of the argmax (not the regression
+                    // prediction). Asymmetric tick/tock geometry means real
+                    // tocks can sit several ms off half-period; centroiding
+                    // at the predicted center misses most of their energy.
+                    // Mirrors the first-pass picker's argmax → centroid pattern.
+                    let cLo = max(0, argmax - centroidHalf)
+                    let cHi = min(n - 1, argmax + centroidHalf)
                     guard cLo < cHi else { continue }
                     if let c = centroid(in: squared, lo: cLo, hi: cHi) {
                         rescuedPeakTimes[i] = c / sampleRate
                         rescuedSlots.append(i)
                     }
+                }
+                if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
+                    FileHandle.standardError.write("[rescue] confirmed=\(tickResult.confirmed.count) slots=\(totalSlots) medianPeak=\(medianConfirmedPeak) threshold=\(rescueThreshold) rescued=\(rescuedSlots.count)\n".data(using: .utf8)!)
                 }
                 if !rescuedSlots.isEmpty {
                     rescuedConfirmed.append(contentsOf: rescuedSlots)

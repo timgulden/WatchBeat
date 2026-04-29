@@ -24,6 +24,10 @@ let result = pipeline.measure(buffer)
 let rateArgs: [(String, StandardBeatRate)] = [("--force18",.bph18000),("--force198",.bph19800),("--force216",.bph21600),("--force252",.bph25200),("--force288",.bph28800),("--force360",.bph36000)]
 for (flag, r) in rateArgs where CommandLine.arguments.contains(flag) {
     let forced2 = pipeline.measure(buffer, knownRate: r)
+    print("[force \(r.rawValue)] per-tick (idx, parity, residualMs):")
+    for t in forced2.tickTimings.sorted(by: { $0.beatIndex < $1.beatIndex }) {
+        print(String(format: "  %4d %@ %+.2f", t.beatIndex, t.isEvenBeat ? "E" : "O", t.residualMs))
+    }
     let ee = forced2.tickTimings.filter{$0.isEvenBeat}.map{$0.residualMs}
     let oo = forced2.tickTimings.filter{!$0.isEvenBeat}.map{$0.residualMs}
     func os(_ xs:[Double])->Double {let p=xs.filter{$0>0}.count;let f=Double(p)/Double(xs.count);return max(f,1-f)}
