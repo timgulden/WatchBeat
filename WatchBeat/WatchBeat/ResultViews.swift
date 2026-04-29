@@ -330,8 +330,13 @@ struct TimegraphView: View {
                     // Plot dots
                     let dotSize: CGFloat = 3.0
 
+                    let idxFirst = Double(residuals.first?.index ?? 0)
+                    let idxLast = Double(residuals.last?.index ?? 0)
+                    let idxSpan = max(idxLast - idxFirst, 1)
+
                     for (i, tick) in residuals.enumerated() {
-                        let x = margin + (w - 2 * margin) * CGFloat(i) / CGFloat(max(n - 1, 1))
+                        let xFrac = (Double(tick.index) - idxFirst) / idxSpan
+                        let x = margin + (w - 2 * margin) * CGFloat(xFrac)
 
                         // Wrap within the fixed window
                         var dev = yValues[i] - yCenter
