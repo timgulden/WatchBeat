@@ -301,18 +301,10 @@ public struct MeasurementPipeline {
            tickResult.confirmedCount >= 10,
            let regSlope = tickResult.measuredPeriod, regSlope > 0 {
             let nominalPeriod = bestRate.nominalPeriodSeconds
-            // Only re-walk when the regression period differs from nominal
-            // by enough to push beats past the search-window boundary. The
-            // search width is ±20 % of period (= 40 ms total at 18000 bph),
-            // so when accumulated drift across the recording exceeds that,
-            // beats at the edges fall outside the search range. Below that
-            // threshold the first-walk picks already cover the recording
-            // and re-walking risks introducing rate bias if the first
-            // regression slope was off (e.g. on multi-sub-event watches).
             let usableLength = Double(samples.count) / sampleRate
             let totalBeats = usableLength / nominalPeriod
             let driftAcrossRecording = totalBeats * abs(regSlope - nominalPeriod)
-            let searchHalfWidth = 0.040  // 40 ms = full search width at 18000 bph
+            let searchHalfWidth = 0.040
             if driftAcrossRecording > searchHalfWidth,
                ProcessInfo.processInfo.environment["WATCHBEAT_NO_REWALK"] == nil {
                 let rewalked = extractTicks(
@@ -320,15 +312,67 @@ public struct MeasurementPipeline {
                     rate: bestRate, measuredHz: 1.0 / regSlope,
                     walkPeriodOverride: regSlope
                 )
-                // Only adopt the re-walked result if it found at least as
-                // many ticks. The regression-derived period should always be
-                // closer to truth than nominal, but guard against pathological
-                // cases where re-walking breaks rate detection somehow.
                 if rewalked.confirmedCount >= tickResult.confirmedCount {
                     tickResult = rewalked
                 }
             }
         }
+
+        // Alignment selection by tick/tock orderliness. The picker can
+        // produce different slopes at different startOffsets — sometimes
+        // dramatically (Timex1CrownUp shifts +84 s/day depending on which
+        // alignment is chosen). When the alignment "best by confirmedCount"
+        // (current default) gives scrambled tick/tock labels (residuals
+        // straddling zero in both parities), an alternative alignment may
+        // produce cleanly alternating labels with the watch's actual BE
+        // visible. Orderliness — fraction of residuals on the dominant
+        // side of zero, per parity — flags this directly: scrambled ≈ 0.5,
+        // clean ≈ 1.0. Pick the alignment with highest orderliness across
+        // 8 startOffsets; the picker's confirmedCount-based choice was
+        // already considered (it's one of the 5 in the existing search).
+        // Skipped when harmonic tiebreak fired.
+        if !tiebreakFired,
+           tickResult.confirmedCount >= 10,
+           let baseSlope = tickResult.measuredPeriod, baseSlope > 0,
+           ProcessInfo.processInfo.environment["WATCHBEAT_NO_ORDERSEL"] == nil {
+            let candidates = extractTicksAcrossOffsets(
+                samples: samples, sampleRate: sampleRate,
+                rate: bestRate, measuredHz: 1.0 / baseSlope,
+                walkPeriodOverride: baseSlope, numOffsets: 8
+            )
+            // Score each candidate by orderliness. Combine with confirmed
+            // count as a tie-breaker (more ticks is better at equal
+            // orderliness). Only swap if we find a clearly better one.
+            func orderlinessScore(_ r: TickExtractionResult) -> Double {
+                let even = r.tickTimings.filter { $0.isEvenBeat }.map { $0.residualMs }
+                let odd = r.tickTimings.filter { !$0.isEvenBeat }.map { $0.residualMs }
+                guard even.count >= 5, odd.count >= 5 else { return 0 }
+                let oe = Self.oneSidedness(even)
+                let oo = Self.oneSidedness(odd)
+                return max(oe, oo)
+            }
+            // Conservative swap: only adopt a candidate if its orderliness
+            // is decisively better (>0.15) AND clearly indicates clean
+            // tick/tock structure (>0.85 absolute), AND it doesn't lose
+            // significant confirmed-pick coverage or quality. This keeps
+            // alignment-stable readings (TimexTickTick, Strong_Internal
+            // when it's actually clean) untouched, only intervening when
+            // the original alignment is genuinely scrambled.
+            let baseScore = orderlinessScore(tickResult)
+            var bestCand = tickResult
+            var bestScore = baseScore
+            for c in candidates {
+                let s = orderlinessScore(c)
+                guard s > 0.85 else { continue }
+                guard s > bestScore + 0.15 else { continue }
+                guard c.confirmedCount >= tickResult.confirmedCount * 3 / 4 else { continue }
+                guard c.qualityScore >= tickResult.qualityScore * 0.8 else { continue }
+                bestScore = s
+                bestCand = c
+            }
+            tickResult = bestCand
+        }
+
 
         // Apply matched-filter refinement to the WINNING rate's tick result.
         // This is the expensive step (~5–10 ms in release per call), so it
@@ -629,6 +673,39 @@ public struct MeasurementPipeline {
         }
 
         return bestResult
+    }
+
+    /// Run the picker at N evenly spaced startOffsets across one period,
+    /// returning all results (not just the max-confirms one). Used by the
+    /// alignment-sensitivity test: a watch whose true rate is well-determined
+    /// by the audio gives nearly identical slopes regardless of startOffset;
+    /// a marginal sick watch can show large slope spread across alignments.
+    private func extractTicksAcrossOffsets(
+        samples: [Float], sampleRate: Double,
+        rate: StandardBeatRate, measuredHz: Double,
+        walkPeriodOverride: Double? = nil,
+        numOffsets: Int
+    ) -> [TickExtractionResult] {
+        let n = samples.count
+        let period = walkPeriodOverride ?? rate.nominalPeriodSeconds
+        let periodSamples = Int(round(period * sampleRate))
+        guard periodSamples > 10 && periodSamples < n / 3 else { return [] }
+
+        var squared = [Float](repeating: 0, count: n)
+        vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(n))
+        let smoothed = movingAverage(of: squared, windowSamples: max(3, Int(0.005 * sampleRate)) | 1)
+
+        var results: [TickExtractionResult] = []
+        results.reserveCapacity(numOffsets)
+        for k in 0..<numOffsets {
+            let offset = (k * periodSamples) / numOffsets
+            let result = extractTicksAtOffset(
+                squared: squared, smoothed: smoothed, n: n, sampleRate: sampleRate, rate: rate,
+                periodSamples: periodSamples, startOffset: offset
+            )
+            results.append(result)
+        }
+        return results
     }
 
     /// Tick/tock orderliness test. Looks at the *distribution* of residuals
