@@ -99,25 +99,26 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
-        // 3σ class-wise iterative trim with linear detrending + detrended
-        // absolute cap. Linear detrending absorbs slow class-mean drift
-        // (the watch's natural rate/BE wander), but doesn't curve to follow
-        // longer sub-event-flip "waves" or scattered single-beat outliers.
-        // Those inflate σ enough to escape the relative 3σ trim; the
-        // absolute cap catches them.
+        // 3σ class-wise iterative trim with linear detrending and a robust
+        // σ estimate (computed from the tightest 75% of detrended residuals
+        // by absolute value). Linear detrending absorbs slow class-mean
+        // drift; robust σ keeps the trim threshold from being inflated by
+        // the outliers it's trying to catch (a chronic problem with naive
+        // σ when sub-event-flip waves or scattered bad picks are present).
         //
-        // The cap applies to the *detrended* residual (raw residual minus
-        // the class trend) so a high-BE watch's class offsets — which can
-        // legitimately put raw residuals at ±BE/2 ≈ ±2-3 ms — don't count
-        // against the cap. 3 ms is well outside the detrended range of any
-        // clean recording (TimexTickTick's detrended residuals max ±1.4 ms
-        // even with 3.6 ms BE).
+        // Why robust σ: with naive σ, a few outliers at ±3-5 ms inflate σ
+        // enough that 3σ ≈ 5-15 ms — the outliers themselves clear the
+        // threshold. By computing σ from only the best-fitting 75 %, we
+        // get the spread of well-behaved ticks; outliers fail the 3σ test
+        // against that tighter reference. Adapts per-watch — clean
+        // recordings get a tight threshold (~1 ms), noisy ones a looser
+        // one — without an arbitrary millisecond cap.
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
         let trimK = 3.0
         let trimIters = 4
         let detrendDegree = 1
-        let absoluteCapMs = 3.0
+        let robustFraction = 0.90
         for _ in 0..<trimIters {
             // Joint regression on (beatIndex, refined absolute time).
             var sumBi = 0.0, sumPos = 0.0; var nKept = 0
@@ -162,8 +163,11 @@ enum MatchedFilterRefinement {
             let nE = xsE.count, nO = xsO.count
             let fitE = fitPolynomial(xs: xsE, ys: ysE, degree: detrendDegree)
             let fitO = fitPolynomial(xs: xsO, ys: ysO, degree: detrendDegree)
-            // σ of detrended residuals per class.
-            var ssE = 0.0, ssO = 0.0
+            // Collect detrended residuals per class.
+            var detrendedE: [Double] = []
+            var detrendedO: [Double] = []
+            detrendedE.reserveCapacity(nE)
+            detrendedO.reserveCapacity(nO)
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 let x = Double(beatIndices[i])
                 let predicted: Double
@@ -173,10 +177,14 @@ enum MatchedFilterRefinement {
                     predicted = fitO.map { evalPolynomial($0, at: x) } ?? 0
                 }
                 let d = residuals[i] - predicted
-                if beatIndices[i] % 2 == 0 { ssE += d * d } else { ssO += d * d }
+                if beatIndices[i] % 2 == 0 { detrendedE.append(d) }
+                else                       { detrendedO.append(d) }
             }
-            let sdE = nE > detrendDegree ? sqrt(ssE / Double(nE)) : 0
-            let sdO = nO > detrendDegree ? sqrt(ssO / Double(nO)) : 0
+            // Robust σ: compute on the tightest `robustFraction` of detrended
+            // residuals (smallest by absolute value). The outliers we want to
+            // catch don't get to inflate the threshold that catches them.
+            let sdE = robustSigma(detrendedE, fraction: robustFraction)
+            let sdO = robustSigma(detrendedO, fraction: robustFraction)
             var changed = false
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 let x = Double(beatIndices[i])
@@ -188,8 +196,7 @@ enum MatchedFilterRefinement {
                 }
                 let sd = beatIndices[i] % 2 == 0 ? sdE : sdO
                 let detrendedAbs = abs(residuals[i] - predicted)
-                let detrendedAbsMs = detrendedAbs * 1000.0
-                if (sd > 0 && detrendedAbs > trimK * sd) || detrendedAbsMs > absoluteCapMs {
+                if sd > 0 && detrendedAbs > trimK * sd {
                     keptFlags[i] = false; changed = true
                 }
             }
@@ -206,6 +213,21 @@ enum MatchedFilterRefinement {
     }
 
     // MARK: - Internal helpers
+
+    /// σ computed from the tightest `fraction` of values by absolute
+    /// magnitude. Outliers don't inflate the result, so a 3σ trim
+    /// threshold actually catches them. Mean is from the same trimmed
+    /// subset for consistency.
+    private static func robustSigma(_ values: [Double], fraction: Double) -> Double {
+        guard values.count >= 2 else { return 0 }
+        let sorted = values.sorted { abs($0) < abs($1) }
+        let cutoff = max(2, Int(Double(sorted.count) * fraction))
+        let trimmed = Array(sorted.prefix(cutoff))
+        let mean = trimmed.reduce(0, +) / Double(trimmed.count)
+        var ss = 0.0
+        for v in trimmed { let d = v - mean; ss += d * d }
+        return sqrt(ss / Double(trimmed.count))
+    }
 
     /// Fit a polynomial of given degree to (xs, ys) by least squares,
     /// using a centered x for numerical stability. Returns the
