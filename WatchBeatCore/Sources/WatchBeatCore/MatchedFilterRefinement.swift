@@ -99,20 +99,21 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
-        // 3σ class-wise iterative trim with per-class cubic detrending of
-        // residuals. Within each parity class (tick / tock), the watch's
-        // natural rate and BE drift cause the class mean to wander across
-        // the recording — sometimes monotonically, sometimes with reversals
-        // (e.g. TimexTickTick: starts +1.5, jumps to +2.3, drifts to +1.0,
-        // back to +2.1). A cubic detrend captures up-and-down wandering;
-        // linear couldn't, so it left ~10% of legitimate ticks above the
-        // 2σ trim band. With cubic detrending the residuals are tight
-        // around zero and 3σ keeps 99.7% of clean data.
+        // 3σ class-wise iterative trim with linear detrending + absolute cap.
+        // Linear detrending absorbs slow class-mean drift (the watch's natural
+        // rate/BE wander over the recording), but doesn't curve to follow
+        // longer sub-event-flip "waves" (e.g. ~14-beat U-shaped picks on
+        // crown-up Timexes) — those would inflate σ and mostly escape the
+        // 3σ relative trim, but the absolute cap catches them.
+        // 5 ms cap is well outside any clean watch's residual range (typical
+        // is ±2 ms even on poorly-regulated watches) and well below the
+        // half-period span (50 ms at 36000 bph, 100 ms at 18000 bph).
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
         let trimK = 3.0
         let trimIters = 4
-        let detrendDegree = 3
+        let detrendDegree = 1
+        let absoluteCapMs = 5.0
         for _ in 0..<trimIters {
             // Joint regression on (beatIndex, refined absolute time).
             var sumBi = 0.0, sumPos = 0.0; var nKept = 0
@@ -182,7 +183,9 @@ enum MatchedFilterRefinement {
                     predicted = fitO.map { evalPolynomial($0, at: x) } ?? 0
                 }
                 let sd = beatIndices[i] % 2 == 0 ? sdE : sdO
-                if sd > 0 && abs(residuals[i] - predicted) > trimK * sd {
+                let detrendedAbs = abs(residuals[i] - predicted)
+                let rawAbsMs = abs(residuals[i]) * 1000.0
+                if (sd > 0 && detrendedAbs > trimK * sd) || rawAbsMs > absoluteCapMs {
                     keptFlags[i] = false; changed = true
                 }
             }
