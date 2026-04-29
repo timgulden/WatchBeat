@@ -166,9 +166,9 @@ enum MatchedFilterRefinement {
 
     /// Sample a 20 ms window around `centerSample` from the squared
     /// signal, smoothing inline by averaging ±`smoothHalf` samples around
-    /// each downsample point. Skipping the full-signal smoothing pass
-    /// keeps the work O(envelopes × points × smoothWindow) instead of
-    /// O(samples × smoothWindow), critical in debug builds.
+    /// each downsample point. The per-point sum uses vDSP_sve to bypass
+    /// Swift's per-iteration bounds checks (cheap in release, expensive
+    /// in debug at the ~36k-calls-per-measurement scale here).
     private static func downsampleEnvelope(
         squared: [Float],
         centerSample: Int,
@@ -179,16 +179,20 @@ enum MatchedFilterRefinement {
     ) -> [Float] {
         var out = [Float](repeating: 0, count: points)
         let n = squared.count
-        for k in 0..<points {
-            let frac = Double(k) / Double(points - 1)
-            let msFromCenter = -halfMs + frac * (2.0 * halfMs)
-            let absIdx = centerSample + Int(round(msFromCenter / 1000.0 * sampleRate))
-            if absIdx >= 0 && absIdx < n {
-                let lo = max(0, absIdx - smoothHalf)
-                let hi = min(n - 1, absIdx + smoothHalf)
-                var s: Float = 0
-                for j in lo...hi { s += squared[j] }
-                out[k] = s / Float(hi - lo + 1)
+        squared.withUnsafeBufferPointer { sp in
+            guard let sBase = sp.baseAddress else { return }
+            for k in 0..<points {
+                let frac = Double(k) / Double(points - 1)
+                let msFromCenter = -halfMs + frac * (2.0 * halfMs)
+                let absIdx = centerSample + Int(round(msFromCenter / 1000.0 * sampleRate))
+                if absIdx >= 0 && absIdx < n {
+                    let lo = max(0, absIdx - smoothHalf)
+                    let hi = min(n - 1, absIdx + smoothHalf)
+                    let count = hi - lo + 1
+                    var s: Float = 0
+                    vDSP_sve(sBase + lo, 1, &s, vDSP_Length(count))
+                    out[k] = s / Float(count)
+                }
             }
         }
         return out
@@ -219,7 +223,9 @@ enum MatchedFilterRefinement {
     /// Build an average envelope template, with each contributing
     /// envelope sub-sample-shifted so that `offsetMs[i]` lies at the
     /// array center. Each contribution is peak-normalized so loud ticks
-    /// don't dominate. Mirrors TickAnatomy's `buildAlignedTemplate`.
+    /// don't dominate. Hot loops vectorized with vDSP — vDSP_maxv for
+    /// the per-trace peak, vDSP_vsma for the scalar-mul-add accumulate,
+    /// vDSP_vsdiv for the final normalization.
     private static func buildAlignedTemplate(
         envs: [[Float]], offsetMs: [Double?], msPerPoint: Double
     ) -> [Float] {
@@ -235,13 +241,29 @@ enum MatchedFilterRefinement {
             let aligned = shiftedCopy(source: envs[i],
                                       centerSample: centerSample,
                                       length: n)
-            let peak = aligned.max() ?? 0
+            var peak: Float = 0
+            aligned.withUnsafeBufferPointer { ap in
+                guard let aBase = ap.baseAddress else { return }
+                vDSP_maxv(aBase, 1, &peak, vDSP_Length(n))
+            }
             guard peak > 0 else { continue }
-            let inv = 1.0 / peak
-            for k in 0..<n { sum[k] += aligned[k] * inv }
+            var inv = 1.0 / peak
+            aligned.withUnsafeBufferPointer { ap in
+                sum.withUnsafeMutableBufferPointer { sp in
+                    guard let aBase = ap.baseAddress, let sBase = sp.baseAddress else { return }
+                    // sum[k] = aligned[k] * inv + sum[k]
+                    vDSP_vsma(aBase, 1, &inv, sBase, 1, sBase, 1, vDSP_Length(n))
+                }
+            }
             contributors += 1
         }
-        if contributors > 0 { for k in 0..<n { sum[k] /= contributors } }
+        if contributors > 0 {
+            sum.withUnsafeMutableBufferPointer { sp in
+                guard let sBase = sp.baseAddress else { return }
+                var c = contributors
+                vDSP_vsdiv(sBase, 1, &c, sBase, 1, vDSP_Length(n))
+            }
+        }
         return sum
     }
 
