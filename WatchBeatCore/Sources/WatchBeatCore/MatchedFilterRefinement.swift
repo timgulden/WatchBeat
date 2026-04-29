@@ -99,21 +99,25 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
-        // 3σ class-wise iterative trim with linear detrending + absolute cap.
-        // Linear detrending absorbs slow class-mean drift (the watch's natural
-        // rate/BE wander over the recording), but doesn't curve to follow
-        // longer sub-event-flip "waves" (e.g. ~14-beat U-shaped picks on
-        // crown-up Timexes) — those would inflate σ and mostly escape the
-        // 3σ relative trim, but the absolute cap catches them.
-        // 5 ms cap is well outside any clean watch's residual range (typical
-        // is ±2 ms even on poorly-regulated watches) and well below the
-        // half-period span (50 ms at 36000 bph, 100 ms at 18000 bph).
+        // 3σ class-wise iterative trim with linear detrending + detrended
+        // absolute cap. Linear detrending absorbs slow class-mean drift
+        // (the watch's natural rate/BE wander), but doesn't curve to follow
+        // longer sub-event-flip "waves" or scattered single-beat outliers.
+        // Those inflate σ enough to escape the relative 3σ trim; the
+        // absolute cap catches them.
+        //
+        // The cap applies to the *detrended* residual (raw residual minus
+        // the class trend) so a high-BE watch's class offsets — which can
+        // legitimately put raw residuals at ±BE/2 ≈ ±2-3 ms — don't count
+        // against the cap. 3 ms is well outside the detrended range of any
+        // clean recording (TimexTickTick's detrended residuals max ±1.4 ms
+        // even with 3.6 ms BE).
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
         let trimK = 3.0
         let trimIters = 4
         let detrendDegree = 1
-        let absoluteCapMs = 5.0
+        let absoluteCapMs = 3.0
         for _ in 0..<trimIters {
             // Joint regression on (beatIndex, refined absolute time).
             var sumBi = 0.0, sumPos = 0.0; var nKept = 0
@@ -184,8 +188,8 @@ enum MatchedFilterRefinement {
                 }
                 let sd = beatIndices[i] % 2 == 0 ? sdE : sdO
                 let detrendedAbs = abs(residuals[i] - predicted)
-                let rawAbsMs = abs(residuals[i]) * 1000.0
-                if (sd > 0 && detrendedAbs > trimK * sd) || rawAbsMs > absoluteCapMs {
+                let detrendedAbsMs = detrendedAbs * 1000.0
+                if (sd > 0 && detrendedAbs > trimK * sd) || detrendedAbsMs > absoluteCapMs {
                     keptFlags[i] = false; changed = true
                 }
             }
