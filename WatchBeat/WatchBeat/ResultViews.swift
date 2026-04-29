@@ -5,7 +5,6 @@ import SwiftUI
 struct RateDialView: View {
     let rateError: Double  // s/day
     let beatErrorMs: Double?  // shown in the gap at bottom
-    var isDisorderly: Bool = false  // replaces beat-error display with ---/ERROR
     var watchPosition: WatchPosition? = nil  // shown above the rate number
 
     private let maxDisplayError: Double = 120.0
@@ -84,21 +83,10 @@ struct RateDialView: View {
                 }
                 .position(center)
 
-                // Beat error in the gap between 5:00 and 7:00
-                if isDisorderly {
-                    VStack(spacing: 1) {
-                        Text("---")
-                            .font(.system(size: size * 0.09, weight: .bold, design: .rounded))
-                            .foregroundStyle(.red)
-                        Text("beat error")
-                            .font(.system(size: size * 0.05))
-                            .foregroundStyle(.secondary)
-                        Text("ERROR")
-                            .font(.system(size: size * 0.055, weight: .semibold))
-                            .foregroundStyle(.red)
-                    }
-                    .position(x: center.x, y: center.y + radius * 0.85)
-                } else if let be = beatErrorMs {
+                // Beat error in the gap between 5:00 and 7:00. Low-confidence
+                // results never reach this view — the coordinator routes
+                // them to ErrorScreen instead.
+                if let be = beatErrorMs {
                     VStack(spacing: 1) {
                         Text(String(format: "%.1f ms", be))
                             .font(.system(size: size * 0.09, weight: .bold, design: .rounded))
@@ -129,9 +117,7 @@ struct RateDialView: View {
         if let pos = watchPosition {
             desc = "Position \(pos.displayName). " + desc
         }
-        if isDisorderly {
-            desc += ". Beat error unavailable — tick pattern is disorderly"
-        } else if let be = beatErrorMs {
+        if let be = beatErrorMs {
             desc += ". Beat error \(String(format: "%.1f", be)) milliseconds, \(beatErrorLabel(be).lowercased())"
         }
         return desc

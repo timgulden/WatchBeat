@@ -538,36 +538,14 @@ struct ResultScreen: View {
                     }
                 }
 
-                // Dial
+                // Dial. Result screen never shows a low-confidence result —
+                // the coordinator routes those to ErrorScreen. So we can
+                // assume isLowConfidence is always false here.
                 RateDialView(rateError: data.rateError,
                              beatErrorMs: data.beatErrorMs,
-                             isDisorderly: data.isDisorderly,
                              watchPosition: data.watchPosition)
                     .frame(maxHeight: 310)
                     .padding(.top, -8)
-
-                // Disorderly warning
-                if data.isDisorderly {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                        Text("Tick/tock pattern is disorderly — rate and beat error may be unreliable. Check the timegraph below.")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(8)
-                    .background(Color.red.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.red, lineWidth: 1)
-                    )
-                    .cornerRadius(6)
-                    .padding(.top, 4)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Warning: tick and tock pattern is disorderly. Rate and beat error may be unreliable. Check the timegraph.")
-                }
 
                 // Lift Angle / Amplitude row
                 if data.pulseWidths != nil {
@@ -692,6 +670,16 @@ struct ErrorScreen: View {
             || message.hasPrefix("Could not start audio")
     }
 
+    /// Low analytical confidence errors are emitted by MeasurementCoordinator
+    /// when the matched-filter trim drops too many ticks for a reliable
+    /// reading — the recording was acoustically complex enough that the
+    /// picker couldn't lock on consistently. The watch isn't disorderly
+    /// (escapements are mechanically deterministic); the *recording* is
+    /// hard to read.
+    private var isLowConfidence: Bool {
+        message.hasPrefix("Low analytical confidence")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Text("WatchBeat")
@@ -700,6 +688,8 @@ struct ErrorScreen: View {
 
             if isMicUnavailable {
                 micUnavailableContent
+            } else if isLowConfidence {
+                lowConfidenceContent
             } else {
                 signalTooWeakContent
             }
@@ -709,6 +699,29 @@ struct ErrorScreen: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 40)
+        }
+    }
+
+    private var lowConfidenceContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "questionmark.circle")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                Text("Low analytical confidence")
+                    .font(.title3.bold())
+            }
+            .padding(.top, 12)
+
+            VStack(alignment: .leading, spacing: 10) {
+                tipRow(icon: "rotate.3d", text: "Try a different watch position (Crown Up, Dial Down, etc.). Some positions are easier for the algorithm to read than others.")
+                tipRow(icon: "iphone.gen3", text: "Press the phone more firmly against the caseback. Sub-ms tick localization needs solid acoustic contact.")
+                tipRow(icon: "ear", text: "Move to a quieter room. Background noise can mask the tick's secondary sub-events.")
+                tipRow(icon: "wrench.and.screwdriver", text: "If this happens in every position, your watch may be running on insufficient amplitude — consider service.")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
     }
 

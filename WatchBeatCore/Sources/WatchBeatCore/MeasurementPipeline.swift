@@ -305,7 +305,10 @@ public struct MeasurementPipeline {
             tickCount: tickResult.confirmedCount,
             tickTimings: tickResult.tickTimings,
             amplitudeTickTimings: amplitudeTickTimings,
-            isDisorderly: isDisorderly(timings: tickResult.tickTimings)
+            isLowConfidence: isLowConfidenceByKeptFraction(
+                kept: tickResult.tickTimings.count,
+                confirmed: tickResult.confirmedCount
+            )
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz
@@ -572,25 +575,21 @@ public struct MeasurementPipeline {
         return !(straddlesE && straddlesO)
     }
 
-    /// Advisory flag for the UI: the reported rate/beat-error should be
-    /// interpreted with caution. Returns `false` when there are too few
-    /// ticks to judge (no data ≠ disorderly).
+    /// Advisory flag for the UI: the matched filter had to drop too many
+    /// ticks to trust the result. The watch itself isn't disorderly —
+    /// escapements are mechanically deterministic. This flag means the
+    /// recording was acoustically complex enough (multiple comparable
+    /// sub-events, weak signal, sub-event flipping, etc.) that the picker
+    /// couldn't lock on consistently. Caller routes this to a "low
+    /// confidence" retry screen rather than showing a number.
     ///
-    /// Current rule: both parities straddle zero. The tick/tock labels
-    /// carry no consistent side-of-center information. Catches scrambled
-    /// recordings (SickWatch, Strong_Headphone).
-    ///
-    /// Uses a more sensitive threshold (0.68) than the rate-selection
-    /// `isOrderly` check (0.60): here we're *advising* the user to look at
-    /// the timegraph; there we're overriding the pipeline's chosen rate.
-    /// Be liberal about advising; conservative about overriding.
-    private func isDisorderly(timings: [TickTiming]) -> Bool {
-        let even = timings.filter { $0.isEvenBeat }.map { $0.residualMs }
-        let odd = timings.filter { !$0.isEvenBeat }.map { $0.residualMs }
-        guard even.count >= 5, odd.count >= 5 else { return false }
-        let straddlesE = Self.oneSidedness(even) < Self.disorderlyAdvisoryThreshold
-        let straddlesO = Self.oneSidedness(odd) < Self.disorderlyAdvisoryThreshold
-        return straddlesE && straddlesO
+    /// On the OmegaStudy corpus, healthy recordings retain 50–65% of
+    /// confirmed ticks after matched-filter trim; the historical Timex2
+    /// near-stall recordings retained ~26%. Threshold at 40% is well
+    /// below the legitimate floor and well above genuine failure rates.
+    private func isLowConfidenceByKeptFraction(kept: Int, confirmed: Int) -> Bool {
+        guard confirmed >= 6 else { return false }
+        return Double(kept) / Double(confirmed) < 0.40
     }
 
     /// Fraction of residuals on the dominant side of zero. 1.0 = all
@@ -602,7 +601,6 @@ public struct MeasurementPipeline {
     }
 
     private static let orderlinessThreshold: Double = 0.60
-    private static let disorderlyAdvisoryThreshold: Double = 0.75
 
     /// Centered moving average with clamped edges. O(n) via running sum.
     /// Each output sample is the mean of `squared[max(0, i-half)...min(n-1, i+half)]`
@@ -820,10 +818,57 @@ public struct MeasurementPipeline {
             regression = linearRegression(times: peakTimes, indices: confirmed)
         }
 
+        // Matched-filter refinement: replaces the lock-in centroid positions
+        // with sub-sample-precise positions found by cross-correlating each
+        // tick's envelope against an iteratively-refined class-shared
+        // template. 1.5σ class-wise trim drops ticks that don't fit the
+        // template (sub-event-flipped picks). Trimmed ticks are dropped
+        // from `tickTimings` and from BE — the regression slope (rate) is
+        // still computed from the lock-in centroids on all confirmed ticks
+        // so rate stability isn't affected by trim count.
+        var refinedPositions: [Double?] = peakTimes.map { _ in nil }
+        if !rate.isQuartz && confirmed.count >= 6 {
+            let confirmedTimes = confirmed.map { peakTimes[$0] }
+            let confirmedBeats = confirmed
+            let refined = MatchedFilterRefinement.refinePositions(
+                squared: squared,
+                sampleRate: sampleRate,
+                tickPositions: confirmedTimes,
+                beatIndices: confirmedBeats
+            )
+            for (k, idx) in confirmed.enumerated() {
+                refinedPositions[idx] = refined[k]
+            }
+        }
+
+        // The matched filter is used as an OUTLIER GATE only — its purpose
+        // is to identify sub-event-flipped picks (whose envelopes don't
+        // fit the shared template). BE and residuals are computed from
+        // LOCK-IN positions of the survivors, not from the matched-filter
+        // positions themselves. This avoids the fragile dependence of
+        // matched-filter convergence on initial-offset bootstrap quality
+        // (which differs between the production lock-in centering and
+        // TickAnatomy's research centering, producing inconsistent BE).
+        //
+        // Refit regression on lock-in positions of matched-filter
+        // survivors, then compute residuals from that refit so the
+        // regression reflects the cleaner data.
+        var keptRegression: (slope: Double?, intercept: Double?) = (regression.slope, regression.intercept)
+        if !rate.isQuartz && confirmed.count >= 6 {
+            let kept = confirmed.filter { refinedPositions[$0] != nil }
+            if kept.count >= 6 {
+                let r = linearRegression(times: peakTimes, indices: kept)
+                keptRegression = (r.slope, r.intercept)
+            }
+        }
+
         let beatError: Double?
-        if !rate.isQuartz && confirmed.count >= 6, let slope = regression.slope, let intercept = regression.intercept {
+        if !rate.isQuartz, let slope = keptRegression.slope,
+           let intercept = keptRegression.intercept {
             var residualByBeat: [Int: Double] = [:]
             for i in confirmed {
+                // Survivor gate: only ticks the matched filter accepted.
+                guard refinedPositions[i] != nil else { continue }
                 let predicted = slope * Double(i) + intercept
                 residualByBeat[i] = peakTimes[i] - predicted
             }
@@ -832,11 +877,15 @@ public struct MeasurementPipeline {
             beatError = nil
         }
 
-        // Build tick timings for the timegrapher plot
+        // Tick timings: survivors only, residualized against the kept-tick
+        // regression. Trimmed ticks drop from the display.
         var timings: [TickTiming] = []
-        if let slope = regression.slope, let intercept = regression.intercept {
+        if let slope = keptRegression.slope, let intercept = keptRegression.intercept {
             for i in confirmed {
                 guard i < peakTimes.count else { continue }
+                if !rate.isQuartz && confirmed.count >= 6 && refinedPositions[i] == nil {
+                    continue
+                }
                 let predicted = slope * Double(i) + intercept
                 let residualMs = (peakTimes[i] - predicted) * 1000.0
                 timings.append(TickTiming(beatIndex: i, residualMs: residualMs, isEvenBeat: i % 2 == 0))

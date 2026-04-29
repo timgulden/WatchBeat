@@ -32,12 +32,16 @@ public struct MeasurementResult: Sendable {
     /// clean main-vs-sub pattern) while amplitude needs timings at the
     /// reported rate's beatIndex spacing.
     public let amplitudeTickTimings: [TickTiming]
-    /// True when the tick/tock distribution is too scrambled to trust
-    /// beat error (and, at the extreme, rate). Both parities straddle
-    /// the regression centerline roughly 50/50 instead of forming
-    /// distinct tick and tock bands. The UI surfaces this as a caution
-    /// so the user can look at the timegraph and judge for themselves.
-    public let isDisorderly: Bool
+    /// True when the matched-filter trim had to drop too many ticks for
+    /// a reliable measurement — the recording is acoustically complex
+    /// enough (multiple comparable-amplitude sub-events, sub-event
+    /// flipping, weak signal, etc.) that the picker couldn't lock on
+    /// consistently. Note that the *watch* isn't disorderly — escapements
+    /// are mechanically deterministic. This is a measurement-side flag
+    /// indicating the analysis confidence is too low to display a result.
+    /// The UI routes this to a "low confidence" retry screen rather than
+    /// showing a number the user shouldn't trust.
+    public let isLowConfidence: Bool
 
     public init(
         snappedRate: StandardBeatRate,
@@ -48,7 +52,7 @@ public struct MeasurementResult: Sendable {
         tickCount: Int,
         tickTimings: [TickTiming] = [],
         amplitudeTickTimings: [TickTiming]? = nil,
-        isDisorderly: Bool = false
+        isLowConfidence: Bool = false
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -58,6 +62,6 @@ public struct MeasurementResult: Sendable {
         self.tickCount = tickCount
         self.tickTimings = tickTimings
         self.amplitudeTickTimings = amplitudeTickTimings ?? tickTimings
-        self.isDisorderly = isDisorderly
+        self.isLowConfidence = isLowConfidence
     }
 }

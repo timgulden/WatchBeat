@@ -65,9 +65,11 @@ final class MeasurementCoordinator: ObservableObject {
         let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
         /// Escapement pulse widths for amplitude estimation (independent of lift angle).
         let pulseWidths: PulseWidthEstimate?
-        /// True when tick/tock residuals both straddle zero — the rate and beat
-        /// error should be interpreted with caution (and may be wrong outright).
-        let isDisorderly: Bool
+        /// True when matched-filter trim dropped too many ticks for a
+        /// reliable result. Coordinator routes these recordings to the
+        /// error screen rather than to .result, so this field is always
+        /// false on a result actually shown to the user.
+        let isLowConfidence: Bool
         /// Watch position held throughout the analysis window that produced
         /// this result, or nil if the phone moved between positions during
         /// that window (in which case no position is displayed).
@@ -412,9 +414,17 @@ final class MeasurementCoordinator: ObservableObject {
             diagnosticText: diagText,
             tickResiduals: tickResiduals,
             pulseWidths: pulseWidths,
-            isDisorderly: result.isDisorderly,
+            isLowConfidence: result.isLowConfidence,
             watchPosition: windowPosition
         )
+        // When matched-filter trim drops too many ticks the result isn't
+        // trustworthy — route to the "low analytical confidence" failure
+        // screen instead of showing a number the user shouldn't believe.
+        // ErrorScreen branches on the message prefix.
+        if result.isLowConfidence {
+            state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
+            return
+        }
         state = .result(displayData)
     }
 

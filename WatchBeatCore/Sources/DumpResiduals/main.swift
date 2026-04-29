@@ -52,7 +52,7 @@ let halfPeriodMs = periodMs / 2.0
 print("file=\(url.lastPathComponent)")
 print("rate=\(result.snappedRate.rawValue) bph  period=\(String(format: "%.2f", periodMs)) ms  halfPeriod=\(String(format: "%.2f", halfPeriodMs)) ms")
 print("rateError=\(String(format: "%+.1f", result.rateErrorSecondsPerDay)) s/day  beatError=\(result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "—")")
-print("quality=\(Int(result.qualityScore * 100))%  ticks=\(result.tickCount)  disorderly=\(result.isDisorderly)")
+print("quality=\(Int(result.qualityScore * 100))%  ticks=\(result.tickCount)  lowConfidence=\(result.isLowConfidence)")
 
 // Amplitude probe — use amplitudeTickTimings (diverges from tickTimings in tiebreak)
 let ampEst = AmplitudeEstimator()

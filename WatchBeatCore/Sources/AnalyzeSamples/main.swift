@@ -22,12 +22,12 @@ print("=== \(url.lastPathComponent) ===")
 
 let pipeline = MeasurementPipeline()
 let (result, _) = pipeline.measureWithDiagnostics(buffer)
-print(String(format: "Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  disord=%@",
+print(String(format: "Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  lowConf=%@",
              result.snappedRate.rawValue,
              result.rateErrorSecondsPerDay,
              result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "nil",
              result.qualityScore * 100,
-             result.isDisorderly ? "Y" : "N"))
+             result.isLowConfidence ? "Y" : "N"))
 
 // Per-class μ/σ + one-sidedness — direct read of what the disorderly rule sees.
 // Also test the "label-flip" hypothesis: split the residuals by beat index
