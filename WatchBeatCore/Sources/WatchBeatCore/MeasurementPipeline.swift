@@ -286,9 +286,11 @@ public struct MeasurementPipeline {
         // This is the expensive step (~5–10 ms in release per call), so it
         // runs once after rate selection rather than for every candidate
         // × offset combination inside the rate-selection loop.
-        tickResult = applyMatchedFilter(
-            to: tickResult, samples: samples, sampleRate: sampleRate, rate: bestRate
-        )
+        if ProcessInfo.processInfo.environment["WATCHBEAT_SKIP_MF"] == nil {
+            tickResult = applyMatchedFilter(
+                to: tickResult, samples: samples, sampleRate: sampleRate, rate: bestRate
+            )
+        }
 
         // Step 4: Rate error from tick regression
         let nominalPeriod = bestRate.nominalPeriodSeconds

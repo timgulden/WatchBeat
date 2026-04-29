@@ -99,10 +99,19 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
-        // 1.5σ class-wise iterative trim on the matched-filter positions.
+        // 2σ class-wise iterative trim with per-class linear detrending of
+        // residuals. Within each parity class (tick / tock), the watch's
+        // natural rate and BE drift cause the class mean to wander slowly
+        // across the recording (~1 ms drift over 15 s on TimexTickTick).
+        // Trimming against a static class mean would chop drifted-but-
+        // legitimate ticks; fit a linear trend per class first and trim
+        // around the detrended residuals. trimK = 2.0 keeps ~95% of
+        // normally distributed clean data — looser than 1.5σ which kept
+        // only ~87% and over-trimmed the legitimate drift, tighter than
+        // 3σ which would let real sub-event flips through.
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
-        let trimK = 1.5
+        let trimK = 2.0
         let trimIters = 4
         for _ in 0..<trimIters {
             // Joint regression on (beatIndex, refined absolute time).
@@ -124,29 +133,53 @@ enum MatchedFilterRefinement {
             }
             let slope = sxx > 0 ? sxy / sxx : 0
             let intercept = meanPos - slope * meanBi
-            // Per-class mean and σ of residuals.
-            var sumE = 0.0, sumO = 0.0; var ne = 0, no = 0
+            // Residuals from the joint regression.
             var residuals = [Double](repeating: 0, count: n)
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
                 residuals[i] = positions[i] - (slope * Double(beatIndices[i]) + intercept)
-                if beatIndices[i] % 2 == 0 { sumE += residuals[i]; ne += 1 }
-                else                       { sumO += residuals[i]; no += 1 }
             }
-            let muE = ne > 0 ? sumE / Double(ne) : 0
-            let muO = no > 0 ? sumO / Double(no) : 0
+            // Per-class linear detrend: fit residual_i = a_class * idx_i + b_class
+            // separately for even and odd parities. The slope absorbs natural
+            // drift in the class mean; the intercept absorbs the static class offset.
+            var sumXE = 0.0, sumYE = 0.0, sumXXE = 0.0, sumXYE = 0.0; var nE = 0
+            var sumXO = 0.0, sumYO = 0.0, sumXXO = 0.0, sumXYO = 0.0; var nO = 0
+            for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
+                let x = Double(beatIndices[i]); let y = residuals[i]
+                if beatIndices[i] % 2 == 0 {
+                    sumXE += x; sumYE += y; sumXXE += x * x; sumXYE += x * y; nE += 1
+                } else {
+                    sumXO += x; sumYO += y; sumXXO += x * x; sumXYO += x * y; nO += 1
+                }
+            }
+            func fitLine(sumX: Double, sumY: Double, sumXX: Double, sumXY: Double, n: Int)
+                -> (slope: Double, intercept: Double) {
+                let nd = Double(n)
+                let denom = nd * sumXX - sumX * sumX
+                if n < 2 || denom < 1e-12 {
+                    return (0, n > 0 ? sumY / nd : 0)
+                }
+                let s = (nd * sumXY - sumX * sumY) / denom
+                let b = (sumY - s * sumX) / nd
+                return (s, b)
+            }
+            let (aE, bE) = fitLine(sumX: sumXE, sumY: sumYE, sumXX: sumXXE, sumXY: sumXYE, n: nE)
+            let (aO, bO) = fitLine(sumX: sumXO, sumY: sumYO, sumXX: sumXXO, sumXY: sumXYO, n: nO)
+            // σ of detrended residuals per class.
             var ssE = 0.0, ssO = 0.0
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
-                let mu = beatIndices[i] % 2 == 0 ? muE : muO
-                let d = residuals[i] - mu
+                let x = Double(beatIndices[i])
+                let predicted = (beatIndices[i] % 2 == 0) ? aE * x + bE : aO * x + bO
+                let d = residuals[i] - predicted
                 if beatIndices[i] % 2 == 0 { ssE += d * d } else { ssO += d * d }
             }
-            let sdE = ne > 1 ? sqrt(ssE / Double(ne)) : 0
-            let sdO = no > 1 ? sqrt(ssO / Double(no)) : 0
+            let sdE = nE > 1 ? sqrt(ssE / Double(nE)) : 0
+            let sdO = nO > 1 ? sqrt(ssO / Double(nO)) : 0
             var changed = false
             for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
-                let mu = beatIndices[i] % 2 == 0 ? muE : muO
+                let x = Double(beatIndices[i])
+                let predicted = (beatIndices[i] % 2 == 0) ? aE * x + bE : aO * x + bO
                 let sd = beatIndices[i] % 2 == 0 ? sdE : sdO
-                if sd > 0 && abs(residuals[i] - mu) > trimK * sd {
+                if sd > 0 && abs(residuals[i] - predicted) > trimK * sd {
                     keptFlags[i] = false; changed = true
                 }
             }
