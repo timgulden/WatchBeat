@@ -276,9 +276,17 @@ public struct MeasurementPipeline {
             }
         }
 
-        let tickResult = bestTickResult ?? TickExtractionResult(
+        var tickResult = bestTickResult ?? TickExtractionResult(
             confirmedCount: 0, qualityScore: 0, beatErrorMs: nil, amplitudeProxy: 0,
             measuredPeriod: nil, residualStd: .infinity, tickTimings: []
+        )
+
+        // Apply matched-filter refinement to the WINNING rate's tick result.
+        // This is the expensive step (~5–10 ms in release per call), so it
+        // runs once after rate selection rather than for every candidate
+        // × offset combination inside the rate-selection loop.
+        tickResult = applyMatchedFilter(
+            to: tickResult, samples: samples, sampleRate: sampleRate, rate: bestRate
         )
 
         // Step 4: Rate error from tick regression
@@ -305,10 +313,7 @@ public struct MeasurementPipeline {
             tickCount: tickResult.confirmedCount,
             tickTimings: tickResult.tickTimings,
             amplitudeTickTimings: amplitudeTickTimings,
-            isLowConfidence: isLowConfidenceByKeptFraction(
-                kept: tickResult.tickTimings.count,
-                confirmed: tickResult.confirmedCount
-            )
+            isLowConfidence: tickResult.isLowConfidence
         )
 
         let bestMeasuredHz = tickResult.measuredPeriod.map { 1.0 / $0 } ?? bestRate.hz
@@ -484,6 +489,19 @@ public struct MeasurementPipeline {
         let residualStd: Double
         /// Tick timings for the timegrapher plot.
         let tickTimings: [TickTiming]
+        /// Lock-in centroid times in seconds, indexed by beat number.
+        /// Used by the post-rate-selection matched-filter refinement to
+        /// reconstruct absolute tick positions without needing the squared
+        /// signal to be carried through.
+        var peakTimes: [Double] = []
+        /// Beat indices of confirmed ticks (parallel selection into peakTimes).
+        var confirmed: [Int] = []
+        /// Lock-in regression intercept (seconds). Combined with measuredPeriod
+        /// gives `predicted = slope * beatIndex + intercept`.
+        var regressionIntercept: Double? = nil
+        /// True when matched-filter trim survival was below threshold.
+        /// Set only by the post-selection refinement; defaults to false.
+        var isLowConfidence: Bool = false
     }
 
     /// Divide the raw signal into beat-length windows, find energy peaks.
@@ -818,57 +836,16 @@ public struct MeasurementPipeline {
             regression = linearRegression(times: peakTimes, indices: confirmed)
         }
 
-        // Matched-filter refinement: replaces the lock-in centroid positions
-        // with sub-sample-precise positions found by cross-correlating each
-        // tick's envelope against an iteratively-refined class-shared
-        // template. 1.5σ class-wise trim drops ticks that don't fit the
-        // template (sub-event-flipped picks). Trimmed ticks are dropped
-        // from `tickTimings` and from BE — the regression slope (rate) is
-        // still computed from the lock-in centroids on all confirmed ticks
-        // so rate stability isn't affected by trim count.
-        var refinedPositions: [Double?] = peakTimes.map { _ in nil }
-        if !rate.isQuartz && confirmed.count >= 6 {
-            let confirmedTimes = confirmed.map { peakTimes[$0] }
-            let confirmedBeats = confirmed
-            let refined = MatchedFilterRefinement.refinePositions(
-                squared: squared,
-                sampleRate: sampleRate,
-                tickPositions: confirmedTimes,
-                beatIndices: confirmedBeats
-            )
-            for (k, idx) in confirmed.enumerated() {
-                refinedPositions[idx] = refined[k]
-            }
-        }
-
-        // The matched filter is used as an OUTLIER GATE only — its purpose
-        // is to identify sub-event-flipped picks (whose envelopes don't
-        // fit the shared template). BE and residuals are computed from
-        // LOCK-IN positions of the survivors, not from the matched-filter
-        // positions themselves. This avoids the fragile dependence of
-        // matched-filter convergence on initial-offset bootstrap quality
-        // (which differs between the production lock-in centering and
-        // TickAnatomy's research centering, producing inconsistent BE).
-        //
-        // Refit regression on lock-in positions of matched-filter
-        // survivors, then compute residuals from that refit so the
-        // regression reflects the cleaner data.
-        var keptRegression: (slope: Double?, intercept: Double?) = (regression.slope, regression.intercept)
-        if !rate.isQuartz && confirmed.count >= 6 {
-            let kept = confirmed.filter { refinedPositions[$0] != nil }
-            if kept.count >= 6 {
-                let r = linearRegression(times: peakTimes, indices: kept)
-                keptRegression = (r.slope, r.intercept)
-            }
-        }
-
+        // Lock-in BE for now — the matched-filter refinement is too
+        // expensive to run inside the rate-selection loop (which calls
+        // extractTicksAtOffset 6 rates × 5 offsets = 30× per analysis
+        // pass). The production-quality matched-filter pass runs ONCE on
+        // the winning rate after rate selection completes, in
+        // `applyMatchedFilter`.
         let beatError: Double?
-        if !rate.isQuartz, let slope = keptRegression.slope,
-           let intercept = keptRegression.intercept {
+        if !rate.isQuartz && confirmed.count >= 6, let slope = regression.slope, let intercept = regression.intercept {
             var residualByBeat: [Int: Double] = [:]
             for i in confirmed {
-                // Survivor gate: only ticks the matched filter accepted.
-                guard refinedPositions[i] != nil else { continue }
                 let predicted = slope * Double(i) + intercept
                 residualByBeat[i] = peakTimes[i] - predicted
             }
@@ -877,15 +854,10 @@ public struct MeasurementPipeline {
             beatError = nil
         }
 
-        // Tick timings: survivors only, residualized against the kept-tick
-        // regression. Trimmed ticks drop from the display.
         var timings: [TickTiming] = []
-        if let slope = keptRegression.slope, let intercept = keptRegression.intercept {
+        if let slope = regression.slope, let intercept = regression.intercept {
             for i in confirmed {
                 guard i < peakTimes.count else { continue }
-                if !rate.isQuartz && confirmed.count >= 6 && refinedPositions[i] == nil {
-                    continue
-                }
                 let predicted = slope * Double(i) + intercept
                 let residualMs = (peakTimes[i] - predicted) * 1000.0
                 timings.append(TickTiming(beatIndex: i, residualMs: residualMs, isEvenBeat: i % 2 == 0))
@@ -899,7 +871,96 @@ public struct MeasurementPipeline {
             amplitudeProxy: Double(medianTick),
             measuredPeriod: regression.slope,
             residualStd: regression.residualStd,
-            tickTimings: timings
+            tickTimings: timings,
+            peakTimes: peakTimes,
+            confirmed: confirmed,
+            regressionIntercept: regression.intercept,
+            isLowConfidence: false
+        )
+    }
+
+    /// Apply matched-filter refinement to a tick extraction result. Runs
+    /// MatchedFilterRefinement.refinePositions on the lock-in tick
+    /// positions, then rebuilds beatErrorMs / tickTimings / isLowConfidence
+    /// from the survivors. Used after rate selection so the heavy work
+    /// runs ONCE on the winner instead of every candidate × offset.
+    private func applyMatchedFilter(
+        to tickResult: TickExtractionResult,
+        samples: [Float],
+        sampleRate: Double,
+        rate: StandardBeatRate
+    ) -> TickExtractionResult {
+        guard !rate.isQuartz, tickResult.confirmed.count >= 6,
+              let slope = tickResult.measuredPeriod,
+              let intercept = tickResult.regressionIntercept else {
+            return tickResult
+        }
+        // Squared signal is what MatchedFilterRefinement consumes — recompute
+        // for the winner only (single O(n) vDSP_vsq, ~1 ms for 15 s @ 48 kHz).
+        var squared = [Float](repeating: 0, count: samples.count)
+        vDSP_vsq(samples, 1, &squared, 1, vDSP_Length(samples.count))
+
+        let confirmedTimes = tickResult.confirmed.map { tickResult.peakTimes[$0] }
+        let refined = MatchedFilterRefinement.refinePositions(
+            squared: squared,
+            sampleRate: sampleRate,
+            tickPositions: confirmedTimes,
+            beatIndices: tickResult.confirmed
+        )
+        // Build per-beatIndex map of refined positions.
+        var refinedByBeat: [Int: Double] = [:]
+        for (k, idx) in tickResult.confirmed.enumerated() {
+            if let r = refined[k] { refinedByBeat[idx] = r }
+        }
+        let keptCount = refinedByBeat.count
+
+        // Refit regression on lock-in positions of survivors so the
+        // regression reflects only the well-locked ticks.
+        var keptRegression: (slope: Double?, intercept: Double?) = (slope, intercept)
+        let kept = tickResult.confirmed.filter { refinedByBeat[$0] != nil }
+        if kept.count >= 6 {
+            let r = linearRegression(times: tickResult.peakTimes, indices: kept)
+            keptRegression = (r.slope, r.intercept)
+        }
+
+        // Pair-abs BE on lock-in residuals of survivors — matched filter
+        // is the outlier gate; BE numbers come from lock-in.
+        let beatError: Double?
+        if let s = keptRegression.slope, let i = keptRegression.intercept {
+            var residualByBeat: [Int: Double] = [:]
+            for idx in tickResult.confirmed where refinedByBeat[idx] != nil {
+                let predicted = s * Double(idx) + i
+                residualByBeat[idx] = tickResult.peakTimes[idx] - predicted
+            }
+            beatError = BeatError.meanPairedAbsDifference(residualsByBeat: residualByBeat).map { $0 * 1000.0 }
+        } else { beatError = nil }
+
+        // Survivor-only tickTimings from the refit regression.
+        var timings: [TickTiming] = []
+        if let s = keptRegression.slope, let i = keptRegression.intercept {
+            for idx in tickResult.confirmed where refinedByBeat[idx] != nil {
+                let predicted = s * Double(idx) + i
+                let residualMs = (tickResult.peakTimes[idx] - predicted) * 1000.0
+                timings.append(TickTiming(beatIndex: idx, residualMs: residualMs, isEvenBeat: idx % 2 == 0))
+            }
+        }
+
+        let lowConf = isLowConfidenceByKeptFraction(
+            kept: keptCount, confirmed: tickResult.confirmed.count
+        )
+
+        return TickExtractionResult(
+            confirmedCount: tickResult.confirmed.count,
+            qualityScore: tickResult.qualityScore,
+            beatErrorMs: beatError,
+            amplitudeProxy: tickResult.amplitudeProxy,
+            measuredPeriod: tickResult.measuredPeriod,
+            residualStd: tickResult.residualStd,
+            tickTimings: timings,
+            peakTimes: tickResult.peakTimes,
+            confirmed: tickResult.confirmed,
+            regressionIntercept: tickResult.regressionIntercept,
+            isLowConfidence: lowConf
         )
     }
 
