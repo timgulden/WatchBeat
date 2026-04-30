@@ -355,6 +355,17 @@ final class MeasurementCoordinator: ObservableObject {
 
         saveRawAudio(audioBuffer, result: result)
 
+        // Low-confidence check must run BEFORE the rate-range check below.
+        // If the picker isn't locking consistently (high per-class jitter),
+        // its rate output is unreliable, so we shouldn't display a
+        // "watch needs service" verdict based on it. Route to the
+        // low-analytical-confidence error instead, which prompts the user
+        // to retry rather than implying the watch is broken.
+        if result.isLowConfidence {
+            state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
+            return
+        }
+
         // Snap-confusion: the tick regression's measured rate disagrees sharply
         // with the chosen standard rate. Adjacent standard rates differ by 10-20%,
         // so a >7% mismatch means we locked onto the wrong rate. A badly-worn but
@@ -417,14 +428,6 @@ final class MeasurementCoordinator: ObservableObject {
             isLowConfidence: result.isLowConfidence,
             watchPosition: windowPosition
         )
-        // When matched-filter trim drops too many ticks the result isn't
-        // trustworthy — route to the "low analytical confidence" failure
-        // screen instead of showing a number the user shouldn't believe.
-        // ErrorScreen branches on the message prefix.
-        if result.isLowConfidence {
-            state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
-            return
-        }
         state = .result(displayData)
     }
 
