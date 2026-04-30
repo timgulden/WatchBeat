@@ -151,13 +151,41 @@ let freqRes = envRate / Double(fftLength)
 
 // MARK: - 4. Find peak in [4, 11] Hz, parabolic-interpolate frequency
 
-let lowBin = max(1, Int(4.0 / freqRes))
-let highBin = min(halfN - 2, Int(11.0 / freqRes))
-var peakBin = lowBin
+if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_SPECTRUM"] != nil {
+    print("  --- Spectrum scan (4-11 Hz) ---")
+    let scanLo = max(1, Int(4.0 / freqRes))
+    let scanHi = min(halfN - 2, Int(11.0 / freqRes))
+    for b in scanLo...scanHi {
+        let m = sqrt(Double(realPart[b] * realPart[b] + imagPart[b] * imagPart[b]))
+        let hz = Double(b) * freqRes
+        print(String(format: "    %6.3f Hz (bin %d)  mag=%.6f", hz, b, m))
+    }
+    print("  --- end spectrum scan ---")
+}
+
+// Search ONLY ±0.5 Hz around standard watch rates. Without this restriction
+// an environmental noise source (motor/fan with a clean periodic peak in
+// [4, 11] Hz) can outrank the actual watch and pull the algorithm onto the
+// wrong rate. Standard rates: 5, 5.5, 6, 7, 8, 10 Hz (= 18000, 19800, 21600,
+// 25200, 28800, 36000 bph).
+let standardHzs: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
+let bandRadiusHz = 0.5
+let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
+var peakBin = -1
 var peakMag2: Float = -.infinity
-for b in lowBin...highBin {
-    let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-    if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+for hz in standardHzs {
+    let center = Int(round(hz / freqRes))
+    let lo = max(1, center - bandRadius)
+    let hi = min(halfN - 2, center + bandRadius)
+    guard lo < hi else { continue }
+    for b in lo...hi {
+        let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
+        if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+    }
+}
+guard peakBin >= 0 else {
+    print("No FFT peak found near any standard rate")
+    exit(1)
 }
 
 var fHz = Double(peakBin) * freqRes

@@ -132,18 +132,31 @@ public struct MeasurementPipeline {
             }
         }
 
-        // Find peak in [4, 11] Hz.
+        // Find peak NEAR a standard watch rate. Restricting the search to
+        // ±0.5 Hz bands around 5.0, 5.5, 6.0, 7.0, 8.0, 10.0 Hz prevents
+        // an environmental noise source (motor/fan/etc.) from outranking
+        // the watch when the noise's FFT peak happens to fall outside any
+        // standard-rate band — which can otherwise pull the rate decision
+        // wildly wrong (e.g., a 9.28 Hz noise on a 21600 bph watch
+        // recording snapped to 36000 bph and reported -6240 s/day).
         let freqRes = envRate / Double(fftLength)
-        let lowBin = max(1, Int(4.0 / freqRes))
-        let highBin = min(halfN - 2, Int(11.0 / freqRes))
-        guard lowBin < highBin else {
-            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
-        }
-        var peakBin = lowBin
+        let standardHzs: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
+        let bandRadiusHz = 0.5
+        let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
+        var peakBin = -1
         var peakMag2: Float = -.infinity
-        for b in lowBin...highBin {
-            let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-            if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+        for hz in standardHzs {
+            let center = Int(round(hz / freqRes))
+            let lo = max(1, center - bandRadius)
+            let hi = min(halfN - 2, center + bandRadius)
+            guard lo < hi else { continue }
+            for b in lo...hi {
+                let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
+                if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+            }
+        }
+        guard peakBin >= 0 else {
+            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
         }
         var fHz = Double(peakBin) * freqRes
         if peakBin > 1 && peakBin < halfN - 1 {
