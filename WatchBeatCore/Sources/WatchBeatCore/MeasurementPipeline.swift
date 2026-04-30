@@ -132,36 +132,56 @@ public struct MeasurementPipeline {
             }
         }
 
-        // Find peak NEAR a standard watch rate. Restricting the search to
-        // ±0.5 Hz bands around 5.0, 5.5, 6.0, 7.0, 8.0, 10.0 Hz prevents
-        // an environmental noise source (motor/fan/etc.) from outranking
-        // the watch when the noise's FFT peak happens to fall outside any
-        // standard-rate band — which can otherwise pull the rate decision
-        // wildly wrong (e.g., a 9.28 Hz noise on a 21600 bph watch
-        // recording snapped to 36000 bph and reported -6240 s/day).
+        // Find peak per standard-rate band. Two competing concerns:
+        //   1. An environmental noise source (motor/fan/etc.) can outrank
+        //      the watch's true fundamental if we just take the loudest
+        //      peak in a wide [4, 11] Hz range. Restrict to bands ±0.5 Hz
+        //      around standard watch rates.
+        //   2. Watches with sharp ticks have very strong harmonic content,
+        //      so a 5 Hz watch can have a 10 Hz harmonic that's almost as
+        //      tall (sometimes taller) than its 5 Hz fundamental. Picking
+        //      strictly by magnitude would snap a real 18000 bph to 36000.
+        // Resolution: per band, find the peak magnitude. Then prefer the
+        // LOWEST-rate band whose peak is within a factor of 2 of the
+        // overall maximum. This makes harmonics yield to fundamentals.
         let freqRes = envRate / Double(fftLength)
         let standardHzs: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
         let bandRadiusHz = 0.5
         let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
-        var peakBin = -1
-        var peakMag2: Float = -.infinity
+        var bandPeaks: [(hz: Double, bin: Int, mag: Float)] = []
         for hz in standardHzs {
             let center = Int(round(hz / freqRes))
             let lo = max(1, center - bandRadius)
             let hi = min(halfN - 2, center + bandRadius)
             guard lo < hi else { continue }
+            var best: (Int, Float) = (-1, -.infinity)
             for b in lo...hi {
                 let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-                if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+                if m2 > best.1 { best = (b, m2) }
+            }
+            if best.0 >= 0 {
+                bandPeaks.append((hz: hz, bin: best.0, mag: sqrt(best.1)))
             }
         }
-        guard peakBin >= 0 else {
+        guard !bandPeaks.isEmpty else {
             return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
+        }
+        let maxMag = bandPeaks.map { $0.mag }.max()!
+        let threshold = maxMag * 0.5
+        // Take the lowest-frequency band whose peak is at least half the
+        // overall maximum. (Equivalent: prefer fundamentals over harmonics
+        // when their peaks are within 2× of each other.)
+        var peakBin = bandPeaks[0].bin
+        var peakMagPicked = bandPeaks[0].mag
+        for bp in bandPeaks where bp.mag >= threshold {
+            peakBin = bp.bin
+            peakMagPicked = bp.mag
+            break  // bandPeaks is in ascending Hz order
         }
         var fHz = Double(peakBin) * freqRes
         if peakBin > 1 && peakBin < halfN - 1 {
             let mL = sqrt(Double(realPart[peakBin - 1] * realPart[peakBin - 1] + imagPart[peakBin - 1] * imagPart[peakBin - 1]))
-            let mP = sqrt(Double(peakMag2))
+            let mP = Double(peakMagPicked)
             let mR = sqrt(Double(realPart[peakBin + 1] * realPart[peakBin + 1] + imagPart[peakBin + 1] * imagPart[peakBin + 1]))
             let denom = mL - 2 * mP + mR
             if abs(denom) > 1e-12 {
@@ -247,18 +267,56 @@ public struct MeasurementPipeline {
         let oddStd = sqrt(oddVar)
         let beAsymmetryMs = abs(evenMean - oddMean)
 
-        // Quality from per-class σ. exp(-σ/5) gives:
-        //   σ = 0.5 ms → q = 0.90  (clean watch, auto-stop at 80%)
-        //   σ = 1.0 ms → q = 0.82  (still auto-stop)
-        //   σ = 2.0 ms → q = 0.67  (show result)
-        //   σ = 5.0 ms → q = 0.37  (show; borderline)
-        //   σ = 8.0 ms → q = 0.20  (try again)
+        // Quality from SNR (tick energy vs gap energy), matching production's
+        // formula so the UX stays the same: clean recordings hit 99-100%
+        // and the auto-stop / try-again thresholds keep their meaning.
+        // Per-class jitter (σ) is too strict as a quality metric — even a
+        // perfect recording of a real watch has σ ≈ 0.5-1 ms from genuine
+        // mechanical irregularity, so a σ-based formula tops out around 90%
+        // and the user has to abandon the "wait for 99%" UX flow. SNR-based
+        // quality answers "is the audio capturing ticks cleanly?" which is
+        // what the user can affect by adjusting mic placement; σ-based
+        // answers a different question ("is the picker confident?") that
+        // we route through isLowConfidence instead.
         let avgClassStd = (evenStd + oddStd) / 2.0
-        let quality = max(0.0, min(1.0, exp(-avgClassStd / 5.0)))
 
-        // Low confidence: σ comparable to or larger than the typical
-        // mechanical variation we care about — picker is not locking
-        // consistently enough to trust the displayed numbers.
+        let snrHalfSamples = max(1, Int(0.005 * sampleRate))
+        var tickEnergies: [Float] = []
+        var gapEnergies: [Float] = []
+        tickEnergies.reserveCapacity(m)
+        gapEnergies.reserveCapacity(m - 1)
+        for i in 0..<m {
+            let center = Int(round(beatPositions[i] * sampleRate))
+            let lo = max(0, center - snrHalfSamples)
+            let hi = min(n - 1, center + snrHalfSamples)
+            guard lo < hi else { continue }
+            var sum: Float = 0
+            vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1,
+                     &sum, vDSP_Length(hi - lo + 1))
+            tickEnergies.append(sum)
+            if i > 0 {
+                let gapCenter = Int(round((beatPositions[i - 1] + beatPositions[i]) * 0.5 * sampleRate))
+                let glo = max(0, gapCenter - snrHalfSamples)
+                let ghi = min(n - 1, gapCenter + snrHalfSamples)
+                if glo < ghi {
+                    var gsum: Float = 0
+                    vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + glo }, 1,
+                             &gsum, vDSP_Length(ghi - glo + 1))
+                    gapEnergies.append(gsum)
+                }
+            }
+        }
+        tickEnergies.sort()
+        gapEnergies.sort()
+        let medianTick = tickEnergies.isEmpty ? 0 : tickEnergies[tickEnergies.count / 2]
+        let medianGap = gapEnergies.isEmpty ? 0 : gapEnergies[gapEnergies.count / 2]
+        let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
+        let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 5.0)))
+
+        // Low confidence: per-class jitter signals the picker isn't locking
+        // consistently. This catches the case where SNR is good (audio is
+        // clean) but the watch's mechanical irregularity (near-stall, broken
+        // hairspring, etc.) makes the displayed numbers untrustworthy.
         let isLowConfidence = avgClassStd > 6.0
 
         // Tick timings for the timegraph: use the residuals as-is.

@@ -163,29 +163,44 @@ if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_SPECTRUM"] != nil {
     print("  --- end spectrum scan ---")
 }
 
-// Search ONLY ±0.5 Hz around standard watch rates. Without this restriction
-// an environmental noise source (motor/fan with a clean periodic peak in
-// [4, 11] Hz) can outrank the actual watch and pull the algorithm onto the
-// wrong rate. Standard rates: 5, 5.5, 6, 7, 8, 10 Hz (= 18000, 19800, 21600,
-// 25200, 28800, 36000 bph).
+// Search ±0.5 Hz around standard watch rates, then prefer the LOWEST-rate
+// band whose peak is within 2× of the overall maximum. This avoids two
+// failure modes:
+//   1. Environmental noise (motor/fan) outside any standard-rate band can
+//      pull the algorithm onto the wrong rate if we search [4, 11] Hz freely.
+//   2. Watches with sharp ticks have strong harmonics — a 5 Hz watch can
+//      have a 10 Hz harmonic almost as tall as its fundamental, so picking
+//      strictly by magnitude would snap to 36000 bph instead of 18000.
 let standardHzs: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
 let bandRadiusHz = 0.5
 let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
-var peakBin = -1
-var peakMag2: Float = -.infinity
+var bandPeaks: [(hz: Double, bin: Int, mag: Float)] = []
 for hz in standardHzs {
     let center = Int(round(hz / freqRes))
     let lo = max(1, center - bandRadius)
     let hi = min(halfN - 2, center + bandRadius)
     guard lo < hi else { continue }
+    var best: (Int, Float) = (-1, -.infinity)
     for b in lo...hi {
         let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-        if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+        if m2 > best.1 { best = (b, m2) }
+    }
+    if best.0 >= 0 {
+        bandPeaks.append((hz: hz, bin: best.0, mag: sqrt(best.1)))
     }
 }
-guard peakBin >= 0 else {
+guard !bandPeaks.isEmpty else {
     print("No FFT peak found near any standard rate")
     exit(1)
+}
+let maxMag = bandPeaks.map { $0.mag }.max()!
+let threshold = maxMag * 0.5
+var peakBin = bandPeaks[0].bin
+var peakMag2: Float = bandPeaks[0].mag * bandPeaks[0].mag
+for bp in bandPeaks where bp.mag >= threshold {
+    peakBin = bp.bin
+    peakMag2 = bp.mag * bp.mag
+    break
 }
 
 var fHz = Double(peakBin) * freqRes
