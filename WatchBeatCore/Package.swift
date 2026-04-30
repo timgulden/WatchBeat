@@ -45,6 +45,14 @@ let package = Package(
             name: "OnsetTimeline",
             targets: ["OnsetTimeline"]
         ),
+        .executable(
+            name: "Reference",
+            targets: ["Reference"]
+        ),
+        .executable(
+            name: "Fourier",
+            targets: ["Fourier"]
+        ),
     ],
     targets: [
         .target(
@@ -84,6 +92,20 @@ let package = Package(
         ),
         .executableTarget(
             name: "OnsetTimeline",
+            dependencies: ["WatchBeatCore"],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+            ]
+        ),
+        .executableTarget(
+            name: "Reference",
+            dependencies: ["WatchBeatCore"],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+            ]
+        ),
+        .executableTarget(
+            name: "Fourier",
             dependencies: ["WatchBeatCore"],
             linkerSettings: [
                 .linkedFramework("Accelerate"),
