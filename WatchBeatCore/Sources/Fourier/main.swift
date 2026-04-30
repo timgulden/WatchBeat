@@ -289,6 +289,76 @@ print("  Rate:       \(String(format: "%+.1f", rateErrPerDay)) s/day vs \(neares
 print("  BE (FFT):   \(String(format: "%+.3f", beMs)) ms    [from |c(f/2)| / |c(f)| = \(String(format: "%.3f", ratioMag)),  sign from arg(c_1/c_2)]")
 print("  c_1 / c_2:  \(String(format: "%+.4f", ratioReal)) + \(String(format: "%+.4f", ratioImag))i   (theory: pure imaginary for δ-pulse model)")
 
+// MARK: - 5b. Multi-harmonic δ extraction (Tim's Q3, simpler closed-form)
+//
+// For symmetric tick=tock with arbitrary internal shape S(f), each harmonic
+// h of f_full = f_beat/2 has coefficient:
+//   c_h = (1/T_full) · exp(-2πi·h·f_full·p_T) · S(h·f_full) · bracket(h)
+// where bracket(even) = 2·cos(γ_h)·exp(-iγ_h)
+//       bracket(odd)  = 2·sin(γ_h)·exp(-iγ_h + iπ/2)
+//   and γ_h = π·h·f_full·δ = (π·h·δ·f_beat) / 2.
+//
+// For small δ, bracket(even) ≈ 2 and bracket(odd) ≈ 2·γ_h. So:
+//   |c_{2k}|     ≈ 2·|S(2k·f_full)|         (the "shape" envelope at even h)
+//   |c_{2k-1}|   ≈ 2·|sin(γ_{2k-1})|·|S((2k-1)·f_full)|  (odd h carries δ)
+//
+// We don't know |S| at odd-h directly. Approximation: for typical decaying
+// tick spectra, log|S(f)| is roughly linear in f over short ranges. So
+// interpolate log|S| linearly between adjacent even-h samples to get
+// |S| at odd-h, then solve for γ_h, then δ_h = 2γ_h / (π·h·f_beat).
+//
+// Average across multiple odd-h estimates, weighted by |c_h| (signal-to-
+// noise — bigger |c_h| means more reliable γ extraction).
+
+let cByLabel: [String: Harmonic] = Dictionary(uniqueKeysWithValues: harmonics.map { ($0.label, $0) })
+
+func magS(at h: Int) -> Double {
+    // h = harmonic index of f_full. Even h: S ≈ |c_h|/2. Odd h: log-interp.
+    let label: (Int) -> String = { hi in
+        switch hi {
+        case 1: return "f/2"; case 2: return "f"; case 3: return "3f/2"
+        case 4: return "2f"; case 5: return "5f/2"; case 6: return "3f"
+        case 7: return "7f/2"; case 8: return "4f"
+        default: return ""
+        }
+    }
+    if h % 2 == 0 {
+        return (cByLabel[label(h)]?.mag ?? 0) / 2.0
+    } else {
+        let mLeftMag = (cByLabel[label(h - 1)]?.mag ?? 0) / 2.0
+        let mRightMag = (cByLabel[label(h + 1)]?.mag ?? 0) / 2.0
+        if mLeftMag > 0 && mRightMag > 0 {
+            return sqrt(mLeftMag * mRightMag)  // geometric mean = log-linear interp
+        }
+        return max(mLeftMag, mRightMag)
+    }
+}
+
+print("")
+print("  --- Multi-harmonic δ extraction (per odd harmonic) ---")
+print("  h  |c_h|        |S_h|approx  |c|/(2|S|)  γ_h(rad)   δ_h(ms)    weight")
+var deltaSum = 0.0
+var deltaWeightSum = 0.0
+let oddHs = [1, 3, 5, 7]
+for h in oddHs {
+    let label = h == 1 ? "f/2" : h == 3 ? "3f/2" : h == 5 ? "5f/2" : "7f/2"
+    let mC = cByLabel[label]?.mag ?? 0
+    let mS = magS(at: h)
+    if mS <= 0 || mC <= 0 { continue }
+    let argSin = min(0.999, mC / (2 * mS))
+    let gammaH = asin(argSin)
+    let deltaH_sec = 2.0 * gammaH / (.pi * Double(h) * fHz)
+    let deltaH_ms = deltaH_sec * 1000.0
+    let weight = mC  // weight by signal strength
+    deltaSum += deltaH_ms * weight
+    deltaWeightSum += weight
+    print("  \(h)  \(String(format: "%.6f", mC))  \(String(format: "%.6f", mS))   \(String(format: "%.4f", argSin))     \(String(format: "%.4f", gammaH))   \(String(format: "%+.3f", deltaH_ms))   \(String(format: "%.6f", weight))")
+}
+let deltaWeighted = deltaWeightSum > 0 ? deltaSum / deltaWeightSum : 0
+// Sign from c_1's relationship to c_2 (already computed as ratioImag).
+let deltaSigned = deltaWeighted * (ratioImag >= 0 ? +1.0 : -1.0)
+print("  Weighted-mean δ (multi-harmonic): \(String(format: "%+.3f", deltaSigned)) ms")
+
 // MARK: - 6. Sub-event structure from harmonics 2f, 3f, ...
 //
 // Each higher harmonic of the BEAT rate (n·f_beat = 2n·f_half for even n
