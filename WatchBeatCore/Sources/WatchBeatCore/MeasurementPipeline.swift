@@ -48,6 +48,276 @@ public struct MeasurementPipeline {
         return result
     }
 
+    /// Reference-picker alternative measurement path.
+    ///
+    /// Replaces the production picker's centroid + rate-selection +
+    /// matched-filter pipeline with the simpler FFT-phase-anchored argmax
+    /// algorithm validated by the standalone Reference CLI:
+    ///   1. Highpass 5 kHz → square → 1 ms boxcar smooth.
+    ///   2. Decimate squared signal to 1 kHz envelope, FFT, find peak in
+    ///      [4, 11] Hz, parabolic-interpolate fHz, read complex phase.
+    ///   3. Generate window centers from FFT phase at fHz cadence.
+    ///   4. For each window, take ±half-period of full-rate smoothed
+    ///      squared, find argmax → that's the beat position.
+    ///   5. Linear regression on beat positions; rate is the FFT peak (more
+    ///      stable than regression slope in the presence of within-recording
+    ///      mechanical wander). Beat error is even/odd asymmetry of
+    ///      regression residuals.
+    ///
+    /// This path was developed for accurately measuring multi-sub-event
+    /// Swiss escapements (Omega 485) where the production picker's centroid
+    /// hides ~9 ms of real beat error by averaging across sub-events. It
+    /// works just as well on single-peak Timex-style ticks because argmax
+    /// in a half-period window is degenerate-stable when there's only one
+    /// peak.
+    public func measureReference(_ input: AudioBuffer) -> MeasurementResult {
+        let (result, _) = measureReferenceWithDiagnostics(input)
+        return result
+    }
+
+    public func measureReferenceWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
+        let sampleRate = input.sampleRate
+        let filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
+        let n = filtered.count
+
+        // Squared + 1 ms boxcar smoothing (light — preserves peak location
+        // without averaging adjacent sub-events).
+        var squared = [Float](repeating: 0, count: n)
+        vDSP_vsq(filtered, 1, &squared, 1, vDSP_Length(n))
+        let smoothWin = max(3, Int(0.001 * sampleRate)) | 1
+        let smoothed = movingAverage(of: squared, windowSamples: smoothWin)
+
+        // Decimate to 1 kHz for FFT.
+        let decimFactor = max(1, Int(sampleRate / 1000.0))
+        let envRate = sampleRate / Double(decimFactor)
+        let envN = n / decimFactor
+        var env = [Float](repeating: 0, count: envN)
+        for i in 0..<envN {
+            var ws: Float = 0
+            vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + i * decimFactor }, 1,
+                     &ws, vDSP_Length(decimFactor))
+            env[i] = ws / Float(decimFactor)
+        }
+        var meanEnv: Float = 0
+        vDSP_meanv(env, 1, &meanEnv, vDSP_Length(envN))
+        var negMean = -meanEnv
+        vDSP_vsadd(env, 1, &negMean, &env, 1, vDSP_Length(envN))
+
+        // Hann + complex FFT.
+        var hann = [Float](repeating: 0, count: envN)
+        vDSP_hann_window(&hann, vDSP_Length(envN), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(env, 1, hann, 1, &env, 1, vDSP_Length(envN))
+
+        let fftLength = nextPowerOfTwo(envN)
+        var padded = [Float](repeating: 0, count: fftLength)
+        padded.replaceSubrange(0..<envN, with: env)
+        let log2n = vDSP_Length(log2(Double(fftLength)))
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
+        }
+        defer { vDSP_destroy_fftsetup(setup) }
+        let halfN = fftLength / 2
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+        padded.withUnsafeBufferPointer { buf in
+            for i in 0..<halfN {
+                realPart[i] = buf[2 * i]
+                imagPart[i] = buf[2 * i + 1]
+            }
+        }
+        realPart.withUnsafeMutableBufferPointer { rb in
+            imagPart.withUnsafeMutableBufferPointer { ib in
+                var split = DSPSplitComplex(realp: rb.baseAddress!, imagp: ib.baseAddress!)
+                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+            }
+        }
+
+        // Find peak in [4, 11] Hz.
+        let freqRes = envRate / Double(fftLength)
+        let lowBin = max(1, Int(4.0 / freqRes))
+        let highBin = min(halfN - 2, Int(11.0 / freqRes))
+        guard lowBin < highBin else {
+            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
+        }
+        var peakBin = lowBin
+        var peakMag2: Float = -.infinity
+        for b in lowBin...highBin {
+            let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
+            if m2 > peakMag2 { peakMag2 = m2; peakBin = b }
+        }
+        var fHz = Double(peakBin) * freqRes
+        if peakBin > 1 && peakBin < halfN - 1 {
+            let mL = sqrt(Double(realPart[peakBin - 1] * realPart[peakBin - 1] + imagPart[peakBin - 1] * imagPart[peakBin - 1]))
+            let mP = sqrt(Double(peakMag2))
+            let mR = sqrt(Double(realPart[peakBin + 1] * realPart[peakBin + 1] + imagPart[peakBin + 1] * imagPart[peakBin + 1]))
+            let denom = mL - 2 * mP + mR
+            if abs(denom) > 1e-12 {
+                var delta = 0.5 * (mL - mR) / denom
+                if delta > 0.5 { delta = 0.5 }
+                if delta < -0.5 { delta = -0.5 }
+                fHz = (Double(peakBin) + delta) * freqRes
+            }
+        }
+        let phi = atan2(Double(imagPart[peakBin]), Double(realPart[peakBin]))
+
+        // Snap to nearest standard rate (for `snappedRate` field; rate
+        // ERROR is computed against this nominal).
+        let snappedRate = StandardBeatRate.allCases.min { a, b in
+            abs(a.hz - fHz) < abs(b.hz - fHz)
+        } ?? StandardBeatRate.bph28800
+        let rateErrPerDay = (fHz / snappedRate.hz - 1.0) * 86400.0
+
+        // Generate window centers at fHz cadence from FFT phase.
+        let periodSec = 1.0 / fHz
+        let halfPeriodSamples = Int(periodSec * sampleRate / 2.0)
+        let durationSec = Double(n) / sampleRate
+        let phaseShift = phi / (2.0 * .pi)
+        var windowCenters: [Double] = []
+        var k = Int(ceil(phaseShift + (Double(halfPeriodSamples) / sampleRate) * fHz))
+        while true {
+            let t = (Double(k) - phaseShift) / fHz
+            if t + Double(halfPeriodSamples) / sampleRate >= durationSec { break }
+            if t - Double(halfPeriodSamples) / sampleRate >= 0 { windowCenters.append(t) }
+            k += 1
+        }
+
+        // Per-window argmax on smoothed squared (full-rate).
+        var beatPositions: [Double] = []
+        for tc in windowCenters {
+            let centerSample = Int(round(tc * sampleRate))
+            let lo = max(0, centerSample - halfPeriodSamples)
+            let hi = min(n - 1, centerSample + halfPeriodSamples)
+            var bestIdx = lo
+            var bestVal: Float = -.infinity
+            for i in lo...hi {
+                if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
+            }
+            beatPositions.append(Double(bestIdx) / sampleRate)
+        }
+
+        let m = beatPositions.count
+        guard m >= 6 else {
+            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
+        }
+
+        // Linear regression on beat positions.
+        var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
+        for i in 0..<m {
+            let di = Double(i)
+            sumI += di; sumT += beatPositions[i]; sumII += di * di; sumIT += di * beatPositions[i]
+        }
+        let dm = Double(m)
+        let regDenom = dm * sumII - sumI * sumI
+        let slope = (dm * sumIT - sumI * sumT) / regDenom
+        let intercept = (sumT - slope * sumI) / dm
+
+        // Residuals + per-class statistics.
+        var residualsMs = [Double](repeating: 0, count: m)
+        for i in 0..<m {
+            residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
+        }
+        var evenSum: Double = 0, oddSum: Double = 0
+        var evenSumSq: Double = 0, oddSumSq: Double = 0
+        var evenN = 0, oddN = 0
+        for i in 0..<m {
+            if i % 2 == 0 {
+                evenSum += residualsMs[i]; evenSumSq += residualsMs[i] * residualsMs[i]; evenN += 1
+            } else {
+                oddSum += residualsMs[i]; oddSumSq += residualsMs[i] * residualsMs[i]; oddN += 1
+            }
+        }
+        let evenMean = evenN > 0 ? evenSum / Double(evenN) : 0
+        let oddMean = oddN > 0 ? oddSum / Double(oddN) : 0
+        let evenVar = evenN > 0 ? max(0, evenSumSq / Double(evenN) - evenMean * evenMean) : 0
+        let oddVar = oddN > 0 ? max(0, oddSumSq / Double(oddN) - oddMean * oddMean) : 0
+        let evenStd = sqrt(evenVar)
+        let oddStd = sqrt(oddVar)
+        let beAsymmetryMs = abs(evenMean - oddMean)
+
+        // Quality from per-class σ. exp(-σ/5) gives:
+        //   σ = 0.5 ms → q = 0.90  (clean watch, auto-stop at 80%)
+        //   σ = 1.0 ms → q = 0.82  (still auto-stop)
+        //   σ = 2.0 ms → q = 0.67  (show result)
+        //   σ = 5.0 ms → q = 0.37  (show; borderline)
+        //   σ = 8.0 ms → q = 0.20  (try again)
+        let avgClassStd = (evenStd + oddStd) / 2.0
+        let quality = max(0.0, min(1.0, exp(-avgClassStd / 5.0)))
+
+        // Low confidence: σ comparable to or larger than the typical
+        // mechanical variation we care about — picker is not locking
+        // consistently enough to trust the displayed numbers.
+        let isLowConfidence = avgClassStd > 6.0
+
+        // Tick timings for the timegraph: use the residuals as-is.
+        let tickTimings: [TickTiming] = (0..<m).map {
+            TickTiming(beatIndex: $0, residualMs: residualsMs[$0], isEvenBeat: $0 % 2 == 0)
+        }
+
+        // Amplitude proxy: median peak amplitude. Used for downstream
+        // amplitude estimation. For now just return median tick energy.
+        var peakValues: [Float] = []
+        peakValues.reserveCapacity(m)
+        for tc in windowCenters {
+            let centerSample = Int(round(tc * sampleRate))
+            let lo = max(0, centerSample - halfPeriodSamples)
+            let hi = min(n - 1, centerSample + halfPeriodSamples)
+            var mx: Float = 0
+            for i in lo...hi { if smoothed[i] > mx { mx = smoothed[i] } }
+            peakValues.append(mx)
+        }
+        peakValues.sort()
+        let medianPeak = peakValues.isEmpty ? 0 : Double(peakValues[peakValues.count / 2])
+
+        let result = MeasurementResult(
+            snappedRate: snappedRate,
+            rateErrorSecondsPerDay: rateErrPerDay,
+            beatErrorMilliseconds: beAsymmetryMs,
+            amplitudeProxy: medianPeak,
+            qualityScore: quality,
+            tickCount: m,
+            tickTimings: tickTimings,
+            isLowConfidence: isLowConfidence,
+            measuredPeriod: slope,
+            regressionIntercept: intercept
+        )
+
+        let diagnostics = PipelineDiagnostics(
+            rawPeakAmplitude: 0,
+            periodEstimate: PeriodEstimate(measuredHz: 1.0 / slope, snappedRate: snappedRate, confidence: quality),
+            tickCount: m,
+            sampleRate: sampleRate,
+            sampleCount: n,
+            rateScores: []
+        )
+        return (result, diagnostics)
+    }
+
+    private static func emptyResult(sampleRate: Double) -> MeasurementResult {
+        MeasurementResult(
+            snappedRate: .bph28800,
+            rateErrorSecondsPerDay: 0,
+            beatErrorMilliseconds: nil,
+            amplitudeProxy: 0,
+            qualityScore: 0,
+            tickCount: 0,
+            tickTimings: [],
+            isLowConfidence: true,
+            measuredPeriod: nil,
+            regressionIntercept: nil
+        )
+    }
+
+    private static func emptyDiagnostics(sampleRate: Double, n: Int) -> PipelineDiagnostics {
+        PipelineDiagnostics(
+            rawPeakAmplitude: 0,
+            periodEstimate: PeriodEstimate(measuredHz: 0, snappedRate: .bph28800, confidence: 0),
+            tickCount: 0,
+            sampleRate: sampleRate,
+            sampleCount: n,
+            rateScores: []
+        )
+    }
+
     /// Run the pipeline with diagnostics and optional manual rate override.
     ///
     /// Runs the pipeline at both the primary (5 kHz) and alternate (8 kHz)

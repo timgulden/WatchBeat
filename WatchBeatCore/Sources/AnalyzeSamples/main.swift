@@ -21,8 +21,12 @@ let raw = buffer.samples
 print("=== \(url.lastPathComponent) ===")
 
 let pipeline = MeasurementPipeline()
-let (result, _) = pipeline.measureWithDiagnostics(buffer)
-print(String(format: "Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  lowConf=%@",
+let useReference = ProcessInfo.processInfo.environment["WATCHBEAT_REFERENCE"] != nil
+let (result, _) = useReference
+    ? pipeline.measureReferenceWithDiagnostics(buffer)
+    : pipeline.measureWithDiagnostics(buffer)
+print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  lowConf=%@",
+             useReference ? "[REF] " : "",
              result.snappedRate.rawValue,
              result.rateErrorSecondsPerDay,
              result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "nil",

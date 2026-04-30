@@ -286,7 +286,7 @@ final class MeasurementCoordinator: ObservableObject {
 
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
                 let (result, diagnostics) = await Task.detached { [pipeline] in
-                    pipeline.measureWithDiagnostics(buffer)
+                    pipeline.measureReferenceWithDiagnostics(buffer)
                 }.value
 
                 let quality = result.qualityScore
