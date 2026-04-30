@@ -531,6 +531,160 @@ print("  δ (BE):       \(String(format: "%+.3f", fitDelta)) ms")
 print("  p_T:          \(String(format: "%+.3f", fitPT)) ms")
 print("  Final SSE:    \(String(format: "%.6e", bestObj))")
 
+// MARK: - 5d. Full asymmetric fit (tick ≠ tock)
+//
+// Model: tick has sub-events (0, t_2, t_3) with amplitudes (1, A_2, A_3).
+// Tock has sub-events (0, t_2', t_3') with amplitudes (B_1, B_2', B_3').
+// Tock dominant peak is offset from tick dominant peak by 1/f_beat + δ.
+// 11 parameters total: t_2, t_3, A_2, A_3, t_2', t_3', B_1, B_2', B_3',
+// δ, p_T. Fit to 16 observations (8 complex c_h).
+
+func predictAsymC(h: Int, fHz: Double, p: [Double]) -> (Double, Double) {
+    // p = [t_2, t_3, A_2, A_3, t_2p, t_3p, B_1, B_2p, B_3p, delta, pT]
+    let fFull = fHz / 2.0
+    let arg0 = -2 * .pi * Double(h) * fFull
+    var re = 0.0, im = 0.0
+    // Tick:
+    for (amp, off) in [(1.0, 0.0), (p[2], p[0]), (p[3], p[1])] {
+        let phase = arg0 * (p[10] + off)
+        re += amp * cos(phase)
+        im += amp * sin(phase)
+    }
+    // Tock:
+    let tockBase = p[10] + 1.0 / fHz + p[9]
+    for (amp, off) in [(p[6], 0.0), (p[7], p[4]), (p[8], p[5])] {
+        let phase = arg0 * (tockBase + off)
+        re += amp * cos(phase)
+        im += amp * sin(phase)
+    }
+    return (re, im)
+}
+
+func asymObjective(_ p: [Double]) -> Double {
+    // Bound penalties: positions within ±50 ms, amplitudes 0..5, δ ±50 ms.
+    var penalty = 0.0
+    let positionBound = 0.050
+    let ampBound = 5.0
+    for i in [0, 1, 4, 5] {
+        if abs(p[i]) > positionBound { penalty += 1e6 * p[i] * p[i] }
+    }
+    for i in [2, 3, 6, 7, 8] {
+        if p[i] < 0 { penalty += 1e6 * p[i] * p[i] }
+        if p[i] > ampBound { penalty += 1e6 * p[i] * p[i] }
+    }
+    if abs(p[9]) > 0.05 { penalty += 1e6 * p[9] * p[9] }
+
+    var sse = 0.0
+    let hLabels = [(1, "f/2"), (2, "f"), (3, "3f/2"), (4, "2f"),
+                   (5, "5f/2"), (6, "3f"), (7, "7f/2"), (8, "4f")]
+    let (re2, im2) = predictAsymC(h: 2, fHz: fHz, p: p)
+    let predMag2 = sqrt(re2 * re2 + im2 * im2)
+    let obsMag2 = cByLabel["f"]!.mag
+    let scale = predMag2 > 0 ? obsMag2 / predMag2 : 1.0
+    let refScale = obsMag2 + 1e-10
+
+    for (h, label) in hLabels {
+        let (predRe, predIm) = predictAsymC(h: h, fHz: fHz, p: p)
+        let dRe = (predRe * scale - cByLabel[label]!.real) / refScale
+        let dIm = (predIm * scale - cByLabel[label]!.imag) / refScale
+        sse += dRe * dRe + dIm * dIm
+    }
+    return penalty + sse / Double(hLabels.count)
+}
+
+func nelderMeadAsym(_ initial: [Double], steps: [Double], maxIter: Int) -> [Double] {
+    let n = initial.count
+    var simplex: [[Double]] = [initial]
+    for i in 0..<n {
+        var v = initial
+        v[i] += steps[i]
+        simplex.append(v)
+    }
+    var values = simplex.map { asymObjective($0) }
+    let alpha = 1.0, gamma = 2.0, rho = 0.5, sigma = 0.5
+
+    for _ in 0..<maxIter {
+        let order = (0...n).sorted { values[$0] < values[$1] }
+        simplex = order.map { simplex[$0] }
+        values = order.map { values[$0] }
+        if values.last! - values.first! < 1e-10 { break }
+
+        var centroid = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            for j in 0..<n { centroid[j] += simplex[i][j] / Double(n) }
+        }
+        var reflected = [Double](repeating: 0, count: n)
+        for j in 0..<n { reflected[j] = centroid[j] + alpha * (centroid[j] - simplex[n][j]) }
+        let rValue = asymObjective(reflected)
+
+        if rValue < values[0] {
+            var expanded = [Double](repeating: 0, count: n)
+            for j in 0..<n { expanded[j] = centroid[j] + gamma * (reflected[j] - centroid[j]) }
+            let eValue = asymObjective(expanded)
+            if eValue < rValue { simplex[n] = expanded; values[n] = eValue }
+            else { simplex[n] = reflected; values[n] = rValue }
+        } else if rValue < values[n - 1] {
+            simplex[n] = reflected; values[n] = rValue
+        } else {
+            var contracted = [Double](repeating: 0, count: n)
+            for j in 0..<n { contracted[j] = centroid[j] + rho * (simplex[n][j] - centroid[j]) }
+            let cValue = asymObjective(contracted)
+            if cValue < values[n] {
+                simplex[n] = contracted; values[n] = cValue
+            } else {
+                for i in 1...n {
+                    for j in 0..<n { simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j]) }
+                    values[i] = asymObjective(simplex[i])
+                }
+            }
+        }
+    }
+    return simplex[0]
+}
+
+// Seed asym fit from symmetric fit's best parameters.
+let asymInit: [Double] = [
+    bestParams[0],  // t_2
+    bestParams[1],  // t_3
+    bestParams[2],  // A_2
+    bestParams[3],  // A_3
+    bestParams[0],  // t_2' (start same as tick)
+    bestParams[1],  // t_3'
+    1.0,            // B_1 (start: same dominant amplitude)
+    bestParams[2],  // B_2'
+    bestParams[3],  // B_3'
+    bestParams[4],  // δ
+    bestParams[5],  // p_T
+]
+let asymSteps: [Double] = [0.005, 0.005, 0.15, 0.15, 0.005, 0.005, 0.2, 0.15, 0.15, 0.008, 0.030]
+
+// Multi-start with perturbations of the symmetric solution.
+var asymBestParams = asymInit
+var asymBestObj = Double.infinity
+for trial in 0..<6 {
+    var start = asymInit
+    if trial > 0 {
+        // Randomize tock parameters to break tick=tock symmetry.
+        let rng = Double(trial) * 0.7
+        start[4] += sin(rng * 1.3) * 0.005
+        start[5] += sin(rng * 1.7) * 0.005
+        start[6] += sin(rng * 2.1) * 0.3
+        start[7] += sin(rng * 2.7) * 0.15
+        start[8] += sin(rng * 3.1) * 0.15
+        start[9] += sin(rng * 4.0) * 0.005
+    }
+    let p = nelderMeadAsym(start, steps: asymSteps, maxIter: 8000)
+    let obj = asymObjective(p)
+    if obj < asymBestObj { asymBestObj = obj; asymBestParams = p }
+}
+
+print("")
+print("  --- Asymmetric tick≠tock fit (Nelder-Mead, 11 params) ---")
+print("  Tick sub-events:  (0, \(String(format: "%+.2f", asymBestParams[0]*1000)), \(String(format: "%+.2f", asymBestParams[1]*1000))) ms   amps (1, \(String(format: "%.3f", asymBestParams[2])), \(String(format: "%.3f", asymBestParams[3])))")
+print("  Tock sub-events:  (0, \(String(format: "%+.2f", asymBestParams[4]*1000)), \(String(format: "%+.2f", asymBestParams[5]*1000))) ms   amps (\(String(format: "%.3f", asymBestParams[6])), \(String(format: "%.3f", asymBestParams[7])), \(String(format: "%.3f", asymBestParams[8])))")
+print("  δ (BE):           \(String(format: "%+.3f", asymBestParams[9]*1000)) ms")
+print("  Final SSE:        \(String(format: "%.6e", asymBestObj))")
+
 // MARK: - 6. Sub-event structure from harmonics 2f, 3f, ...
 //
 // Each higher harmonic of the BEAT rate (n·f_beat = 2n·f_half for even n
