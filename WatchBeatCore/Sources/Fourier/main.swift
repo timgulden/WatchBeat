@@ -359,6 +359,178 @@ let deltaWeighted = deltaWeightSum > 0 ? deltaSum / deltaWeightSum : 0
 let deltaSigned = deltaWeighted * (ratioImag >= 0 ? +1.0 : -1.0)
 print("  Weighted-mean δ (multi-harmonic): \(String(format: "%+.3f", deltaSigned)) ms")
 
+// MARK: - 5c. Full-fit symmetric model via Nelder-Mead simplex
+//
+// Parameters: (t_2, t_3, A_2, A_3, δ, p_T) — 6 unknowns. Tick has three
+// sub-events at offsets (0, t_2, t_3) with amplitudes (1, A_2, A_3); tock
+// is the same shape, offset by 1/f_beat + δ. Position p_T is a global
+// phase reference. Predicted Fourier coefficients at harmonics 1..8 of
+// f_full = f_beat/2 are evaluated in closed form, and squared error against
+// the observed coefficients (real+imag, 16 numbers) is minimized.
+
+func predictC(h: Int, fHz: Double, t2: Double, t3: Double, A2: Double, A3: Double, delta: Double, pT: Double) -> (Double, Double) {
+    let fFull = fHz / 2.0
+    // Tick contributions at p_T + {0, t2, t3} with amplitudes 1, A2, A3.
+    // Tock contributions at p_T + 1/fHz + delta + {0, t2, t3} with same amps.
+    let arg0 = -2 * .pi * Double(h) * fFull
+    var re = 0.0
+    var im = 0.0
+    // Tick:
+    for (amp, off) in [(1.0, 0.0), (A2, t2), (A3, t3)] {
+        let phase = arg0 * (pT + off)
+        re += amp * cos(phase)
+        im += amp * sin(phase)
+    }
+    // Tock:
+    let tockBase = pT + 1.0 / fHz + delta
+    for (amp, off) in [(1.0, 0.0), (A2, t2), (A3, t3)] {
+        let phase = arg0 * (tockBase + off)
+        re += amp * cos(phase)
+        im += amp * sin(phase)
+    }
+    return (re, im)
+}
+
+func fitObjective(_ p: [Double]) -> Double {
+    let t2 = p[0], t3 = p[1], A2 = p[2], A3 = p[3], delta = p[4], pT = p[5]
+    // Bound penalties to keep the search physical.
+    var penalty = 0.0
+    if A2 < 0 || A2 > 5 { penalty += 1e6 * A2 * A2 }
+    if A3 < 0 || A3 > 5 { penalty += 1e6 * A3 * A3 }
+    if abs(t2) > 0.05 { penalty += 1e6 * t2 * t2 }
+    if abs(t3) > 0.05 { penalty += 1e6 * t3 * t3 }
+    if abs(delta) > 0.05 { penalty += 1e6 * delta * delta }
+
+    var sse = 0.0
+    let hLabels = [(1, "f/2"), (2, "f"), (3, "3f/2"), (4, "2f"),
+                   (5, "5f/2"), (6, "3f"), (7, "7f/2"), (8, "4f")]
+    // Determine an overall amplitude scale by matching |c_2|.
+    let (re2, im2) = predictC(h: 2, fHz: fHz, t2: t2, t3: t3, A2: A2, A3: A3, delta: delta, pT: pT)
+    let predMag2 = sqrt(re2 * re2 + im2 * im2)
+    let obsMag2 = cByLabel["f"]!.mag
+    let scale = predMag2 > 0 ? obsMag2 / predMag2 : 1.0
+
+    // Reference scale: |c_f| (largest harmonic). Normalize all errors by
+    // this so SSE is comparable to "unit-magnitude" expectations and not
+    // dominated by absolute-amplitude differences.
+    let refScale = obsMag2 + 1e-10
+
+    for (h, label) in hLabels {
+        let (predRe, predIm) = predictC(h: h, fHz: fHz, t2: t2, t3: t3, A2: A2, A3: A3, delta: delta, pT: pT)
+        let scRe = predRe * scale
+        let scIm = predIm * scale
+        let obs = cByLabel[label]!
+        let dRe = (scRe - obs.real) / refScale
+        let dIm = (scIm - obs.imag) / refScale
+        sse += dRe * dRe + dIm * dIm
+    }
+    return penalty + sse / Double(hLabels.count)
+}
+
+// Nelder-Mead simplex. ~60 lines, no derivative needed.
+func nelderMead(_ initial: [Double], steps: [Double], maxIter: Int) -> [Double] {
+    let n = initial.count
+    var simplex: [[Double]] = [initial]
+    for i in 0..<n {
+        var v = initial
+        v[i] += steps[i]
+        simplex.append(v)
+    }
+    var values = simplex.map { fitObjective($0) }
+
+    let alpha = 1.0   // reflection
+    let gamma = 2.0   // expansion
+    let rho = 0.5     // contraction
+    let sigma = 0.5   // shrink
+
+    for _ in 0..<maxIter {
+        // Sort by value.
+        let order = (0...n).sorted { values[$0] < values[$1] }
+        simplex = order.map { simplex[$0] }
+        values = order.map { values[$0] }
+
+        // Convergence check.
+        let spread = values.last! - values.first!
+        if spread < 1e-8 { break }
+
+        // Centroid of best n.
+        var centroid = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            for j in 0..<n { centroid[j] += simplex[i][j] / Double(n) }
+        }
+
+        // Reflect.
+        var reflected = [Double](repeating: 0, count: n)
+        for j in 0..<n { reflected[j] = centroid[j] + alpha * (centroid[j] - simplex[n][j]) }
+        let rValue = fitObjective(reflected)
+
+        if rValue < values[0] {
+            // Try expansion.
+            var expanded = [Double](repeating: 0, count: n)
+            for j in 0..<n { expanded[j] = centroid[j] + gamma * (reflected[j] - centroid[j]) }
+            let eValue = fitObjective(expanded)
+            if eValue < rValue { simplex[n] = expanded; values[n] = eValue }
+            else { simplex[n] = reflected; values[n] = rValue }
+        } else if rValue < values[n - 1] {
+            simplex[n] = reflected; values[n] = rValue
+        } else {
+            // Contract.
+            var contracted = [Double](repeating: 0, count: n)
+            for j in 0..<n { contracted[j] = centroid[j] + rho * (simplex[n][j] - centroid[j]) }
+            let cValue = fitObjective(contracted)
+            if cValue < values[n] {
+                simplex[n] = contracted; values[n] = cValue
+            } else {
+                // Shrink.
+                for i in 1...n {
+                    for j in 0..<n { simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j]) }
+                    values[i] = fitObjective(simplex[i])
+                }
+            }
+        }
+    }
+    return simplex[0]
+}
+
+// Initial guess: small sub-events at +5 ms and +12 ms (typical Swiss),
+// δ = 0, p_T = 0. Run from a few starts to avoid local minima.
+let starts: [[Double]] = [
+    [0.005, 0.012, 0.5, 0.3, 0.0, 0.0],
+    [-0.005, -0.010, 0.5, 0.3, 0.005, 0.0],
+    [0.008, 0.015, 0.7, 0.5, -0.005, 0.0],
+    [-0.008, -0.015, 0.7, 0.5, 0.0, 0.05],
+]
+// Per-parameter step sizes for the simplex: (t_2, t_3, A_2, A_3, δ, p_T)
+// in physical units (seconds, dimensionless, seconds, seconds). Big enough
+// to cross local minima but within the bound penalties.
+let nmSteps: [Double] = [0.010, 0.015, 0.3, 0.3, 0.015, 0.080]
+var bestParams: [Double] = starts[0]
+var bestObj = Double.infinity
+let dbg = ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_NM"] != nil
+for (i, s) in starts.enumerated() {
+    let p = nelderMead(s, steps: nmSteps, maxIter: 5000)
+    let obj = fitObjective(p)
+    if dbg {
+        FileHandle.standardError.write("  start \(i): obj=\(String(format: "%.3e", obj))  δ=\(String(format: "%+.3f", p[4] * 1000)) ms  t2=\(String(format: "%+.3f", p[0] * 1000)) t3=\(String(format: "%+.3f", p[1] * 1000)) A2=\(String(format: "%.3f", p[2])) A3=\(String(format: "%.3f", p[3]))\n".data(using: .utf8)!)
+    }
+    if obj < bestObj { bestObj = obj; bestParams = p }
+}
+
+let fitT2 = bestParams[0] * 1000.0
+let fitT3 = bestParams[1] * 1000.0
+let fitA2 = bestParams[2]
+let fitA3 = bestParams[3]
+let fitDelta = bestParams[4] * 1000.0
+let fitPT = bestParams[5] * 1000.0
+
+print("")
+print("  --- Full Nelder-Mead fit (symmetric tick=tock with 3 sub-events) ---")
+print("  Sub-event 2:  offset=\(String(format: "%+.3f", fitT2)) ms,  amplitude=\(String(format: "%.3f", fitA2))")
+print("  Sub-event 3:  offset=\(String(format: "%+.3f", fitT3)) ms,  amplitude=\(String(format: "%.3f", fitA3))")
+print("  δ (BE):       \(String(format: "%+.3f", fitDelta)) ms")
+print("  p_T:          \(String(format: "%+.3f", fitPT)) ms")
+print("  Final SSE:    \(String(format: "%.6e", bestObj))")
+
 // MARK: - 6. Sub-event structure from harmonics 2f, 3f, ...
 //
 // Each higher harmonic of the BEAT rate (n·f_beat = 2n·f_half for even n
