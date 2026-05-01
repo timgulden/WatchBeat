@@ -307,24 +307,36 @@ public struct MeasurementPipeline {
             }
         }
         // Median tick / gap energies for overall SNR (quality metric).
+        // The picker selects the per-window argmax of the smoothed envelope,
+        // so even on pure noise tickEnergies are systematically ~1.5-2× the
+        // gap energies (max-of-N effect). Real watches give SNR 50× and
+        // up, so dividing by 10 (rather than 5) tightens quality to require
+        // genuine signal: snr=2 → 18%, snr=5 → 39%, snr=20 → 86%, snr=50 →
+        // 99%. Pure-noise recordings now fall below the 30% display gate.
         let sortedTick = tickEnergies.sorted()
         let sortedGap = gapEnergies.sorted()
         let medianTick = sortedTick.isEmpty ? 0 : sortedTick[sortedTick.count / 2]
         let medianGap = sortedGap.isEmpty ? 0 : sortedGap[sortedGap.count / 2]
         let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
-        let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 5.0)))
+        let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
         // Per-window confirmation: a window's "tick" is real if its peak
-        // energy beats background by at least 2×. This separates the
-        // bad-recording case (most windows have no acoustic tick → low
-        // confirmedFraction → routes to Weak Signal) from the bad-watch
-        // case (most windows have ticks but timing erratic → high
-        // confirmedFraction with high σ → routes to Low Analytical
-        // Confidence). Threshold 2× matches the production picker's
-        // confirmation gate.
-        let confirmThreshold = medianGap > 0 ? medianGap * 2 : 0
-        let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
-        let confirmedFraction = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
+        // energy beats background by at least 4×. The 4× factor (up from
+        // 2× yesterday) is set so pure noise — where argmax-of-window can
+        // naturally hit 2× the median by chance — doesn't sneak past the
+        // gate. Real watches still pass easily because their tick energies
+        // run 10–1000× the background. Plus an overall-SNR floor: if the
+        // median tick energy isn't even 3× the median gap, the recording
+        // has no usable signal at all and confirmedFraction is forced to 0,
+        // routing to Weak Signal.
+        let confirmedFraction: Double
+        if snr < 3.0 {
+            confirmedFraction = 0.0
+        } else {
+            let confirmThreshold = medianGap > 0 ? medianGap * 4 : 0
+            let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
+            confirmedFraction = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
+        }
 
         // Low confidence: per-class jitter signals the picker isn't locking
         // consistently. This catches the case where SNR is good (audio is
