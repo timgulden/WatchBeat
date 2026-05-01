@@ -100,14 +100,23 @@ struct WatchLogo: View {
             ZStack {
                 // Dial wedges sit behind the wheel, sized so their outer edge
                 // is fully concealed by the wheel's rim (which is fully opaque).
+                // Pass the current hand angle so the wedge containing it gets
+                // a deeper tint — visual signal of which workflow phase we're
+                // in without reading labels.
                 if showDialBackdrop {
-                    DialWedges(size: size * 0.85)
+                    DialWedges(size: size * 0.85, handAngleCW: angle)
                 }
 
                 // Wheel + hand always in same ZStack — rotate together.
                 // The wheel image carries an extra +25° so one spoke sits on
-                // the Buffering/Measuring boundary (~1:00); the hand is
+                // the Listening/Measuring boundary (~1:00); the hand is
                 // unaffected by that offset, so at angle=0 it points at 12:00.
+                //
+                // The .shadow modifier sits OUTSIDE the rotationEffect so the
+                // shadow direction stays fixed in screen coordinates (light
+                // source above the wheel). This lets the shadow appear to
+                // change as the dial rotates beneath it — a small but
+                // tactile detail that grounds the wheel as a physical object.
                 ZStack {
                     Image("WatchBeatMark")
                         .resizable()
@@ -119,6 +128,7 @@ struct WatchLogo: View {
                         .opacity(showHand ? 1 : 0)
                 }
                 .rotationEffect(.degrees(angle))
+                .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 3)
 
                 // Dial labels sit ON TOP of the wheel so the spokes don't
                 // obscure the text.
@@ -162,28 +172,56 @@ struct Wedge: Shape {
     }
 }
 
-/// Colored wedges (Buffering / Measuring / Analyzing / Refining) drawn
+/// Colored wedges (Listening / Measuring / Analyzing / Refining) drawn
 /// behind the wheel. Angles are clock-CW from 12:00, at 6°/sec wheel pace:
-/// - Buffering  0°– 30°  (12:00 → 1:00,   5 s)
+/// - Listening  0°– 30°  (12:00 → 1:00,   5 s)
 /// - Measuring  30°–120°  (1:00 → 4:00,  15 s)
-/// - Analyzing 120°–168°  (4:00 → ~5:36,  8 s)
-/// - Refining  168°–360°  (~5:36 → 12:00, 32 s)
+/// - Analyzing 120°–132°  (4:00 → ~4:24,  2 s — small slice; user sees the
+///                         color shift even though analysis itself usually
+///                         finishes within 1-2 s on a modern phone)
+/// - Refining  132°–360°  (~4:24 → 12:00, 38 s)
+///
+/// The currently-active wedge (the one containing the hand's current angle)
+/// is rendered with a deeper tint so the user sees the workflow phase
+/// without reading labels.
 struct DialWedges: View {
     let size: CGFloat
+    /// Current hand angle in degrees CW from 12:00. The wedge containing
+    /// this angle gets the active (deeper) tint.
+    var handAngleCW: Double = 0
 
     var body: some View {
+        let active = activeWedge(forAngle: handAngleCW)
         ZStack {
             Wedge(startAngleCW: 0, endAngleCW: 30)
-                .fill(Color.white)
+                .fill(active == .listening ? listeningColorActive : listeningColorIdle)
             Wedge(startAngleCW: 30, endAngleCW: 120)
-                .fill(Color.blue.opacity(0.12))
-            Wedge(startAngleCW: 120, endAngleCW: 168)
-                .fill(Color.orange.opacity(0.12))
-            Wedge(startAngleCW: 168, endAngleCW: 360)
-                .fill(Color(.systemGray6))
+                .fill(Color.blue.opacity(active == .measuring ? 0.22 : 0.12))
+            Wedge(startAngleCW: 120, endAngleCW: 132)
+                .fill(Color.orange.opacity(active == .analyzing ? 0.32 : 0.18))
+            Wedge(startAngleCW: 132, endAngleCW: 360)
+                .fill(active == .refining ? refiningColorActive : refiningColorIdle)
         }
         .frame(width: size, height: size)
     }
+
+    private enum Phase { case listening, measuring, analyzing, refining }
+    private func activeWedge(forAngle a: Double) -> Phase {
+        let normalized = (a.truncatingRemainder(dividingBy: 360) + 360)
+            .truncatingRemainder(dividingBy: 360)
+        switch normalized {
+        case ..<30:    return .listening
+        case ..<120:   return .measuring
+        case ..<132:   return .analyzing
+        default:       return .refining
+        }
+    }
+    // Listening base is white; "active" version is a hair warmer/deeper.
+    private var listeningColorIdle: Color { Color.white }
+    private var listeningColorActive: Color { Color(red: 0.99, green: 0.96, blue: 0.90) }
+    // Refining base is systemGray6; "active" is systemGray5.
+    private var refiningColorIdle: Color { Color(.systemGray6) }
+    private var refiningColorActive: Color { Color(.systemGray5) }
 }
 
 /// Wedge labels drawn ON TOP of the wheel so the spokes don't obscure them.
@@ -195,9 +233,12 @@ struct DialLabels: View {
         ZStack {
             // Radial labels along each wedge midline, centered in the
             // annulus between inner hub and outer rim.
-            radialLabel("Buffering", midCW: 15, radius: radius, radialFraction: 0.55)
+            // Analyzing wedge is small (12°), but its label still emanates
+            // from its center (126°) — text spilling slightly into the
+            // neighboring wedges is fine; the color shift signals the phase.
+            radialLabel("Listening", midCW: 15, radius: radius, radialFraction: 0.55)
             radialLabel("Measuring", midCW: 75, radius: radius, radialFraction: 0.55)
-            radialLabel("Analyzing", midCW: 144, radius: radius, radialFraction: 0.55)
+            radialLabel("Analyzing", midCW: 126, radius: radius, radialFraction: 0.55)
 
             // Refining — horizontal text at the 9:00 position (left of hub).
             Text("Refining")
@@ -216,7 +257,7 @@ struct DialLabels: View {
         let x = r * cos(CGFloat(theta))
         let y = r * sin(CGFloat(theta))
         // Outward-radial rotation — text reads from center toward the rim
-        // for all wedges, matching Buffering and Measuring.
+        // for all wedges, matching Listening and Measuring.
         let rotation = midCW - 90
 
         return Text(text)
@@ -360,7 +401,7 @@ struct MonitoringScreen: View {
                 VStack(spacing: 8) {
                     ListeningCaption(subtitle: ready
                                      ? "Look for the peak at your watch's beat rate"
-                                     : "Buffering...",
+                                     : "Listening...",
                                      position: coordinator.currentPosition)
                     FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
                         .frame(maxHeight: .infinity)
