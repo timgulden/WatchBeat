@@ -330,7 +330,7 @@ public struct MeasurementPipeline {
         // has no usable signal at all and confirmedFraction is forced to 0,
         // routing to Weak Signal.
         let confirmedFraction: Double
-        if snr < 3.0 {
+        if snr < 5.0 {
             confirmedFraction = 0.0
         } else {
             let confirmThreshold = medianGap > 0 ? medianGap * 4 : 0
