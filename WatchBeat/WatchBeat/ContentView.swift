@@ -176,10 +176,9 @@ struct Wedge: Shape {
 /// behind the wheel. Angles are clock-CW from 12:00, at 6°/sec wheel pace:
 /// - Listening  0°– 30°  (12:00 → 1:00,   5 s)
 /// - Measuring  30°–120°  (1:00 → 4:00,  15 s)
-/// - Analyzing 120°–132°  (4:00 → ~4:24,  2 s — small slice; user sees the
-///                         color shift even though analysis itself usually
-///                         finishes within 1-2 s on a modern phone)
-/// - Refining  132°–360°  (~4:24 → 12:00, 38 s)
+/// - Analyzing 120°–138°  (4:00 → ~4:36,  3 s — slim slice; user sees the
+///                         color shift before transitioning to Refining)
+/// - Refining  138°–360°  (~4:36 → 12:00, 37 s)
 ///
 /// The currently-active wedge (the one containing the hand's current angle)
 /// is rendered with a deeper tint so the user sees the workflow phase
@@ -197,9 +196,9 @@ struct DialWedges: View {
                 .fill(active == .listening ? listeningColorActive : listeningColorIdle)
             Wedge(startAngleCW: 30, endAngleCW: 120)
                 .fill(Color.blue.opacity(active == .measuring ? 0.22 : 0.12))
-            Wedge(startAngleCW: 120, endAngleCW: 132)
+            Wedge(startAngleCW: 120, endAngleCW: 138)
                 .fill(Color.orange.opacity(active == .analyzing ? 0.32 : 0.18))
-            Wedge(startAngleCW: 132, endAngleCW: 360)
+            Wedge(startAngleCW: 138, endAngleCW: 360)
                 .fill(active == .refining ? refiningColorActive : refiningColorIdle)
         }
         .frame(width: size, height: size)
@@ -212,7 +211,7 @@ struct DialWedges: View {
         switch normalized {
         case ..<30:    return .listening
         case ..<120:   return .measuring
-        case ..<132:   return .analyzing
+        case ..<138:   return .analyzing
         default:       return .refining
         }
     }
@@ -233,12 +232,12 @@ struct DialLabels: View {
         ZStack {
             // Radial labels along each wedge midline, centered in the
             // annulus between inner hub and outer rim.
-            // Analyzing wedge is small (12°), but its label still emanates
-            // from its center (126°) — text spilling slightly into the
+            // Analyzing wedge is small (18°), but its label still emanates
+            // from its center (129°) — text spilling slightly into the
             // neighboring wedges is fine; the color shift signals the phase.
             radialLabel("Listening", midCW: 15, radius: radius, radialFraction: 0.55)
             radialLabel("Measuring", midCW: 75, radius: radius, radialFraction: 0.55)
-            radialLabel("Analyzing", midCW: 126, radius: radius, radialFraction: 0.55)
+            radialLabel("Analyzing", midCW: 129, radius: radius, radialFraction: 0.55)
 
             // Refining — horizontal text at the 9:00 position (left of hub).
             Text("Refining")
