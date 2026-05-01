@@ -345,7 +345,16 @@ public struct MeasurementPipeline {
         // Distinguished from the bad-recording case by confirmedFraction:
         // a low-confidence + high-confirmedFraction recording is a near-
         // stall watch; low-confidence + low-confirmedFraction is bad audio.
-        let isLowConfidence = avgClassStd > 6.0
+        //
+        // Threshold tuning: 6 ms was too strict — Tim's experiment recording
+        // a YouTube video of an Omega 458 through MacBook speaker (lossy
+        // chain, lots of mid-frequency artifacts) hit 60% quality but σ
+        // 7-9 ms range and routed to Low Analytical Confidence even though
+        // the FFT showed clean 3 Hz peaking. Raised to 10 ms — still
+        // catches genuinely-erratic recordings (Timex3Weak σ 5.7 still
+        // passes, near-stall watches with σ > 10 ms still flagged) but
+        // admits playback-from-speaker and other lossy-chain cases.
+        let isLowConfidence = avgClassStd > 10.0
 
         // Tick timings for the timegraph: use the residuals as-is.
         let tickTimings: [TickTiming] = (0..<m).map {
