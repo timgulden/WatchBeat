@@ -342,6 +342,13 @@ struct IdleScreen: View {
 /// line below never shifts. Since this block lives in ScreenLayout's
 /// fixed-minHeight text slot, the wheel above it never moves either.
 struct ListeningCaption: View {
+    /// Line 2: phase name matching the active wedge ("Listening..." /
+    /// "Measuring..." / "Analyzing..." / "Refining..."). Defaults to
+    /// "Listening..." since that's the only phase the monitoring screen
+    /// ever shows.
+    var phaseTitle: String = "Listening..."
+    /// Line 3: descriptive context for what the app is doing in the
+    /// current phase.
     let subtitle: String
     let position: WatchPosition?
 
@@ -350,7 +357,7 @@ struct ListeningCaption: View {
             Text("Position: \(position?.displayName ?? "Undefined")")
                 .font(.title3.weight(.bold))
                 .multilineTextAlignment(.center)
-            Text("Listening...")
+            Text(phaseTitle)
                 .font(.headline)
                 .multilineTextAlignment(.center)
             Text(subtitle)
@@ -400,7 +407,7 @@ struct MonitoringScreen: View {
                 VStack(spacing: 8) {
                     ListeningCaption(subtitle: ready
                                      ? "Look for the peak at your watch's beat rate"
-                                     : "Listening...",
+                                     : "Buffering",
                                      position: coordinator.currentPosition)
                     FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
                         .frame(maxHeight: .infinity)
@@ -451,7 +458,8 @@ struct RecordingScreen: View {
                           showDialBackdrop: true)
             } bigSquare: {
                 VStack(spacing: 8) {
-                    ListeningCaption(subtitle: liveCaption(elapsed: elapsed, best: best),
+                    ListeningCaption(phaseTitle: phaseTitle(elapsed: elapsed),
+                                     subtitle: phaseSubtitle(elapsed: elapsed),
                                      position: coordinator.currentPosition)
                     FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
                         .frame(maxHeight: .infinity)
@@ -505,14 +513,26 @@ struct RecordingScreen: View {
         return 30 + progress * 330
     }
 
-    /// Caption mirrors the wheel's current wedge:
-    /// - 0–15 s post-Measure: "Measuring..."
-    /// - 15 s until the first result returns: "Analyzing..."
-    /// - Thereafter: "Refining..."
-    private func liveCaption(elapsed: Double, best: Int) -> String {
-        if elapsed < MeasurementConstants.analysisWindow { return "Measuring..." }
-        if best == 0 { return "Analyzing..." }
+    /// Phase title (line 2) tracks the wheel's wedge boundaries:
+    /// - 0–15 s post-Measure: "Measuring..." (wedge 30°–120°)
+    /// - 15–18 s:              "Analyzing..." (wedge 120°–138°)
+    /// - 18+ s:                "Refining..." (wedge 138°–360°)
+    private func phaseTitle(elapsed: Double) -> String {
+        let measuringEnd = MeasurementConstants.analysisWindow         // 15 s
+        let analyzingEnd = measuringEnd + 3.0                          // +3 s slice
+        if elapsed < measuringEnd { return "Measuring..." }
+        if elapsed < analyzingEnd { return "Analyzing..." }
         return "Refining..."
+    }
+
+    /// Descriptive subtitle (line 3) — mirrors phase but in plain language
+    /// for the user.
+    private func phaseSubtitle(elapsed: Double) -> String {
+        let measuringEnd = MeasurementConstants.analysisWindow
+        let analyzingEnd = measuringEnd + 3.0
+        if elapsed < measuringEnd { return "Collecting data." }
+        if elapsed < analyzingEnd { return "Processing data." }
+        return "Searching for stronger signal."
     }
 
 }
