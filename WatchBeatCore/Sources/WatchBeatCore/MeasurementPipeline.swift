@@ -132,211 +132,255 @@ public struct MeasurementPipeline {
             }
         }
 
-        // Find peak per standard-rate band. Two competing concerns:
-        //   1. An environmental noise source (motor/fan/etc.) can outrank
-        //      the watch's true fundamental if we just take the loudest
-        //      peak in a wide [4, 11] Hz range. Restrict to bands ±0.5 Hz
-        //      around standard watch rates.
-        //   2. Watches with sharp ticks have very strong harmonic content,
-        //      so a 5 Hz watch can have a 10 Hz harmonic that's almost as
-        //      tall (sometimes taller) than its 5 Hz fundamental. Picking
-        //      strictly by magnitude would snap a real 18000 bph to 36000.
-        // Resolution: per band, find the peak magnitude. Then prefer the
-        // LOWEST-rate band whose peak is within a factor of 2 of the
-        // overall maximum. This makes harmonics yield to fundamentals.
+        // ===== Rate selection by per-rate picker scoring =====
+        //
+        // Find each standard band's FFT peak, then RUN THE PICKER at each
+        // candidate rate. The right rate produces high confirmedFraction
+        // (real ticks at predicted positions) and low σ (consistent picks);
+        // wrong rates produce low confirmedFraction (windows miss real
+        // ticks) and high σ (picks land on noise). This is more robust
+        // than picking by FFT magnitude alone — on lossy recordings (e.g.
+        // YouTube → speaker → mic) the FFT magnitudes at 5/5.5/6 Hz are
+        // often within 10% of each other and band magnitude can't tell us
+        // which is the watch.
         let freqRes = envRate / Double(fftLength)
         let standardHzs: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
         let bandRadiusHz = 0.5
         let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
-        var bandPeaks: [(hz: Double, bin: Int, mag: Float)] = []
+
+        struct Candidate {
+            let snappedRate: StandardBeatRate
+            let fHz: Double
+            let phi: Double
+            let beatPositions: [Double]
+            let slope: Double
+            let intercept: Double
+            let residualsMs: [Double]
+            let evenMean: Double, oddMean: Double
+            let evenStd: Double, oddStd: Double
+            let avgClassStd: Double
+            let beAsymmetryMs: Double
+            let tickEnergies: [Float]
+            let gapEnergies: [Float]
+            let medianTick: Float, medianGap: Float
+            let snr: Double
+            let confirmedFraction: Double
+            // Composite score for ranking candidate rates. Three factors:
+            //   confirmedFraction → "did the picker find ticks at this rate?"
+            //   q (SNR-based)     → "is the audio clean enough to read?"
+            //   sigmaPen          → "are the picks consistent timing-wise?"
+            //
+            // sigmaPen uses σ² in the denominator (not σ) because on lossy
+            // recordings the wrong rate often gets σ ~50 ms and the right
+            // rate gets σ ~30-40 ms — a linear penalty barely separates them
+            // (ratio < 1.5×). Quadratic penalty makes the right rate clearly
+            // win even when both σ values look bad in absolute terms.
+            //   σ = 5  → sigmaPen = 0.50
+            //   σ = 10 → sigmaPen = 0.33
+            //   σ = 30 → sigmaPen = 0.053
+            //   σ = 50 → sigmaPen = 0.020
+            var score: Double {
+                let q = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
+                let sigmaPen = 1.0 / (1.0 + (avgClassStd * avgClassStd) / 50.0)
+                return confirmedFraction * q * sigmaPen
+            }
+        }
+
+        // Helper: run the FFT-anchored picker for a given band's peak bin
+        // and return a Candidate, or nil if not enough beats.
+        let durationSec = Double(n) / sampleRate
+        let snrHalfSamples = max(1, Int(0.005 * sampleRate))
+        func candidate(forBin bin: Int, peakMag: Float) -> Candidate? {
+            // Sub-bin frequency via parabolic interpolation.
+            var fHz = Double(bin) * freqRes
+            if bin > 1 && bin < halfN - 1 {
+                let mL = sqrt(Double(realPart[bin - 1] * realPart[bin - 1] + imagPart[bin - 1] * imagPart[bin - 1]))
+                let mP = Double(peakMag)
+                let mR = sqrt(Double(realPart[bin + 1] * realPart[bin + 1] + imagPart[bin + 1] * imagPart[bin + 1]))
+                let denom = mL - 2 * mP + mR
+                if abs(denom) > 1e-12 {
+                    var delta = 0.5 * (mL - mR) / denom
+                    if delta > 0.5 { delta = 0.5 }
+                    if delta < -0.5 { delta = -0.5 }
+                    fHz = (Double(bin) + delta) * freqRes
+                }
+            }
+            let phi = atan2(Double(imagPart[bin]), Double(realPart[bin]))
+            let snappedRate = StandardBeatRate.allCases.min { a, b in
+                abs(a.hz - fHz) < abs(b.hz - fHz)
+            } ?? StandardBeatRate.bph28800
+
+            let periodSec = 1.0 / fHz
+            let halfPeriodSamples = Int(periodSec * sampleRate / 2.0)
+            let phaseShift = phi / (2.0 * .pi)
+            var windowCenters: [Double] = []
+            var k = Int(ceil(phaseShift + (Double(halfPeriodSamples) / sampleRate) * fHz))
+            while true {
+                let t = (Double(k) - phaseShift) / fHz
+                if t + Double(halfPeriodSamples) / sampleRate >= durationSec { break }
+                if t - Double(halfPeriodSamples) / sampleRate >= 0 { windowCenters.append(t) }
+                k += 1
+            }
+
+            var beatPositions: [Double] = []
+            for tc in windowCenters {
+                let centerSample = Int(round(tc * sampleRate))
+                let lo = max(0, centerSample - halfPeriodSamples)
+                let hi = min(n - 1, centerSample + halfPeriodSamples)
+                var bestIdx = lo
+                var bestVal: Float = -.infinity
+                for i in lo...hi {
+                    if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
+                }
+                beatPositions.append(Double(bestIdx) / sampleRate)
+            }
+
+            let m = beatPositions.count
+            guard m >= 6 else { return nil }
+
+            var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
+            for i in 0..<m {
+                let di = Double(i)
+                sumI += di; sumT += beatPositions[i]; sumII += di * di; sumIT += di * beatPositions[i]
+            }
+            let dm = Double(m)
+            let regDenom = dm * sumII - sumI * sumI
+            let slope = (dm * sumIT - sumI * sumT) / regDenom
+            let intercept = (sumT - slope * sumI) / dm
+
+            var residualsMs = [Double](repeating: 0, count: m)
+            for i in 0..<m {
+                residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
+            }
+            var evenSum = 0.0, oddSum = 0.0, evenSumSq = 0.0, oddSumSq = 0.0, evenN = 0, oddN = 0
+            for i in 0..<m {
+                if i % 2 == 0 {
+                    evenSum += residualsMs[i]; evenSumSq += residualsMs[i] * residualsMs[i]; evenN += 1
+                } else {
+                    oddSum += residualsMs[i]; oddSumSq += residualsMs[i] * residualsMs[i]; oddN += 1
+                }
+            }
+            let evenMean = evenN > 0 ? evenSum / Double(evenN) : 0
+            let oddMean = oddN > 0 ? oddSum / Double(oddN) : 0
+            let evenVar = evenN > 0 ? max(0, evenSumSq / Double(evenN) - evenMean * evenMean) : 0
+            let oddVar = oddN > 0 ? max(0, oddSumSq / Double(oddN) - oddMean * oddMean) : 0
+            let evenStd = sqrt(evenVar)
+            let oddStd = sqrt(oddVar)
+
+            var tickEnergies: [Float] = []
+            var gapEnergies: [Float] = []
+            tickEnergies.reserveCapacity(m)
+            gapEnergies.reserveCapacity(m - 1)
+            for i in 0..<m {
+                let center = Int(round(beatPositions[i] * sampleRate))
+                let lo = max(0, center - snrHalfSamples)
+                let hi = min(n - 1, center + snrHalfSamples)
+                guard lo < hi else { continue }
+                var sum: Float = 0
+                vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1,
+                         &sum, vDSP_Length(hi - lo + 1))
+                tickEnergies.append(sum)
+                if i > 0 {
+                    let gapCenter = Int(round((beatPositions[i - 1] + beatPositions[i]) * 0.5 * sampleRate))
+                    let glo = max(0, gapCenter - snrHalfSamples)
+                    let ghi = min(n - 1, gapCenter + snrHalfSamples)
+                    if glo < ghi {
+                        var gsum: Float = 0
+                        vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + glo }, 1,
+                                 &gsum, vDSP_Length(ghi - glo + 1))
+                        gapEnergies.append(gsum)
+                    }
+                }
+            }
+            let sortedTick = tickEnergies.sorted()
+            let sortedGap = gapEnergies.sorted()
+            let medianTick = sortedTick.isEmpty ? 0 : sortedTick[sortedTick.count / 2]
+            let medianGap = sortedGap.isEmpty ? 0 : sortedGap[sortedGap.count / 2]
+            let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
+            let cf: Double
+            if snr < 5.0 {
+                cf = 0.0
+            } else {
+                let confirmThreshold = medianGap > 0 ? medianGap * 4 : 0
+                let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
+                cf = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
+            }
+
+            return Candidate(
+                snappedRate: snappedRate,
+                fHz: fHz, phi: phi,
+                beatPositions: beatPositions,
+                slope: slope, intercept: intercept,
+                residualsMs: residualsMs,
+                evenMean: evenMean, oddMean: oddMean,
+                evenStd: evenStd, oddStd: oddStd,
+                avgClassStd: (evenStd + oddStd) / 2.0,
+                beAsymmetryMs: abs(evenMean - oddMean),
+                tickEnergies: tickEnergies, gapEnergies: gapEnergies,
+                medianTick: medianTick, medianGap: medianGap,
+                snr: snr,
+                confirmedFraction: cf
+            )
+        }
+
+        // For each standard band, find the peak bin and run the picker.
+        var candidates: [Candidate] = []
         for hz in standardHzs {
             let center = Int(round(hz / freqRes))
             let lo = max(1, center - bandRadius)
             let hi = min(halfN - 2, center + bandRadius)
             guard lo < hi else { continue }
-            var best: (Int, Float) = (-1, -.infinity)
+            var bestBin = -1
+            var bestM2: Float = -.infinity
             for b in lo...hi {
                 let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-                if m2 > best.1 { best = (b, m2) }
+                if m2 > bestM2 { bestM2 = m2; bestBin = b }
             }
-            if best.0 >= 0 {
-                bandPeaks.append((hz: hz, bin: best.0, mag: sqrt(best.1)))
+            if bestBin >= 0, let cand = candidate(forBin: bestBin, peakMag: sqrt(bestM2)) {
+                candidates.append(cand)
             }
         }
-        guard !bandPeaks.isEmpty else {
+
+        // Diagnostic: WATCHBEAT_DEBUG_CANDIDATES=1 dumps each candidate's
+        // score breakdown. Useful for tuning the score formula on
+        // borderline recordings.
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CANDIDATES"] != nil {
+            for c in candidates.sorted(by: { $0.score > $1.score }) {
+                FileHandle.standardError.write(
+                    "[ref-cand] \(c.snappedRate.rawValue) bph  fHz=\(String(format: "%.4f", c.fHz))  m=\(c.beatPositions.count)  conf=\(String(format: "%.2f", c.confirmedFraction))  σ=\(String(format: "%.2f", c.avgClassStd))  snr=\(String(format: "%.1f", c.snr))  score=\(String(format: "%.4f", c.score))\n".data(using: .utf8)!)
+            }
+        }
+        guard let winner = candidates.max(by: { $0.score < $1.score }) else {
             return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
         }
-        let maxMag = bandPeaks.map { $0.mag }.max()!
-        let threshold = maxMag * 0.5
-        // Take the lowest-frequency band whose peak is at least half the
-        // overall maximum. (Equivalent: prefer fundamentals over harmonics
-        // when their peaks are within 2× of each other.)
-        var peakBin = bandPeaks[0].bin
-        var peakMagPicked = bandPeaks[0].mag
-        for bp in bandPeaks where bp.mag >= threshold {
-            peakBin = bp.bin
-            peakMagPicked = bp.mag
-            break  // bandPeaks is in ascending Hz order
-        }
-        var fHz = Double(peakBin) * freqRes
-        if peakBin > 1 && peakBin < halfN - 1 {
-            let mL = sqrt(Double(realPart[peakBin - 1] * realPart[peakBin - 1] + imagPart[peakBin - 1] * imagPart[peakBin - 1]))
-            let mP = Double(peakMagPicked)
-            let mR = sqrt(Double(realPart[peakBin + 1] * realPart[peakBin + 1] + imagPart[peakBin + 1] * imagPart[peakBin + 1]))
-            let denom = mL - 2 * mP + mR
-            if abs(denom) > 1e-12 {
-                var delta = 0.5 * (mL - mR) / denom
-                if delta > 0.5 { delta = 0.5 }
-                if delta < -0.5 { delta = -0.5 }
-                fHz = (Double(peakBin) + delta) * freqRes
-            }
-        }
-        let phi = atan2(Double(imagPart[peakBin]), Double(realPart[peakBin]))
 
-        // Snap to nearest standard rate (for `snappedRate` field; rate
-        // ERROR is computed against this nominal).
-        let snappedRate = StandardBeatRate.allCases.min { a, b in
-            abs(a.hz - fHz) < abs(b.hz - fHz)
-        } ?? StandardBeatRate.bph28800
-        let rateErrPerDay = (fHz / snappedRate.hz - 1.0) * 86400.0
-
-        // Generate window centers at fHz cadence from FFT phase.
-        let periodSec = 1.0 / fHz
-        let halfPeriodSamples = Int(periodSec * sampleRate / 2.0)
-        let durationSec = Double(n) / sampleRate
-        let phaseShift = phi / (2.0 * .pi)
-        var windowCenters: [Double] = []
-        var k = Int(ceil(phaseShift + (Double(halfPeriodSamples) / sampleRate) * fHz))
-        while true {
-            let t = (Double(k) - phaseShift) / fHz
-            if t + Double(halfPeriodSamples) / sampleRate >= durationSec { break }
-            if t - Double(halfPeriodSamples) / sampleRate >= 0 { windowCenters.append(t) }
-            k += 1
-        }
-
-        // Per-window argmax on smoothed squared (full-rate).
-        var beatPositions: [Double] = []
-        for tc in windowCenters {
-            let centerSample = Int(round(tc * sampleRate))
-            let lo = max(0, centerSample - halfPeriodSamples)
-            let hi = min(n - 1, centerSample + halfPeriodSamples)
-            var bestIdx = lo
-            var bestVal: Float = -.infinity
-            for i in lo...hi {
-                if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
-            }
-            beatPositions.append(Double(bestIdx) / sampleRate)
-        }
-
+        // Unpack the winning candidate into the locals that the rest of the
+        // function used to compute directly.
+        let snappedRate = winner.snappedRate
+        let fHz = winner.fHz
+        _ = fHz  // Used in diagnostics; keep for clarity
+        let beatPositions = winner.beatPositions
         let m = beatPositions.count
-        guard m >= 6 else {
-            return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
-        }
+        let slope = winner.slope
+        let intercept = winner.intercept
+        let residualsMs = winner.residualsMs
+        let evenMean = winner.evenMean
+        let oddMean = winner.oddMean
+        let avgClassStd = winner.avgClassStd
+        let beAsymmetryMs = winner.beAsymmetryMs
+        let tickEnergies = winner.tickEnergies
+        _ = winner.gapEnergies  // unused beyond confirmedFraction
+        let medianTick = winner.medianTick
+        let medianGap = winner.medianGap
+        let snr = winner.snr
+        let confirmedFraction = winner.confirmedFraction
+        let rateErrPerDay = (winner.fHz / snappedRate.hz - 1.0) * 86400.0
+        _ = (evenMean, oddMean, medianTick, medianGap, tickEnergies)  // kept for downstream reuse
 
-        // Linear regression on beat positions.
-        var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
-        for i in 0..<m {
-            let di = Double(i)
-            sumI += di; sumT += beatPositions[i]; sumII += di * di; sumIT += di * beatPositions[i]
-        }
-        let dm = Double(m)
-        let regDenom = dm * sumII - sumI * sumI
-        let slope = (dm * sumIT - sumI * sumT) / regDenom
-        let intercept = (sumT - slope * sumI) / dm
-
-        // Residuals + per-class statistics.
-        var residualsMs = [Double](repeating: 0, count: m)
-        for i in 0..<m {
-            residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
-        }
-        var evenSum: Double = 0, oddSum: Double = 0
-        var evenSumSq: Double = 0, oddSumSq: Double = 0
-        var evenN = 0, oddN = 0
-        for i in 0..<m {
-            if i % 2 == 0 {
-                evenSum += residualsMs[i]; evenSumSq += residualsMs[i] * residualsMs[i]; evenN += 1
-            } else {
-                oddSum += residualsMs[i]; oddSumSq += residualsMs[i] * residualsMs[i]; oddN += 1
-            }
-        }
-        let evenMean = evenN > 0 ? evenSum / Double(evenN) : 0
-        let oddMean = oddN > 0 ? oddSum / Double(oddN) : 0
-        let evenVar = evenN > 0 ? max(0, evenSumSq / Double(evenN) - evenMean * evenMean) : 0
-        let oddVar = oddN > 0 ? max(0, oddSumSq / Double(oddN) - oddMean * oddMean) : 0
-        let evenStd = sqrt(evenVar)
-        let oddStd = sqrt(oddVar)
-        let beAsymmetryMs = abs(evenMean - oddMean)
-
-        // Quality from SNR (tick energy vs gap energy), matching production's
-        // formula so the UX stays the same: clean recordings hit 99-100%
-        // and the auto-stop / try-again thresholds keep their meaning.
-        // Per-class jitter (σ) is too strict as a quality metric — even a
-        // perfect recording of a real watch has σ ≈ 0.5-1 ms from genuine
-        // mechanical irregularity, so a σ-based formula tops out around 90%
-        // and the user has to abandon the "wait for 99%" UX flow. SNR-based
-        // quality answers "is the audio capturing ticks cleanly?" which is
-        // what the user can affect by adjusting mic placement; σ-based
-        // answers a different question ("is the picker confident?") that
-        // we route through isLowConfidence instead.
-        let avgClassStd = (evenStd + oddStd) / 2.0
-
-        let snrHalfSamples = max(1, Int(0.005 * sampleRate))
-        var tickEnergies: [Float] = []  // per-window peak energy (kept in window order)
-        var gapEnergies: [Float] = []   // per-gap background energy (in pair order)
-        tickEnergies.reserveCapacity(m)
-        gapEnergies.reserveCapacity(m - 1)
-        for i in 0..<m {
-            let center = Int(round(beatPositions[i] * sampleRate))
-            let lo = max(0, center - snrHalfSamples)
-            let hi = min(n - 1, center + snrHalfSamples)
-            guard lo < hi else { continue }
-            var sum: Float = 0
-            vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1,
-                     &sum, vDSP_Length(hi - lo + 1))
-            tickEnergies.append(sum)
-            if i > 0 {
-                let gapCenter = Int(round((beatPositions[i - 1] + beatPositions[i]) * 0.5 * sampleRate))
-                let glo = max(0, gapCenter - snrHalfSamples)
-                let ghi = min(n - 1, gapCenter + snrHalfSamples)
-                if glo < ghi {
-                    var gsum: Float = 0
-                    vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + glo }, 1,
-                             &gsum, vDSP_Length(ghi - glo + 1))
-                    gapEnergies.append(gsum)
-                }
-            }
-        }
-        // Median tick / gap energies for overall SNR (quality metric).
-        // The picker selects the per-window argmax of the smoothed envelope,
-        // so even on pure noise tickEnergies are systematically ~1.5-2× the
-        // gap energies (max-of-N effect). Real watches give SNR 50× and
-        // up, so dividing by 10 (rather than 5) tightens quality to require
-        // genuine signal: snr=2 → 18%, snr=5 → 39%, snr=20 → 86%, snr=50 →
-        // 99%. Pure-noise recordings now fall below the 30% display gate.
-        let sortedTick = tickEnergies.sorted()
-        let sortedGap = gapEnergies.sorted()
-        let medianTick = sortedTick.isEmpty ? 0 : sortedTick[sortedTick.count / 2]
-        let medianGap = sortedGap.isEmpty ? 0 : sortedGap[sortedGap.count / 2]
-        let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
+        // Quality from the winner's SNR. Same formula as before — see notes
+        // on tightening from snr/5 to snr/10 to keep pure noise (snr ~ 2)
+        // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
-
-        // Per-window confirmation: a window's "tick" is real if its peak
-        // energy beats background by at least 4×. The 4× factor (up from
-        // 2× yesterday) is set so pure noise — where argmax-of-window can
-        // naturally hit 2× the median by chance — doesn't sneak past the
-        // gate. Real watches still pass easily because their tick energies
-        // run 10–1000× the background. Plus an overall-SNR floor: if the
-        // median tick energy isn't even 3× the median gap, the recording
-        // has no usable signal at all and confirmedFraction is forced to 0,
-        // routing to Weak Signal.
-        let confirmedFraction: Double
-        if snr < 5.0 {
-            confirmedFraction = 0.0
-        } else {
-            let confirmThreshold = medianGap > 0 ? medianGap * 4 : 0
-            let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
-            confirmedFraction = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
-        }
 
         // Low confidence: per-class jitter signals the picker isn't locking
         // consistently. This catches the case where SNR is good (audio is
@@ -361,17 +405,14 @@ public struct MeasurementPipeline {
             TickTiming(beatIndex: $0, residualMs: residualsMs[$0], isEvenBeat: $0 % 2 == 0)
         }
 
-        // Amplitude proxy: median peak amplitude. Used for downstream
-        // amplitude estimation. For now just return median tick energy.
+        // Amplitude proxy: median peak amplitude in smoothed envelope at
+        // each beat position. The picker already located each beat's argmax
+        // — read smoothed[that index] directly rather than re-searching.
         var peakValues: [Float] = []
         peakValues.reserveCapacity(m)
-        for tc in windowCenters {
-            let centerSample = Int(round(tc * sampleRate))
-            let lo = max(0, centerSample - halfPeriodSamples)
-            let hi = min(n - 1, centerSample + halfPeriodSamples)
-            var mx: Float = 0
-            for i in lo...hi { if smoothed[i] > mx { mx = smoothed[i] } }
-            peakValues.append(mx)
+        for bp in beatPositions {
+            let idx = min(n - 1, max(0, Int(round(bp * sampleRate))))
+            peakValues.append(smoothed[idx])
         }
         peakValues.sort()
         let medianPeak = peakValues.isEmpty ? 0 : Double(peakValues[peakValues.count / 2])
