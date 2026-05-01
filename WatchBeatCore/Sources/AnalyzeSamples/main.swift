@@ -25,12 +25,13 @@ let useReference = ProcessInfo.processInfo.environment["WATCHBEAT_REFERENCE"] !=
 let (result, _) = useReference
     ? pipeline.measureReferenceWithDiagnostics(buffer)
     : pipeline.measureWithDiagnostics(buffer)
-print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  lowConf=%@",
+print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  conf=%.0f%%  lowConf=%@",
              useReference ? "[REF] " : "",
              result.snappedRate.rawValue,
              result.rateErrorSecondsPerDay,
              result.beatErrorMilliseconds.map { String(format: "%.2f ms", $0) } ?? "nil",
              result.qualityScore * 100,
+             result.confirmedFraction * 100,
              result.isLowConfidence ? "Y" : "N"))
 
 // Amplitude flow (matches iOS app pipeline): measurePulseWidths → combinedAmplitude.

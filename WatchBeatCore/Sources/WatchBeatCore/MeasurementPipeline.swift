@@ -281,8 +281,8 @@ public struct MeasurementPipeline {
         let avgClassStd = (evenStd + oddStd) / 2.0
 
         let snrHalfSamples = max(1, Int(0.005 * sampleRate))
-        var tickEnergies: [Float] = []
-        var gapEnergies: [Float] = []
+        var tickEnergies: [Float] = []  // per-window peak energy (kept in window order)
+        var gapEnergies: [Float] = []   // per-gap background energy (in pair order)
         tickEnergies.reserveCapacity(m)
         gapEnergies.reserveCapacity(m - 1)
         for i in 0..<m {
@@ -306,17 +306,33 @@ public struct MeasurementPipeline {
                 }
             }
         }
-        tickEnergies.sort()
-        gapEnergies.sort()
-        let medianTick = tickEnergies.isEmpty ? 0 : tickEnergies[tickEnergies.count / 2]
-        let medianGap = gapEnergies.isEmpty ? 0 : gapEnergies[gapEnergies.count / 2]
+        // Median tick / gap energies for overall SNR (quality metric).
+        let sortedTick = tickEnergies.sorted()
+        let sortedGap = gapEnergies.sorted()
+        let medianTick = sortedTick.isEmpty ? 0 : sortedTick[sortedTick.count / 2]
+        let medianGap = sortedGap.isEmpty ? 0 : sortedGap[sortedGap.count / 2]
         let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 5.0)))
+
+        // Per-window confirmation: a window's "tick" is real if its peak
+        // energy beats background by at least 2×. This separates the
+        // bad-recording case (most windows have no acoustic tick → low
+        // confirmedFraction → routes to Weak Signal) from the bad-watch
+        // case (most windows have ticks but timing erratic → high
+        // confirmedFraction with high σ → routes to Low Analytical
+        // Confidence). Threshold 2× matches the production picker's
+        // confirmation gate.
+        let confirmThreshold = medianGap > 0 ? medianGap * 2 : 0
+        let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
+        let confirmedFraction = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
 
         // Low confidence: per-class jitter signals the picker isn't locking
         // consistently. This catches the case where SNR is good (audio is
         // clean) but the watch's mechanical irregularity (near-stall, broken
         // hairspring, etc.) makes the displayed numbers untrustworthy.
+        // Distinguished from the bad-recording case by confirmedFraction:
+        // a low-confidence + high-confirmedFraction recording is a near-
+        // stall watch; low-confidence + low-confirmedFraction is bad audio.
         let isLowConfidence = avgClassStd > 6.0
 
         // Tick timings for the timegraph: use the residuals as-is.
@@ -349,7 +365,8 @@ public struct MeasurementPipeline {
             tickTimings: tickTimings,
             isLowConfidence: isLowConfidence,
             measuredPeriod: slope,
-            regressionIntercept: intercept
+            regressionIntercept: intercept,
+            confirmedFraction: confirmedFraction
         )
 
         let diagnostics = PipelineDiagnostics(

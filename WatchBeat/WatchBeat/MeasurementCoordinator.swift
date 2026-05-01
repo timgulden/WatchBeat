@@ -293,7 +293,19 @@ final class MeasurementCoordinator: ObservableObject {
                 currentQuality = Int(quality * 100)
                 bestQualitySoFar = max(bestQualitySoFar, currentQuality)
 
-                if quality > bestQuality {
+                // Composite score for choosing the "best" window across the
+                // 60-second budget. Trust order:
+                //   confirmed AND non-lowConf  >  confirmed AND lowConf  >  unconfirmed
+                // Within the same trust class, prefer higher quality.
+                func score(_ r: MeasurementResult) -> Double {
+                    var s = r.qualityScore
+                    if r.confirmedFraction >= 0.5 { s += 1.0 }
+                    if !r.isLowConfidence { s += 2.0 }
+                    return s
+                }
+                let scoreNew = score(result)
+                let scoreCur = bestResult.map { score($0.0) } ?? -1
+                if scoreNew > scoreCur {
                     bestQuality = quality
                     // Stamp the moment this analysis window ended so we can
                     // later ask the orientation monitor whether the phone
@@ -301,11 +313,16 @@ final class MeasurementCoordinator: ObservableObject {
                     bestResult = (result, diagnostics, buffer, ContinuousClock.now)
                 }
 
-                // Auto-stop on high quality regardless of rate plausibility.
-                // A 100%-quality result won't improve by running longer; if the
-                // watch is genuinely running far off, the post-loop maxRate
-                // check routes to the needs-service screen.
-                if quality >= qualityThreshold {
+                // Auto-stop only on a fully-trustworthy window: high quality,
+                // confirmed (real ticks present), AND not low-confidence
+                // (picker locked on them). A high-SNR result with high
+                // jitter (lowConfidence) used to break the loop early — Tim
+                // wants the loop to keep sliding the window in case a
+                // better one emerges. Same for a high-SNR-but-mostly-noise
+                // recording (low confirmedFraction).
+                if quality >= qualityThreshold
+                    && result.confirmedFraction >= 0.8
+                    && !result.isLowConfidence {
                     break
                 }
             }
@@ -339,28 +356,45 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Three outcomes: implausibly-far-off (high quality but rate out of range),
-        // signal-too-weak (never got a usable fit), or a normal result.
+        // Routing ladder, in order of decreasing trust about the picker's
+        // output. Each step trusts more than the previous, so the page
+        // shown only blames the watch (Needs Service / Low Confidence)
+        // once we're sure the recording itself was usable.
+        //
+        //   1. confirmedFraction < 0.5 OR quality < minimumDisplayQuality
+        //        → "Weak Signal" — the recording itself didn't capture
+        //          enough audible tick events to measure.
+        //   2. isLowConfidence (high per-class σ)
+        //        → "Low Analytical Confidence" — ticks ARE present
+        //          (confirmedFraction OK) but their timing is so erratic
+        //          we can't lock on them. Near-stall watch territory.
+        //   3. |rate| > maxPlausibleRateError
+        //        → "Needs Service" — picker is solid AND on the right rate
+        //          AND consistent, but the watch is far out of spec.
+        //   4. otherwise
+        //        → Result.
         guard let (result, diagnostics, audioBuffer, _) = bestResult,
-              result.qualityScore >= minimumDisplayQuality else {
+              result.qualityScore >= minimumDisplayQuality,
+              result.confirmedFraction >= 0.5 else {
             if let (r, _, buf, _) = bestResult {
                 saveRawAudio(buf, result: r)
             }
             let q = Int((bestResult?.0.qualityScore ?? 0) * 100)
+            let cf = Int((bestResult?.0.confirmedFraction ?? 0) * 100)
             let sr = Int(captureService.sampleRate)
             let peak = String(format: "%.3f", bestResult?.1.rawPeakAmplitude ?? 0)
-            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.\n\nDiag: q=\(q)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
+            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.\n\nDiag: q=\(q)% confirmed=\(cf)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
             return
         }
 
         saveRawAudio(audioBuffer, result: result)
 
-        // Low-confidence check must run BEFORE the rate-range check below.
-        // If the picker isn't locking consistently (high per-class jitter),
-        // its rate output is unreliable, so we shouldn't display a
-        // "watch needs service" verdict based on it. Route to the
-        // low-analytical-confidence error instead, which prompts the user
-        // to retry rather than implying the watch is broken.
+        // Low-confidence check runs BEFORE the rate-range check below: if
+        // the picker isn't locking consistently we shouldn't blame the
+        // watch's rate. Note that confirmedFraction has already passed
+        // (≥ 0.5), so we know real ticks ARE present — this is the
+        // "near-stall watch with erratic timing" case Tim flagged, not
+        // a bad-recording case.
         if result.isLowConfidence {
             state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
             return

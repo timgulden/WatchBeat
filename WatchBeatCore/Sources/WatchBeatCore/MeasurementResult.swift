@@ -55,6 +55,15 @@ public struct MeasurementResult: Sendable {
     /// Regression intercept (seconds). See `measuredPeriod`.
     public let regressionIntercept: Double?
 
+    /// Fraction of analysis windows whose acoustic peak rose above
+    /// background noise (per-window peak energy ÷ per-window gap energy
+    /// > a threshold). Distinguishes "we couldn't hear a watch ticking
+    /// in this recording" (low value → routes to Weak Signal) from
+    /// "we heard ticks but their timing was erratic" (high value with
+    /// high σ → routes to Low Analytical Confidence). Default 1.0
+    /// (assume all confirmed) for callers that don't compute it.
+    public let confirmedFraction: Double
+
     public init(
         snappedRate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
@@ -66,7 +75,8 @@ public struct MeasurementResult: Sendable {
         amplitudeTickTimings: [TickTiming]? = nil,
         isLowConfidence: Bool = false,
         measuredPeriod: Double? = nil,
-        regressionIntercept: Double? = nil
+        regressionIntercept: Double? = nil,
+        confirmedFraction: Double = 1.0
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -79,5 +89,6 @@ public struct MeasurementResult: Sendable {
         self.isLowConfidence = isLowConfidence
         self.measuredPeriod = measuredPeriod
         self.regressionIntercept = regressionIntercept
+        self.confirmedFraction = confirmedFraction
     }
 }
