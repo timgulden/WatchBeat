@@ -165,16 +165,23 @@ public struct MeasurementPipeline {
             let medianTick: Float, medianGap: Float
             let snr: Double
             let confirmedFraction: Double
-            // Composite score for ranking candidate rates. Three factors:
+            // Composite score for ranking candidate rates. Four factors:
             //   confirmedFraction → "did the picker find ticks at this rate?"
             //   q (SNR-based)     → "is the audio clean enough to read?"
             //   sigmaPen          → "are the picks consistent timing-wise?"
+            //   rateConsistency   → "does the regression slope match this
+            //                        candidate's expected period?" — catches
+            //                        harmonic confusion. A 36000-bph candidate
+            //                        running on a 21600-bph watch picks every
+            //                        other real tick; its confirmed-only
+            //                        regression has a slope that matches
+            //                        21600's period, NOT 36000's. Killing
+            //                        score when slope/expected diverges by
+            //                        more than 10% removes the harmonic.
             //
-            // sigmaPen uses σ² in the denominator (not σ) because on lossy
-            // recordings the wrong rate often gets σ ~50 ms and the right
-            // rate gets σ ~30-40 ms — a linear penalty barely separates them
-            // (ratio < 1.5×). Quadratic penalty makes the right rate clearly
-            // win even when both σ values look bad in absolute terms.
+            // sigmaPen uses σ² because on lossy recordings the right rate's
+            // σ may be 30-40 ms; a linear penalty barely separates it from a
+            // wrong rate's 50 ms. Quadratic helps without going zero.
             //   σ = 5  → sigmaPen = 0.50
             //   σ = 10 → sigmaPen = 0.33
             //   σ = 30 → sigmaPen = 0.053
@@ -182,7 +189,13 @@ public struct MeasurementPipeline {
             var score: Double {
                 let q = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
                 let sigmaPen = 1.0 / (1.0 + (avgClassStd * avgClassStd) / 50.0)
-                return confirmedFraction * q * sigmaPen
+                let expectedPeriod = 1.0 / fHz
+                let slopeRatio = expectedPeriod > 0 ? slope / expectedPeriod : 0
+                let logRatio = slopeRatio > 0 ? abs(log(slopeRatio)) : 1.0
+                // Hard cutoff at 10% deviation: harmonic confusion produces
+                // slope ratios near 0.5 or 2.0; clean rate fits hold near 1.0.
+                let rateConsistency = logRatio < 0.1 ? 1.0 : 0.0
+                return confirmedFraction * q * sigmaPen * rateConsistency
             }
         }
 
@@ -238,35 +251,8 @@ public struct MeasurementPipeline {
             let m = beatPositions.count
             guard m >= 6 else { return nil }
 
-            var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
-            for i in 0..<m {
-                let di = Double(i)
-                sumI += di; sumT += beatPositions[i]; sumII += di * di; sumIT += di * beatPositions[i]
-            }
-            let dm = Double(m)
-            let regDenom = dm * sumII - sumI * sumI
-            let slope = (dm * sumIT - sumI * sumT) / regDenom
-            let intercept = (sumT - slope * sumI) / dm
-
-            var residualsMs = [Double](repeating: 0, count: m)
-            for i in 0..<m {
-                residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
-            }
-            var evenSum = 0.0, oddSum = 0.0, evenSumSq = 0.0, oddSumSq = 0.0, evenN = 0, oddN = 0
-            for i in 0..<m {
-                if i % 2 == 0 {
-                    evenSum += residualsMs[i]; evenSumSq += residualsMs[i] * residualsMs[i]; evenN += 1
-                } else {
-                    oddSum += residualsMs[i]; oddSumSq += residualsMs[i] * residualsMs[i]; oddN += 1
-                }
-            }
-            let evenMean = evenN > 0 ? evenSum / Double(evenN) : 0
-            let oddMean = oddN > 0 ? oddSum / Double(oddN) : 0
-            let evenVar = evenN > 0 ? max(0, evenSumSq / Double(evenN) - evenMean * evenMean) : 0
-            let oddVar = oddN > 0 ? max(0, oddSumSq / Double(oddN) - oddMean * oddMean) : 0
-            let evenStd = sqrt(evenVar)
-            let oddStd = sqrt(oddVar)
-
+            // Per-window energies — compute BEFORE regression so we can
+            // gate which beats contribute to the slope and σ.
             var tickEnergies: [Float] = []
             var gapEnergies: [Float] = []
             tickEnergies.reserveCapacity(m)
@@ -275,11 +261,14 @@ public struct MeasurementPipeline {
                 let center = Int(round(beatPositions[i] * sampleRate))
                 let lo = max(0, center - snrHalfSamples)
                 let hi = min(n - 1, center + snrHalfSamples)
-                guard lo < hi else { continue }
-                var sum: Float = 0
-                vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1,
-                         &sum, vDSP_Length(hi - lo + 1))
-                tickEnergies.append(sum)
+                if lo < hi {
+                    var sum: Float = 0
+                    vDSP_sve(squared.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1,
+                             &sum, vDSP_Length(hi - lo + 1))
+                    tickEnergies.append(sum)
+                } else {
+                    tickEnergies.append(0)  // align indices with beatPositions
+                }
                 if i > 0 {
                     let gapCenter = Int(round((beatPositions[i - 1] + beatPositions[i]) * 0.5 * sampleRate))
                     let glo = max(0, gapCenter - snrHalfSamples)
@@ -292,19 +281,71 @@ public struct MeasurementPipeline {
                     }
                 }
             }
-            let sortedTick = tickEnergies.sorted()
             let sortedGap = gapEnergies.sorted()
-            let medianTick = sortedTick.isEmpty ? 0 : sortedTick[sortedTick.count / 2]
             let medianGap = sortedGap.isEmpty ? 0 : sortedGap[sortedGap.count / 2]
-            let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
-            let cf: Double
-            if snr < 5.0 {
-                cf = 0.0
-            } else {
-                let confirmThreshold = medianGap > 0 ? medianGap * 4 : 0
-                let confirmedCount = tickEnergies.filter { $0 > confirmThreshold }.count
-                cf = tickEnergies.isEmpty ? 0.0 : Double(confirmedCount) / Double(tickEnergies.count)
+
+            // Per-window confirmation — production-style gate, applied
+            // BEFORE regression. A window passes if its peak energy is at
+            // least 2× the median gap energy. Wrong rates produce many
+            // unconfirmed windows (argmax landed on noise that's not
+            // distinguishable from background); right rates produce most
+            // windows confirmed. Only confirmed beats feed the regression
+            // and σ — so noisy outlier picks (e.g., the section of EbayVid
+            // where video voiceover drowned out the watch) don't pollute
+            // the rate estimate.
+            let confirmThreshold = medianGap > 0 ? medianGap * 2 : 0
+            var confirmedBeatIndices: [Int] = []
+            confirmedBeatIndices.reserveCapacity(m)
+            for i in 0..<m where tickEnergies[i] > confirmThreshold {
+                confirmedBeatIndices.append(i)
             }
+            let confirmedFraction = m > 0 ? Double(confirmedBeatIndices.count) / Double(m) : 0
+            guard confirmedBeatIndices.count >= 6 else { return nil }
+
+            // Regression on confirmed beats only. Use the original beat
+            // index `i` (not a re-numbering) so the regression's slope is
+            // genuinely seconds-per-beat at the candidate rate.
+            var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
+            for idx in confirmedBeatIndices {
+                let di = Double(idx)
+                sumI += di; sumT += beatPositions[idx]; sumII += di * di; sumIT += di * beatPositions[idx]
+            }
+            let cm = Double(confirmedBeatIndices.count)
+            let regDenom = cm * sumII - sumI * sumI
+            let slope = (cm * sumIT - sumI * sumT) / regDenom
+            let intercept = (sumT - slope * sumI) / cm
+
+            // Residuals over ALL beats so the timegraph still has every
+            // pick (confirmed and unconfirmed). Per-class σ uses
+            // CONFIRMED beats only — unconfirmed picks are noise and would
+            // inflate σ artificially.
+            var residualsMs = [Double](repeating: 0, count: m)
+            for i in 0..<m {
+                residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
+            }
+            var evenSum = 0.0, oddSum = 0.0, evenSumSq = 0.0, oddSumSq = 0.0, evenN = 0, oddN = 0
+            for idx in confirmedBeatIndices {
+                let r = residualsMs[idx]
+                if idx % 2 == 0 {
+                    evenSum += r; evenSumSq += r * r; evenN += 1
+                } else {
+                    oddSum += r; oddSumSq += r * r; oddN += 1
+                }
+            }
+            let evenMean = evenN > 0 ? evenSum / Double(evenN) : 0
+            let oddMean = oddN > 0 ? oddSum / Double(oddN) : 0
+            let evenVar = evenN > 0 ? max(0, evenSumSq / Double(evenN) - evenMean * evenMean) : 0
+            let oddVar = oddN > 0 ? max(0, oddSumSq / Double(oddN) - oddMean * oddMean) : 0
+            let evenStd = sqrt(evenVar)
+            let oddStd = sqrt(oddVar)
+
+            // SNR from confirmed tickEnergies (those passed the gate, so
+            // their median is an honest "typical real-tick energy") vs
+            // medianGap (background).
+            let confirmedTickEnergies = confirmedBeatIndices.map { tickEnergies[$0] }.sorted()
+            let medianTick = confirmedTickEnergies.isEmpty ? 0 : confirmedTickEnergies[confirmedTickEnergies.count / 2]
+            let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
+            let cf = confirmedFraction
 
             return Candidate(
                 snappedRate: snappedRate,
@@ -357,52 +398,56 @@ public struct MeasurementPipeline {
         // Unpack the winning candidate into the locals that the rest of the
         // function used to compute directly.
         let snappedRate = winner.snappedRate
-        let fHz = winner.fHz
-        _ = fHz  // Used in diagnostics; keep for clarity
         let beatPositions = winner.beatPositions
         let m = beatPositions.count
         let slope = winner.slope
         let intercept = winner.intercept
         let residualsMs = winner.residualsMs
-        let evenMean = winner.evenMean
-        let oddMean = winner.oddMean
         let avgClassStd = winner.avgClassStd
         let beAsymmetryMs = winner.beAsymmetryMs
-        let tickEnergies = winner.tickEnergies
-        _ = winner.gapEnergies  // unused beyond confirmedFraction
-        let medianTick = winner.medianTick
-        let medianGap = winner.medianGap
         let snr = winner.snr
         let confirmedFraction = winner.confirmedFraction
         let rateErrPerDay = (winner.fHz / snappedRate.hz - 1.0) * 86400.0
-        _ = (evenMean, oddMean, medianTick, medianGap, tickEnergies)  // kept for downstream reuse
 
         // Quality from the winner's SNR. Same formula as before — see notes
         // on tightening from snr/5 to snr/10 to keep pure noise (snr ~ 2)
         // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
-        // Low confidence: per-class jitter signals the picker isn't locking
-        // consistently. This catches the case where SNR is good (audio is
-        // clean) but the watch's mechanical irregularity (near-stall, broken
-        // hairspring, etc.) makes the displayed numbers untrustworthy.
-        // Distinguished from the bad-recording case by confirmedFraction:
-        // a low-confidence + high-confirmedFraction recording is a near-
-        // stall watch; low-confidence + low-confirmedFraction is bad audio.
+        // Routing: distinguish three classes of "high σ" by what we still
+        // know about the recording.
         //
-        // Threshold tuning: 6 ms was too strict — Tim's experiment recording
-        // a YouTube video of an Omega 458 through MacBook speaker (lossy
-        // chain, lots of mid-frequency artifacts) hit 60% quality but σ
-        // 7-9 ms range and routed to Low Analytical Confidence even though
-        // the FFT showed clean 3 Hz peaking. Raised to 10 ms — still
-        // catches genuinely-erratic recordings (Timex3Weak σ 5.7 still
-        // passes, near-stall watches with σ > 10 ms still flagged) but
-        // admits playback-from-speaker and other lossy-chain cases.
-        let isLowConfidence = avgClassStd > 10.0
+        // 1. σ > 10 ms AND confirmedFraction < 0.5
+        //    → bad recording (most windows had no detectable tick).
+        //    → isLowConfidence = true; iOS routes to Low Analytical
+        //      Confidence page.
+        //
+        // 2. σ > 10 ms AND confirmedFraction ≥ 0.5
+        //    → ticks ARE present but timing is messy (lossy speaker→mic
+        //      chain, distant mic, room ambience). The FFT still pins the
+        //      rate accurately (it integrates over all 15 s, robust to
+        //      per-window noise). FALL BACK: report rate from FFT, omit
+        //      beat error and timegraph, mark NOT lowConfidence so the
+        //      result page shows. The user gets a useful rate reading
+        //      even if individual ticks couldn't be pinned to ±1 ms.
+        //
+        // 3. σ ≤ 10 ms
+        //    → normal path; everything reported.
+        let highSigma = avgClassStd > 10.0
+        let useFftRateFallback = highSigma && confirmedFraction >= 0.5
+        let isLowConfidence = highSigma && !useFftRateFallback
 
-        // Tick timings for the timegraph: use the residuals as-is.
-        let tickTimings: [TickTiming] = (0..<m).map {
-            TickTiming(beatIndex: $0, residualMs: residualsMs[$0], isEvenBeat: $0 % 2 == 0)
+        // When using the FFT-rate fallback, suppress beat error and
+        // timegraph since they depend on per-tick precision the picker
+        // couldn't deliver on this recording.
+        let beatErrorReported: Double? = useFftRateFallback ? nil : beAsymmetryMs
+        let tickTimings: [TickTiming]
+        if useFftRateFallback {
+            tickTimings = []
+        } else {
+            tickTimings = (0..<m).map {
+                TickTiming(beatIndex: $0, residualMs: residualsMs[$0], isEvenBeat: $0 % 2 == 0)
+            }
         }
 
         // Amplitude proxy: median peak amplitude in smoothed envelope at
@@ -420,7 +465,7 @@ public struct MeasurementPipeline {
         let result = MeasurementResult(
             snappedRate: snappedRate,
             rateErrorSecondsPerDay: rateErrPerDay,
-            beatErrorMilliseconds: beAsymmetryMs,
+            beatErrorMilliseconds: beatErrorReported,
             amplitudeProxy: medianPeak,
             qualityScore: quality,
             tickCount: m,

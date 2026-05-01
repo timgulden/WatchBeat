@@ -268,8 +268,12 @@ for t in result.tickTimings {
 // Galloping shows as ± alternation. Slow wobble shows as smooth drift.
 print("\nAdjacent-tick intervals (ms deviation from expected period):")
 let sorted = result.tickTimings.sorted { $0.beatIndex < $1.beatIndex }
-for k in 1..<sorted.count {
-    let di = sorted[k].beatIndex - sorted[k-1].beatIndex
-    let dr = sorted[k].residualMs - sorted[k-1].residualMs
-    print(String(format: "  Δidx=%d  Δresid=%+.2f ms", di, dr))
+if sorted.count > 1 {
+    for k in 1..<sorted.count {
+        let di = sorted[k].beatIndex - sorted[k-1].beatIndex
+        let dr = sorted[k].residualMs - sorted[k-1].residualMs
+        print(String(format: "  Δidx=%d  Δresid=%+.2f ms", di, dr))
+    }
+} else {
+    print("  (no tickTimings — Reference picker used FFT-rate fallback)")
 }
