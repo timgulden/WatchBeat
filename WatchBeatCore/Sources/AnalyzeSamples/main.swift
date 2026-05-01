@@ -33,6 +33,29 @@ print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  lowC
              result.qualityScore * 100,
              result.isLowConfidence ? "Y" : "N"))
 
+// Amplitude flow (matches iOS app pipeline): measurePulseWidths → combinedAmplitude.
+// Default lift angle 52° (Omega 485). Override with WATCHBEAT_LIFT_ANGLE env var.
+let liftAngle = Double(ProcessInfo.processInfo.environment["WATCHBEAT_LIFT_ANGLE"] ?? "") ?? 52.0
+let amplitudeEstimator = AmplitudeEstimator()
+let pulseWidths = amplitudeEstimator.measurePulseWidths(
+    input: buffer,
+    rate: result.snappedRate,
+    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+    tickTimings: result.amplitudeTickTimings
+)
+let amp = AmplitudeEstimator.combinedAmplitude(
+    pulseWidths: pulseWidths,
+    beatRate: result.snappedRate,
+    rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+    liftAngleDegrees: liftAngle
+)
+print(String(format: "  amplitude: tick_pulse=%@  tock_pulse=%@  folds=%d  combined=%@°  (lift=%.0f°)",
+             pulseWidths.tickPulseMs.map { String(format: "%.2f ms", $0) } ?? "nil",
+             pulseWidths.tockPulseMs.map { String(format: "%.2f ms", $0) } ?? "nil",
+             pulseWidths.foldCount,
+             amp.map { String(format: "%.0f", $0) } ?? "nil",
+             liftAngle))
+
 // Per-class μ/σ + one-sidedness — direct read of what the disorderly rule sees.
 // Also test the "label-flip" hypothesis: split the residuals by beat index
 // into early/late halves and check whether the per-class mean changes sign.
