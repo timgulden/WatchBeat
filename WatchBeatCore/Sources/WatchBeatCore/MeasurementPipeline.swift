@@ -352,23 +352,34 @@ public struct MeasurementPipeline {
                 return (detA / det, detB / det, detC / det)
             }
 
+            // Iterate fit-detect-drop. A single huge outlier distorts the
+            // quadratic itself, throwing nearby clean points far from its
+            // (corrupted) curve and over-rejecting. After dropping the
+            // worst, the next quadratic fits the cleaner data better, and
+            // residuals are evaluated against the ORIGINAL idxs — so points
+            // dropped on iter 1 can be re-included on iter 2 if the better
+            // quadratic shows they were fine. Converges within 2-3 passes.
             func cleanClass(_ idxs: [Int]) -> [Int] {
-                guard idxs.count >= 8, let (a, b, c) = fitQuadratic(idxs) else {
-                    return idxs
-                }
-                var residuals: [Double] = []; residuals.reserveCapacity(idxs.count)
-                for i in idxs {
-                    let x = Double(i)
-                    residuals.append(beatPositions[i] - (a + b * x + c * x * x))
-                }
-                let sortedR = residuals.sorted()
-                let medianR = sortedR[sortedR.count / 2]
-                let absDev = residuals.map { abs($0 - medianR) }.sorted()
-                let mad = absDev[absDev.count / 2]
-                let threshold = max(3.0 * 1.4826 * mad, 0.005)  // 5 ms floor
-                var kept: [Int] = []; kept.reserveCapacity(idxs.count)
-                for (k, i) in idxs.enumerated() where abs(residuals[k] - medianR) <= threshold {
-                    kept.append(i)
+                guard idxs.count >= 8 else { return idxs }
+                var kept = idxs
+                for _ in 0..<5 {
+                    guard let (a, b, c) = fitQuadratic(kept) else { return kept }
+                    var residuals: [Double] = []; residuals.reserveCapacity(idxs.count)
+                    for i in idxs {
+                        let x = Double(i)
+                        residuals.append(beatPositions[i] - (a + b * x + c * x * x))
+                    }
+                    let sortedR = residuals.sorted()
+                    let medianR = sortedR[sortedR.count / 2]
+                    let absDev = residuals.map { abs($0 - medianR) }.sorted()
+                    let mad = absDev[absDev.count / 2]
+                    let threshold = max(3.0 * 1.4826 * mad, 0.005)  // 5 ms floor
+                    var nextKept: [Int] = []; nextKept.reserveCapacity(idxs.count)
+                    for (k, i) in idxs.enumerated() where abs(residuals[k] - medianR) <= threshold {
+                        nextKept.append(i)
+                    }
+                    if nextKept == kept { return kept }
+                    kept = nextKept
                 }
                 return kept
             }
