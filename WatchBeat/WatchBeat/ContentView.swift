@@ -296,7 +296,7 @@ struct IdleScreen: View {
             // Listen button. The square's size is fixed by SquareScreenLayout
             // so contents here never shift the wheel above.
             VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "antenna.radiowaves.left.and.right", text: "Place the iPhone mic within a few centimeters of your watch — direct contact is not required (but can help).")
+                tipRow(icon: "waveform", text: "Place the iPhone mic within a few centimeters of your watch — direct contact is not required (but can help).")
                 tipRow(icon: "applewatch", text: "On-wrist readings are fine for general use.")
                 tipRow(icon: "arrow.down", text: "For automatic position detection, hold the watch against your iPhone as shown below.")
                 Image("WatchPositioningDiagram")
