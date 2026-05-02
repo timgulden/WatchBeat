@@ -26,6 +26,16 @@ enum MeasurementConstants {
     /// Set generously to accommodate badly-worn movements that still run.
     static let maxPlausibleRateError: Double = 2000.0
 
+    /// Display-only quality percentage. Multiplies the SNR-based qualityScore
+    /// by confirmedFraction so a window of pure room noise (high SNR from
+    /// per-window argmax peaks but few windows passing the 2× medianGap
+    /// confirmation gate) doesn't read as misleadingly high. Clean watches
+    /// with confirmedFraction ≈ 1.0 are unaffected. Internal scoring (auto-
+    /// stop, best-window selection, routing gates) still uses raw qualityScore.
+    static func displayedQuality(_ result: MeasurementResult) -> Int {
+        Int((result.qualityScore * result.confirmedFraction) * 100)
+    }
+
     /// Quality color thresholds for UI display.
     static func qualityColor(_ percent: Int) -> Color {
         if percent >= 50 { return .green }
@@ -293,7 +303,7 @@ final class MeasurementCoordinator: ObservableObject {
                 }.value
 
                 let quality = result.qualityScore
-                currentQuality = Int(quality * 100)
+                currentQuality = MeasurementConstants.displayedQuality(result)
                 bestQualitySoFar = max(bestQualitySoFar, currentQuality)
 
                 // Composite score for choosing the "best" window across the
@@ -457,7 +467,7 @@ final class MeasurementCoordinator: ObservableObject {
             rateErrorFormatted: formatRateError(result.rateErrorSecondsPerDay),
             beatErrorMs: result.beatErrorMilliseconds,
             beatErrorFormatted: result.beatErrorMilliseconds.map { formatBeatError($0) },
-            qualityPercent: Int(result.qualityScore * 100),
+            qualityPercent: MeasurementConstants.displayedQuality(result),
             tickCount: result.tickCount,
             diagnosticText: diagText,
             tickResiduals: tickResiduals,
