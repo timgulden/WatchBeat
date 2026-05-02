@@ -374,9 +374,14 @@ final class MeasurementCoordinator: ObservableObject {
         // shown only blames the watch (Needs Service / Low Confidence)
         // once we're sure the recording itself was usable.
         //
-        //   1. confirmedFraction < 0.5 OR quality < minimumDisplayQuality
+        //   1. displayedQuality < minimumDisplayQuality OR
+        //      confirmedFraction < 0.5
         //        → "Weak Signal" — the recording itself didn't capture
-        //          enough audible tick events to measure.
+        //          enough audible tick events to measure. Use displayed
+        //          quality (raw × confirmedFraction) for the gate so the
+        //          routing matches what the user saw on the bar — pure
+        //          room noise reads ~27% displayed and gets routed here,
+        //          rather than passing the gate on a misleading raw 58%.
         //   2. isLowConfidence (high per-class σ)
         //        → "Low Analytical Confidence" — ticks ARE present
         //          (confirmedFraction OK) but their timing is so erratic
@@ -386,8 +391,10 @@ final class MeasurementCoordinator: ObservableObject {
         //          AND consistent, but the watch is far out of spec.
         //   4. otherwise
         //        → Result.
+        let displayedPct = bestResult.map { MeasurementConstants.displayedQuality($0.0) } ?? 0
+        let minDisplayedPct = Int(minimumDisplayQuality * 100)
         guard let (result, diagnostics, audioBuffer, _) = bestResult,
-              result.qualityScore >= minimumDisplayQuality,
+              displayedPct >= minDisplayedPct,
               result.confirmedFraction >= 0.5 else {
             if let (r, _, buf, _) = bestResult {
                 saveRawAudio(buf, result: r)
