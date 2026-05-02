@@ -415,7 +415,14 @@ final class MeasurementCoordinator: ObservableObject {
         // (≥ 0.5), so we know real ticks ARE present — this is the
         // "near-stall watch with erratic timing" case Tim flagged, not
         // a bad-recording case.
-        if result.isLowConfidence {
+        //
+        // Empty tickTimings → FFT-rate-fallback path fired (high σ, but
+        // confirmedFraction was high enough to skip lowConfidence flag in
+        // the pipeline). On pure room noise this can produce a confident-
+        // looking "rate" with no individual tick data behind it. Treat as
+        // Low Analytical Confidence so the user doesn't see a bogus rate
+        // with an "Insufficient data" timegraph slot.
+        if result.isLowConfidence || result.tickTimings.count < 3 {
             state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
             return
         }
