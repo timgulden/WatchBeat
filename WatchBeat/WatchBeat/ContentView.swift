@@ -298,7 +298,7 @@ struct IdleScreen: View {
             VStack(alignment: .leading, spacing: 10) {
                 tipRow(icon: "waveform", text: "Place the iPhone mic within a few centimeters of your watch — direct contact is not required (but can help).")
                 tipRow(icon: "applewatch", text: "On-wrist readings are fine for general use.")
-                tipRow(icon: "arrow.down", text: "For automatic position detection, hold the watch against your iPhone as shown below.")
+                tipRow(icon: "arrow.down", text: "For automatic orientation detection, hold the watch against your iPhone as shown below.")
                 Image("WatchPositioningDiagram")
                     .resizable()
                     .scaledToFit()
