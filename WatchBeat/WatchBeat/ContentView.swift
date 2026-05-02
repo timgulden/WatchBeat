@@ -762,9 +762,9 @@ struct ErrorScreen: View {
             .padding(.top, 12)
 
             VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "rotate.3d", text: "Try a different watch position (Crown Up, Dial Down, etc.). Some positions are easier for the algorithm to read than others.")
-                tipRow(icon: "iphone.gen3", text: "Press the phone more firmly against the caseback. Sub-ms tick localization needs solid acoustic contact.")
-                tipRow(icon: "ear", text: "Move to a quieter room. Background noise can mask the tick's secondary sub-events.")
+                tipRow(icon: "rotate.3d", text: "Try a different watch position — some positions are easier to read than others.")
+                tipRow(icon: "iphone.gen3", text: "Press the phone firmly against the caseback for solid acoustic contact.")
+                tipRow(icon: "ear", text: "Move to a quieter room — background noise can mask quieter ticks.")
                 tipRow(icon: "wrench.and.screwdriver", text: "If this happens in every position, your watch may be running on insufficient amplitude — consider service.")
                 Spacer(minLength: 0)
             }
@@ -786,8 +786,8 @@ struct ErrorScreen: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 tipRow(icon: "phone.down", text: "End any active phone or video call.")
-                tipRow(icon: "waveform", text: "Quit Voice Memos or any other recording app that may be holding the microphone.")
-                tipRow(icon: "lock.open", text: "Confirm WatchBeat has microphone permission in Settings → Privacy & Security → Microphone.")
+                tipRow(icon: "waveform", text: "Quit any other recording app holding the microphone (Voice Memos, etc.).")
+                tipRow(icon: "lock.open", text: "Check microphone permission in Settings → Privacy & Security → Microphone.")
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
@@ -882,7 +882,7 @@ struct NeedsServiceScreen: View {
                         .foregroundStyle(severityColor)
                 }
 
-                Text("The rate was identified with high confidence at \(data.rateBPH) bph, but the movement is running far outside the normal ±120 s/day range for a healthy mechanical watch. A cleaning, lubrication, or regulation is likely needed.")
+                Text("Rate identified at \(data.rateBPH) bph, but running far outside the normal ±120 s/day range for a healthy mechanical watch. A cleaning, lubrication, or regulation is likely needed.")
                     .font(.subheadline)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
