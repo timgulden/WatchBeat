@@ -805,11 +805,11 @@ struct ErrorScreen: View {
             .padding(.top, 12)
 
             VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
-                tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
-                tipRow(icon: "arrow.down", text: "Hold the watch against your iPhone as shown below.")
-                tipRow(icon: "arrow.left.and.right", text: "Slide the watch slightly left or right of center to maximize the bar at your watch's beat rate.")
-                tipRow(icon: "earpods", text: "Wired earbuds with a mic can pick up quiet watches better, but you'll lose automatic position detection.")
+                tipRow(icon: "ear", text: "Move to a quieter room. Fans, HVAC, and conversation can mask the ticks.")
+                tipRow(icon: "iphone.slash", text: "Try removing a thick phone case for better acoustic contact.")
+                tipRow(icon: "arrow.down", text: "Press the watch firmly against your iPhone (see diagram).")
+                tipRow(icon: "arrow.left.and.right", text: "Slide the watch left or right to peak the bar for your watch's beat rate.")
+                tipRow(icon: "earpods", text: "For very quiet watches, try wired earbuds with mic — orientation detection won't work.")
 
                 Image("WatchPositioningDiagram")
                     .resizable()
