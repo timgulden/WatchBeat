@@ -153,11 +153,19 @@ public struct AmplitudeEstimator {
         let tickPeak = findPeakNear(smoothed, target: halfPeriod, range: periodSamples / 3)
         let tockPeak = findPeakNear(smoothed, target: halfPeriod + periodSamples, range: periodSamples / 3)
 
+        // Baseline = 10th percentile of the smoothed fold. Represents the
+        // "between-events" noise floor. Used to make threshold relative to
+        // (peak - baseline), so high-noise recordings (HVAC, room reverb)
+        // don't have their apparent pulse widths smeared by the constant
+        // background. On clean recordings baseline ≈ 0, and the calculation
+        // collapses to "20% of peak" — the previous behavior.
+        let sortedFold = smoothed.sorted()
+        let baseline = sortedFold[sortedFold.count / 10]
+
         // Step 7: Measure pulse widths. Two strategies:
-        //   A) 20% threshold on the 3ms-smoothed fold — works great for
-        //      single-event ticks but over-measures when a pin-lever Timex
-        //      has unlock / impulse / drop sub-events within a few ms (the
-        //      threshold walk spans all three as one 40+ ms "pulse").
+        //   A) 20% threshold above baseline on the 3ms-smoothed fold — works
+        //      great for single-event ticks. Threshold rises with noise floor
+        //      so a noisy recording's pulse isn't artificially widened.
         //   B) Phase-span on the 0.15ms-smoothed fold — detects up to 3
         //      prominent sub-peaks around the main peak and uses the span
         //      from first to last. Physically correct for multi-event ticks,
@@ -165,14 +173,15 @@ public struct AmplitudeEstimator {
         //      and reports 1-2 ms spans (way too narrow → amp > 360° bogus).
         // Neither dominates. Try threshold first; if it's missing or the
         // resulting span is implausibly wide (>25 ms, classic multi-event
-        // smear), try phase-span. This keeps threshold's wins on the clean
-        // corpus and rescues the multi-event cases like NoAmplitude.
+        // smear), try phase-span.
         let tickPulseMs = bestPulseMs(peakIdx: tickPeak, fineSignal: fineSmoothed,
                                       coarseSignal: smoothed, searchRadius: periodSamples / 3,
-                                      beatPeriod: beatPeriod, sampleRate: sampleRate)
+                                      beatPeriod: beatPeriod, sampleRate: sampleRate,
+                                      baseline: baseline)
         let tockPulseMs = bestPulseMs(peakIdx: tockPeak, fineSignal: fineSmoothed,
                                       coarseSignal: smoothed, searchRadius: periodSamples / 3,
-                                      beatPeriod: beatPeriod, sampleRate: sampleRate)
+                                      beatPeriod: beatPeriod, sampleRate: sampleRate,
+                                      baseline: baseline)
 
         return PulseWidthEstimate(tickPulseMs: tickPulseMs, tockPulseMs: tockPulseMs, foldCount: foldCount)
     }
@@ -234,14 +243,16 @@ public struct AmplitudeEstimator {
     /// to phase-span detection on the fine fold.
     private func bestPulseMs(
         peakIdx: Int?, fineSignal: [Float], coarseSignal: [Float],
-        searchRadius: Int, beatPeriod: Double, sampleRate: Double
+        searchRadius: Int, beatPeriod: Double, sampleRate: Double,
+        baseline: Float
     ) -> Double? {
         guard let peak = peakIdx else { return nil }
         let halfLimit = beatPeriod / 2
 
-        // Primary: threshold-based.
+        // Primary: threshold-based, with threshold relative to (peak - baseline).
         let pwSec = measurePulseWidth(coarseSignal, peakIndex: peak, thresholdFraction: 0.20,
-                                      maxExtent: searchRadius, sampleRate: sampleRate)
+                                      maxExtent: searchRadius, sampleRate: sampleRate,
+                                      baseline: baseline)
         let thresholdMs: Double? = (pwSec > 0 && pwSec < halfLimit) ? pwSec * 1000 : nil
 
         // Threshold pulses narrower than 25 ms almost always correspond to
@@ -308,13 +319,13 @@ public struct AmplitudeEstimator {
 
     private func measurePulseWidth(
         _ signal: [Float], peakIndex: Int, thresholdFraction: Float,
-        maxExtent: Int, sampleRate: Double
+        maxExtent: Int, sampleRate: Double, baseline: Float
     ) -> Double {
         let n = signal.count
         let peakVal = signal[peakIndex]
-        guard peakVal > 0 else { return 0 }
+        guard peakVal > baseline else { return 0 }
 
-        let thresh = thresholdFraction * peakVal
+        let thresh = baseline + thresholdFraction * (peakVal - baseline)
         let lo = max(0, peakIndex - maxExtent)
         let hi = min(n - 1, peakIndex + maxExtent)
 
