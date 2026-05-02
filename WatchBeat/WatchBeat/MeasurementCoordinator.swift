@@ -12,12 +12,15 @@ enum MeasurementConstants {
     static let analysisWindow: Double = 15.0
     /// Seconds between analysis passes during recording.
     static let analysisInterval: Double = 3.0
-    /// Duration of the 12:00→1:00 listening sweep while the 5 s rolling buffer
-    /// fills. Measure button is disabled until the sweep completes.
-    static let listenSweepDuration: Double = 5.0
-    /// Maximum duration of the post-Measure recording phase (1:00→12:00).
-    /// Combined with `listenSweepDuration` this matches the 60 s wheel cycle.
-    static let maxRecordingTime: Double = 55.0
+    /// Duration of the Measure-button gate after entering monitoring. The
+    /// FrequencyMonitor uses a grow-window FFT so bars appear immediately,
+    /// but resolution is too coarse to act on for the first few seconds.
+    /// Below 3 s the closest standard rates (5.0 / 5.5 Hz, 18000 / 19800 bph)
+    /// can't be reliably separated, so the button stays disabled.
+    static let listenSweepDuration: Double = 3.0
+    /// Maximum duration of the post-Measure recording phase (12:00→12:00),
+    /// matching the 60 s wheel cycle.
+    static let maxRecordingTime: Double = 60.0
     /// Maximum plausible rate error in s/day. Above this we assume a snapping
     /// error (wrong rate chosen), which produces errors in the tens of thousands.
     /// Set generously to accommodate badly-worn movements that still run.

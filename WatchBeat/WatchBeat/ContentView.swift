@@ -172,13 +172,17 @@ struct Wedge: Shape {
     }
 }
 
-/// Colored wedges (Listening / Measuring / Analyzing / Refining) drawn
-/// behind the wheel. Angles are clock-CW from 12:00, at 6°/sec wheel pace:
-/// - Listening  0°– 30°  (12:00 → 1:00,   5 s)
-/// - Measuring  30°–120°  (1:00 → 4:00,  15 s)
-/// - Analyzing 120°–138°  (4:00 → ~4:36,  3 s — slim slice; user sees the
+/// Colored wedges (Measuring / Analyzing / Refining) drawn behind the
+/// wheel. Angles are clock-CW from 12:00, at 6°/sec wheel pace:
+/// - Measuring   0°– 90°  (12:00 → 3:00,  15 s)
+/// - Analyzing  90°–108°  (3:00 → ~3:36,  3 s — slim slice; user sees the
 ///                         color shift before transitioning to Refining)
-/// - Refining  138°–360°  (~4:36 → 12:00, 37 s)
+/// - Refining  108°–360°  (~3:36 → 12:00, 42 s)
+///
+/// Pre-Measure (monitoring): the wheel sits at 12:00 (angle 0). Bars
+/// grow in the panel above as the FFT window fills. No Listening wedge —
+/// the grow-window FFT shows useful data immediately, gated by a 3 s
+/// disable on the Measure button rather than a sweep animation.
 ///
 /// The currently-active wedge (the one containing the hand's current angle)
 /// is rendered with a deeper tint so the user sees the workflow phase
@@ -192,32 +196,26 @@ struct DialWedges: View {
     var body: some View {
         let active = activeWedge(forAngle: handAngleCW)
         ZStack {
-            Wedge(startAngleCW: 0, endAngleCW: 30)
-                .fill(active == .listening ? listeningColorActive : listeningColorIdle)
-            Wedge(startAngleCW: 30, endAngleCW: 120)
+            Wedge(startAngleCW: 0, endAngleCW: 90)
                 .fill(Color.blue.opacity(active == .measuring ? 0.22 : 0.12))
-            Wedge(startAngleCW: 120, endAngleCW: 138)
+            Wedge(startAngleCW: 90, endAngleCW: 108)
                 .fill(Color.orange.opacity(active == .analyzing ? 0.32 : 0.18))
-            Wedge(startAngleCW: 138, endAngleCW: 360)
+            Wedge(startAngleCW: 108, endAngleCW: 360)
                 .fill(active == .refining ? refiningColorActive : refiningColorIdle)
         }
         .frame(width: size, height: size)
     }
 
-    private enum Phase { case listening, measuring, analyzing, refining }
+    private enum Phase { case measuring, analyzing, refining }
     private func activeWedge(forAngle a: Double) -> Phase {
         let normalized = (a.truncatingRemainder(dividingBy: 360) + 360)
             .truncatingRemainder(dividingBy: 360)
         switch normalized {
-        case ..<30:    return .listening
-        case ..<120:   return .measuring
-        case ..<138:   return .analyzing
+        case ..<90:    return .measuring
+        case ..<108:   return .analyzing
         default:       return .refining
         }
     }
-    // Listening base is white; "active" version is a hair warmer/deeper.
-    private var listeningColorIdle: Color { Color.white }
-    private var listeningColorActive: Color { Color(red: 0.99, green: 0.96, blue: 0.90) }
     // Refining base is systemGray6; "active" is systemGray5.
     private var refiningColorIdle: Color { Color(.systemGray6) }
     private var refiningColorActive: Color { Color(.systemGray5) }
@@ -233,11 +231,10 @@ struct DialLabels: View {
             // Radial labels along each wedge midline, centered in the
             // annulus between inner hub and outer rim.
             // Analyzing wedge is small (18°), but its label still emanates
-            // from its center (129°) — text spilling slightly into the
+            // from its center (99°) — text spilling slightly into the
             // neighboring wedges is fine; the color shift signals the phase.
-            radialLabel("Listening", midCW: 15, radius: radius, radialFraction: 0.55)
-            radialLabel("Measuring", midCW: 75, radius: radius, radialFraction: 0.55)
-            radialLabel("Analyzing", midCW: 129, radius: radius, radialFraction: 0.55)
+            radialLabel("Measuring", midCW: 45, radius: radius, radialFraction: 0.55)
+            radialLabel("Analyzing", midCW: 99, radius: radius, radialFraction: 0.55)
 
             // Refining — horizontal text at the 9:00 position (left of hub).
             Text("Refining")
@@ -401,13 +398,11 @@ struct MonitoringScreen: View {
             let ready = elapsed >= MeasurementConstants.listenSweepDuration
             SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
                 WatchLogo(showHand: true,
-                          angle: wheelAngle(elapsed: elapsed),
+                          angle: 0,
                           showDialBackdrop: true)
             } bigSquare: {
                 VStack(spacing: 8) {
-                    ListeningCaption(subtitle: ready
-                                     ? "Look for the peak at your watch's beat rate"
-                                     : "Buffering",
+                    ListeningCaption(subtitle: "Look for the peak at your watch's beat rate",
                                      position: coordinator.currentPosition)
                     FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
                         .frame(maxHeight: .infinity)
@@ -425,19 +420,10 @@ struct MonitoringScreen: View {
         }
     }
 
-    /// Seconds since monitoring began (for the 12:00→1:00 sweep).
+    /// Seconds since monitoring began (for the Measure-button gate).
     private func sweepElapsed() -> Double {
         guard let start = coordinator.monitoringStartTime else { return 0 }
         return (ContinuousClock.now - start).asSeconds
-    }
-
-    /// Wheel starts at angle 0 (matching the idle screen — one spoke slightly
-    /// clockwise of vertical, hand at 12:00) and sweeps to 1:00 (angle 30) over
-    /// `listenSweepDuration` while the rolling buffer fills. Holds at 1:00
-    /// until the user presses Measure.
-    private func wheelAngle(elapsed: Double) -> Double {
-        let progress = min(elapsed / MeasurementConstants.listenSweepDuration, 1.0)
-        return progress * 30
     }
 }
 
@@ -505,18 +491,17 @@ struct RecordingScreen: View {
         return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
     }
 
-    /// Wheel resumes at 1:00 (angle 30) and sweeps 330° clockwise back to
-    /// 12:00 (angle 360) over `maxRecordingTime`, maintaining the same 6°/sec
-    /// pace as the listening sweep.
+    /// Wheel starts at 12:00 (angle 0) and sweeps 360° clockwise back to
+    /// 12:00 over `maxRecordingTime`, at 6°/sec.
     private func recordingWheelAngle(elapsed: Double) -> Double {
         let progress = min(elapsed / coordinator.maxRecordingTime, 1.0)
-        return 30 + progress * 330
+        return progress * 360
     }
 
     /// Phase title (line 2) tracks the wheel's wedge boundaries:
-    /// - 0–15 s post-Measure: "Measuring..." (wedge 30°–120°)
-    /// - 15–18 s:              "Analyzing..." (wedge 120°–138°)
-    /// - 18+ s:                "Refining..." (wedge 138°–360°)
+    /// - 0–15 s post-Measure: "Measuring..." (wedge 0°–90°)
+    /// - 15–18 s:              "Analyzing..." (wedge 90°–108°)
+    /// - 18+ s:                "Refining..." (wedge 108°–360°)
     private func phaseTitle(elapsed: Double) -> String {
         let measuringEnd = MeasurementConstants.analysisWindow         // 15 s
         let analyzingEnd = measuringEnd + 3.0                          // +3 s slice

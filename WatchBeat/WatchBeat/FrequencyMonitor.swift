@@ -118,30 +118,45 @@ final class FrequencyMonitor: @unchecked Sendable {
         guard analysisCooldown >= analysisInterval else { return }
         analysisCooldown = 0
 
-        // Don't analyze until we have a full buffer
-        guard samplesAccumulated >= rollingBufferSize else { return }
+        // Grow-window FFT. Use whatever portion of the rolling buffer is
+        // actually populated — don't wait for the full 5 s before showing
+        // bars. Frequency resolution grows from coarse to fine as the
+        // window fills:
+        //   0.5 s → 2.0 Hz   (rates blur together)
+        //   1 s   → 1.0 Hz
+        //   2 s   → 0.5 Hz   (matches rate spacing)
+        //   3 s   → 0.33 Hz  (rates clearly separable)
+        //   5 s   → 0.2 Hz   (full)
+        // The Measure button stays disabled until the listenSweepDuration
+        // gate (3 s) so users can't act on the smeared early bars. Below
+        // ~0.5 s the FFT input is too short to be informative — skip.
+        let populated = min(samplesAccumulated, rollingBufferSize)
+        let minPopulated = Int(sampleRate * 0.5)
+        guard populated >= minPopulated else { return }
+        let bufferToAnalyze = Array(rollingBuffer.suffix(populated))
+        let analyzeLen = populated
 
         // Raw peak (on unfiltered buffer, for mic-level diagnostic)
         var peak: Float = 0
-        vDSP_maxv(rollingBuffer, 1, &peak, vDSP_Length(rollingBufferSize))
+        vDSP_maxv(bufferToAnalyze, 1, &peak, vDSP_Length(analyzeLen))
         var negPeak: Float = 0
-        vDSP_minv(rollingBuffer, 1, &negPeak, vDSP_Length(rollingBufferSize))
+        vDSP_minv(bufferToAnalyze, 1, &negPeak, vDSP_Length(analyzeLen))
         let rawPeakVal = max(peak, -negPeak)
 
         // Highpass filter to match the main pipeline — removes rumble/hum that
         // would otherwise bias the envelope FFT's rate scores.
         let filtered = conditioner.highpassFilter(
-            rollingBuffer,
+            bufferToAnalyze,
             sampleRate: sampleRate,
             cutoff: MeasurementPipeline.highpassCutoffHz
         )
 
         // Compute envelope: rectify + lowpass (moving average) + decimate
-        var rectified = [Float](repeating: 0, count: rollingBufferSize)
-        vDSP_vabs(filtered, 1, &rectified, 1, vDSP_Length(rollingBufferSize))
+        var rectified = [Float](repeating: 0, count: analyzeLen)
+        vDSP_vabs(filtered, 1, &rectified, 1, vDSP_Length(analyzeLen))
 
         let avgWindow = max(3, Int(sampleRate / 100.0)) // ~100 Hz lowpass
-        let smoothedCount = rollingBufferSize - avgWindow + 1
+        let smoothedCount = analyzeLen - avgWindow + 1
         guard smoothedCount > 100 else { return }
 
         var smoothed = [Float](repeating: 0, count: smoothedCount)
