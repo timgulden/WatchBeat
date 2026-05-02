@@ -165,6 +165,7 @@ public struct MeasurementPipeline {
             let medianTick: Float, medianGap: Float
             let snr: Double
             let confirmedFraction: Double
+            let cleanedConfirmed: [Int]
             // Composite score for ranking candidate rates. Four factors:
             //   confirmedFraction → "did the picker find ticks at this rate?"
             //   q (SNR-based)     → "is the audio clean enough to read?"
@@ -435,7 +436,8 @@ public struct MeasurementPipeline {
                 tickEnergies: tickEnergies, gapEnergies: gapEnergies,
                 medianTick: medianTick, medianGap: medianGap,
                 snr: snr,
-                confirmedFraction: cf
+                confirmedFraction: cf,
+                cleanedConfirmed: cleanedConfirmed
             )
         }
 
@@ -516,12 +518,19 @@ public struct MeasurementPipeline {
         // timegraph since they depend on per-tick precision the picker
         // couldn't deliver on this recording.
         let beatErrorReported: Double? = useFftRateFallback ? nil : beAsymmetryMs
+        // Only emit ticks that survived outlier rejection. A pick that
+        // failed the per-class quadratic-MAD test is almost certainly a
+        // misread (noise event in the gap, wrong sub-event, etc.) — not a
+        // real beat that happened at a wildly different time. Don't show
+        // it on the timegraph.
         let tickTimings: [TickTiming]
         if useFftRateFallback {
             tickTimings = []
         } else {
-            tickTimings = (0..<m).map {
-                TickTiming(beatIndex: $0, residualMs: residualsMs[$0], isEvenBeat: $0 % 2 == 0)
+            let kept = Set(winner.cleanedConfirmed)
+            tickTimings = (0..<m).compactMap { i -> TickTiming? in
+                guard kept.contains(i) else { return nil }
+                return TickTiming(beatIndex: i, residualMs: residualsMs[i], isEvenBeat: i % 2 == 0)
             }
         }
 
