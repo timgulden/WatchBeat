@@ -55,6 +55,7 @@ final class MeasurementCoordinator: ObservableObject {
         case analyzing
         case result(MeasurementDisplayData)
         case needsService(NeedsServiceData)
+        case rateConfusion(RateConfusionData)
         case error(String)
     }
 
@@ -64,6 +65,16 @@ final class MeasurementCoordinator: ObservableObject {
     struct NeedsServiceData: Equatable {
         let rateBPH: Int
         let rateErrorSecondsPerDay: Double
+    }
+
+    /// Shown when the picker locks onto a rate that doesn't match any
+    /// standard mechanical rate (>7% off the snapped standard). Could be a
+    /// partially-resolved harmonic, an unusual movement, or a recording
+    /// that captured a non-tick periodic event.
+    struct RateConfusionData: Equatable {
+        let measuredOscHz: Double
+        let snappedRateBPH: Int
+        let snappedRateOscHz: Double
     }
 
     struct MeasurementDisplayData: Equatable {
@@ -435,8 +446,11 @@ final class MeasurementCoordinator: ObservableObject {
         let measuredOscHz = diagnostics.periodEstimate.measuredHz / 2.0
         let snappedOscHz = result.snappedRate.oscillationHz
         if abs(measuredOscHz - snappedOscHz) / snappedOscHz > 0.07 {
-            let hzStr = String(format: "%.2f", measuredOscHz)
-            state = .error("Measuring \(hzStr) Hz, but that doesn't seem right. If you know the watch's beat rate, check whether this matches. Otherwise try repositioning the phone against the caseback.")
+            state = .rateConfusion(RateConfusionData(
+                measuredOscHz: measuredOscHz,
+                snappedRateBPH: result.snappedRate.rawValue,
+                snappedRateOscHz: snappedOscHz
+            ))
             return
         }
 
