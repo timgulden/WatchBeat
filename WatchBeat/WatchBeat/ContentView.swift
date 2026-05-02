@@ -299,7 +299,7 @@ struct IdleScreen: View {
                 tipRow(icon: "waveform", text: "Place the iPhone mic within a few centimeters of your watch.")
                 tipRow(icon: "arrow.right.to.line.compact", text: "Direct contact is not required but can help.")
                 tipRow(icon: "applewatch", text: "On-wrist readings are fine for general use.")
-                tipRow(icon: "arrow.down", text: "For automatic orientation detection, hold the watch against your iPhone as shown below.")
+                tipRow(icon: "arrow.down", text: "For automatic orientation detection, hold the watch against your iPhone as shown.")
                 Image("WatchPositioningDiagram")
                     .resizable()
                     .scaledToFit()
