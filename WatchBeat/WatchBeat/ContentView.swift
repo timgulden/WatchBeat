@@ -8,7 +8,9 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch coordinator.state {
-            case .idle, .monitoring:
+            case .idle:
+                IdleScreen(coordinator: coordinator)
+            case .monitoring:
                 MonitoringScreen(coordinator: coordinator)
             case .recording:
                 RecordingScreen(coordinator: coordinator)
@@ -281,14 +283,53 @@ struct ActionButton: View {
     }
 }
 
-// MARK: - Tips (deferred)
-//
-// The tips/positioning content used to live on a separate IdleScreen
-// shown before listening began. With auto-start monitoring, that screen
-// is gone — first-launch users land directly on the Measure screen.
-// The tips content (positioning diagram, environment guidance) needs a
-// new home; planned for the comprehensive instructions overhaul as a
-// "?" sheet accessible from the Measure screen.
+// MARK: - Idle Screen
+
+struct IdleScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
+        SquareScreenLayout {
+            WatchLogo()
+        } bigSquare: {
+            // Bullets at the top, diagram anchored to the bottom near the
+            // Listen button. The square's size is fixed by SquareScreenLayout
+            // so contents here never shift the wheel above.
+            VStack(alignment: .leading, spacing: 10) {
+                tipRow(icon: "ear", text: "Move to a quiet room away from fans, appliances, and conversation.")
+                tipRow(icon: "iphone.slash", text: "If using a thick phone case, try removing it for better acoustic contact.")
+                tipRow(icon: "arrow.down", text: "Hold the watch against your iPhone as shown below.")
+                Image("WatchPositioningDiagram")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 12)
+        } controls: {
+            VStack(spacing: 10) {
+                ActionButton(title: "Listen") {
+                    coordinator.startMonitoring()
+                }
+                BottomRow()
+            }
+        }
+    }
+
+    private func tipRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundStyle(.blue)
+                .frame(width: 24)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
 
 // MARK: - Monitoring Screen
 
@@ -373,16 +414,8 @@ struct MonitoringScreen: View {
                         coordinator.startMeasurement()
                     }
                     .disabled(!ready)
-                    BottomRow()
+                    BottomRow(cancelAction: { coordinator.stopMonitoring() })
                 }
-            }
-        }
-        // Auto-start monitoring on first appear (and on any return-to-idle
-        // from cancel/result/error paths). Mic permission popup happens here
-        // on first launch — standard for measurement apps.
-        .task(id: coordinator.state) {
-            if case .idle = coordinator.state {
-                coordinator.startMonitoring()
             }
         }
     }
