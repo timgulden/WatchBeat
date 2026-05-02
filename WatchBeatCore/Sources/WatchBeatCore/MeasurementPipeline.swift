@@ -302,15 +302,90 @@ public struct MeasurementPipeline {
             let confirmedFraction = m > 0 ? Double(confirmedBeatIndices.count) / Double(m) : 0
             guard confirmedBeatIndices.count >= 6 else { return nil }
 
-            // Regression on confirmed beats only. Use the original beat
+            // --- Per-class quadratic outlier rejection ---
+            //
+            // A single bad pick (e.g., the picker grabbed a noise event in
+            // the gap between beats) can blow out the linear regression: the
+            // outlier biases the slope, residuals carry a trend, and dots
+            // visibly diverge from the line on the timegraph (see
+            // OddRegression.wav, where one tock at +97 ms dragged the slope
+            // by ~43 s/day).
+            //
+            // We fit a quadratic per class (tick / tock) and use it ONLY as a
+            // flexible reference line for residuals. The quadratic absorbs
+            // genuine rate wandering (so real drift doesn't masquerade as
+            // outliers); the linear fit below uses the cleaned set and is
+            // what gets reported. No mode switching, no fallback.
+            //
+            // Threshold: 3 × 1.4826 × MAD (robust 3σ) per class, floored at
+            // 5 ms so a pathologically tight watch doesn't have its real
+            // jitter clipped.
+            func fitQuadratic(_ idxs: [Int]) -> (Double, Double, Double)? {
+                guard idxs.count >= 4 else { return nil }
+                let n = Double(idxs.count)
+                var s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0
+                var sy = 0.0, sxy = 0.0, sx2y = 0.0
+                for i in idxs {
+                    let x = Double(i); let y = beatPositions[i]
+                    let x2 = x * x
+                    s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2
+                    sy += y; sxy += x * y; sx2y += x2 * y
+                }
+                let det =
+                    n * (s2 * s4 - s3 * s3)
+                  - s1 * (s1 * s4 - s3 * s2)
+                  + s2 * (s1 * s3 - s2 * s2)
+                guard abs(det) > 1e-30 else { return nil }
+                let detA =
+                    sy * (s2 * s4 - s3 * s3)
+                  - s1 * (sxy * s4 - s3 * sx2y)
+                  + s2 * (sxy * s3 - s2 * sx2y)
+                let detB =
+                    n * (sxy * s4 - s3 * sx2y)
+                  - sy * (s1 * s4 - s3 * s2)
+                  + s2 * (s1 * sx2y - sxy * s2)
+                let detC =
+                    n * (s2 * sx2y - sxy * s3)
+                  - s1 * (s1 * sx2y - sxy * s2)
+                  + sy * (s1 * s3 - s2 * s2)
+                return (detA / det, detB / det, detC / det)
+            }
+
+            func cleanClass(_ idxs: [Int]) -> [Int] {
+                guard idxs.count >= 8, let (a, b, c) = fitQuadratic(idxs) else {
+                    return idxs
+                }
+                var residuals: [Double] = []; residuals.reserveCapacity(idxs.count)
+                for i in idxs {
+                    let x = Double(i)
+                    residuals.append(beatPositions[i] - (a + b * x + c * x * x))
+                }
+                let sortedR = residuals.sorted()
+                let medianR = sortedR[sortedR.count / 2]
+                let absDev = residuals.map { abs($0 - medianR) }.sorted()
+                let mad = absDev[absDev.count / 2]
+                let threshold = max(3.0 * 1.4826 * mad, 0.005)  // 5 ms floor
+                var kept: [Int] = []; kept.reserveCapacity(idxs.count)
+                for (k, i) in idxs.enumerated() where abs(residuals[k] - medianR) <= threshold {
+                    kept.append(i)
+                }
+                return kept
+            }
+
+            let evenIdxs = confirmedBeatIndices.filter { $0 % 2 == 0 }
+            let oddIdxs = confirmedBeatIndices.filter { $0 % 2 != 0 }
+            let cleanedConfirmed = (cleanClass(evenIdxs) + cleanClass(oddIdxs)).sorted()
+            guard cleanedConfirmed.count >= 6 else { return nil }
+
+            // Linear regression on the cleaned set. Use the original beat
             // index `i` (not a re-numbering) so the regression's slope is
             // genuinely seconds-per-beat at the candidate rate.
             var sumI: Double = 0, sumT: Double = 0, sumII: Double = 0, sumIT: Double = 0
-            for idx in confirmedBeatIndices {
+            for idx in cleanedConfirmed {
                 let di = Double(idx)
                 sumI += di; sumT += beatPositions[idx]; sumII += di * di; sumIT += di * beatPositions[idx]
             }
-            let cm = Double(confirmedBeatIndices.count)
+            let cm = Double(cleanedConfirmed.count)
             let regDenom = cm * sumII - sumI * sumI
             let slope = (cm * sumIT - sumI * sumT) / regDenom
             let intercept = (sumT - slope * sumI) / cm
@@ -324,7 +399,7 @@ public struct MeasurementPipeline {
                 residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
             }
             var evenSum = 0.0, oddSum = 0.0, evenSumSq = 0.0, oddSumSq = 0.0, evenN = 0, oddN = 0
-            for idx in confirmedBeatIndices {
+            for idx in cleanedConfirmed {
                 let r = residualsMs[idx]
                 if idx % 2 == 0 {
                     evenSum += r; evenSumSq += r * r; evenN += 1
