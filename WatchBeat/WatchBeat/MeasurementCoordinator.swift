@@ -369,33 +369,41 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Routing ladder, in order of decreasing trust about the picker's
-        // output. Each step trusts more than the previous, so the page
-        // shown only blames the watch (Needs Service / Low Confidence)
-        // once we're sure the recording itself was usable.
+        // Routing ladder, in three orthogonal questions:
         //
-        //   1. displayedQuality < minimumDisplayQuality OR
-        //      confirmedFraction < 0.5
-        //        → "Weak Signal" — the recording itself didn't capture
-        //          enough audible tick events to measure. Use displayed
-        //          quality (raw × confirmedFraction) for the gate so the
-        //          routing matches what the user saw on the bar — pure
-        //          room noise reads ~27% displayed and gets routed here,
-        //          rather than passing the gate on a misleading raw 58%.
-        //   2. isLowConfidence (high per-class σ)
-        //        → "Low Analytical Confidence" — ticks ARE present
-        //          (confirmedFraction OK) but their timing is so erratic
-        //          we can't lock on them. Near-stall watch territory.
-        //   3. |rate| > maxPlausibleRateError
-        //        → "Needs Service" — picker is solid AND on the right rate
-        //          AND consistent, but the watch is far out of spec.
-        //   4. otherwise
+        //   1. Are there enough meaningful ticks to analyze?
+        //        → "Weak Signal" if no.
+        //          Tests: raw qualityScore ≥ 30%, confirmedFraction ≥ 50%,
+        //          tickTimings.count ≥ 3 (the timegraph's own minimum).
+        //          The tickTimings check catches FFT-rate-fallback paths
+        //          where σ was high enough to skip per-tick output — pure
+        //          room noise lands here.
+        //
+        //   2. Do the ticks form a coherent pattern?
+        //        → "Low Analytical Confidence" if no.
+        //          Tests: isLowConfidence (high per-class σ from the
+        //          pipeline). Ticks are present but timing is too erratic
+        //          to read — near-stall watch territory.
+        //
+        //   3. Does the rate match the snapped standard cleanly?
+        //        → "Snap Confusion" if not (rate disagrees by >7%).
+        //          Picker locked on a non-standard rate, possibly a
+        //          partially-resolved harmonic.
+        //
+        //   4. Is the rate within plausible spec?
+        //        → "Needs Service" if |rate| > 2000 s/day.
+        //          Picker is solid, rate is real, watch is just far gone.
+        //
+        //   5. otherwise
         //        → Result.
-        let displayedPct = bestResult.map { MeasurementConstants.displayedQuality($0.0) } ?? 0
-        let minDisplayedPct = Int(minimumDisplayQuality * 100)
+        //
+        // Display quality (qualityScore × confirmedFraction) is cosmetic
+        // only — the routing gates use raw fields so the workflow matches
+        // pre-display-change behavior.
         guard let (result, diagnostics, audioBuffer, _) = bestResult,
-              displayedPct >= minDisplayedPct,
-              result.confirmedFraction >= 0.5 else {
+              result.qualityScore >= minimumDisplayQuality,
+              result.confirmedFraction >= 0.5,
+              result.tickTimings.count >= 3 else {
             if let (r, _, buf, _) = bestResult {
                 saveRawAudio(buf, result: r)
             }
@@ -409,20 +417,13 @@ final class MeasurementCoordinator: ObservableObject {
 
         saveRawAudio(audioBuffer, result: result)
 
-        // Low-confidence check runs BEFORE the rate-range check below: if
-        // the picker isn't locking consistently we shouldn't blame the
-        // watch's rate. Note that confirmedFraction has already passed
-        // (≥ 0.5), so we know real ticks ARE present — this is the
-        // "near-stall watch with erratic timing" case Tim flagged, not
-        // a bad-recording case.
-        //
-        // Empty tickTimings → FFT-rate-fallback path fired (high σ, but
-        // confirmedFraction was high enough to skip lowConfidence flag in
-        // the pipeline). On pure room noise this can produce a confident-
-        // looking "rate" with no individual tick data behind it. Treat as
-        // Low Analytical Confidence so the user doesn't see a bogus rate
-        // with an "Insufficient data" timegraph slot.
-        if result.isLowConfidence || result.tickTimings.count < 3 {
+        // Low-confidence check runs BEFORE the snap/rate-range checks
+        // below: if the picker isn't locking consistently we shouldn't
+        // blame the watch's rate. Note that confirmedFraction and
+        // tickTimings.count have already passed Gate 1, so we know real
+        // ticks ARE present — this is the "near-stall watch with erratic
+        // timing" case, not a bad-recording case.
+        if result.isLowConfidence {
             state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
             return
         }
