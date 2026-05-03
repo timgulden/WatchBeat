@@ -22,8 +22,12 @@ struct ContentView: View {
                 NeedsServiceScreen(data: data, coordinator: coordinator)
             case .rateConfusion(let data):
                 RateConfusionScreen(data: data, coordinator: coordinator)
-            case .error(let message):
-                ErrorScreen(message: message, coordinator: coordinator)
+            case .weakSignal(let diagnostic):
+                WeakSignalScreen(diagnostic: diagnostic, coordinator: coordinator)
+            case .lowAnalyticalConfidence:
+                LowAnalyticalConfidenceScreen(coordinator: coordinator)
+            case .micUnavailable(let diagnostic):
+                MicUnavailableScreen(diagnostic: diagnostic, coordinator: coordinator)
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -705,31 +709,18 @@ struct ResultScreen: View {
     }
 }
 
-// MARK: - Error Screen
+// MARK: - Failure Screens
+//
+// Three dedicated screens for the three failure states emitted by the
+// coordinator. Each screen is selected directly by the State case in
+// ContentView's switch — no string-prefix detection. (Phase 2 may extract
+// the shared title + Try-Again-button boilerplate into a FailureScreenLayout.)
 
-struct ErrorScreen: View {
-    let message: String
+struct WeakSignalScreen: View {
+    /// Diagnostic info string (q=…, confirmed=…, etc.) — captured for
+    /// support but not currently displayed to the user.
+    let diagnostic: String
     @ObservedObject var coordinator: MeasurementCoordinator
-
-    /// Mic-unavailable errors are recognized by a known prefix in the
-    /// state's message string (set by MeasurementCoordinator). Only the
-    /// "could not start" / permission paths qualify — a low-amplitude
-    /// recording that completes is still a signal-too-weak result, not
-    /// a mic availability issue.
-    private var isMicUnavailable: Bool {
-        message.hasPrefix("Microphone access denied")
-            || message.hasPrefix("Could not start audio")
-    }
-
-    /// Low analytical confidence errors are emitted by MeasurementCoordinator
-    /// when the matched-filter trim drops too many ticks for a reliable
-    /// reading — the recording was acoustically complex enough that the
-    /// picker couldn't lock on consistently. The watch isn't disorderly
-    /// (escapements are mechanically deterministic); the *recording* is
-    /// hard to read.
-    private var isLowConfidence: Bool {
-        message.hasPrefix("Low analytical confidence")
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -737,12 +728,31 @@ struct ErrorScreen: View {
                 .font(.largeTitle.bold())
                 .padding(.top, 12)
 
-            if isMicUnavailable {
-                micUnavailableContent
-            } else if isLowConfidence {
-                lowConfidenceContent
-            } else {
-                signalTooWeakContent
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.title2)
+                        .foregroundStyle(.orange)
+                    Text("Signal too weak")
+                        .font(.title3.bold())
+                }
+                .padding(.top, 12)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    failureTipRow(icon: "ear", text: "Move to a quieter room. Fans, HVAC, and conversation can mask the ticks.")
+                    failureTipRow(icon: "iphone.slash", text: "Try removing a thick phone case for better acoustic contact.")
+                    failureTipRow(icon: "arrow.down", text: "Press the watch firmly against your iPhone (see diagram).")
+                    failureTipRow(icon: "arrow.left.and.right", text: "Slide the watch left or right to peak the bar for your watch's beat rate.")
+                    failureTipRow(icon: "earpods", text: "For very quiet watches, try wired earbuds with mic — orientation detection won't work.")
+
+                    Image("WatchPositioningDiagram")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
 
             ActionButton(title: "Try Again") {
@@ -752,92 +762,100 @@ struct ErrorScreen: View {
             .padding(.bottom, 40)
         }
     }
+}
 
-    private var lowConfidenceContent: some View {
+struct LowAnalyticalConfidenceScreen: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "questionmark.circle")
-                    .font(.title2)
-                    .foregroundStyle(.orange)
-                Text("Low analytical confidence")
-                    .font(.title3.bold())
-            }
-            .padding(.top, 12)
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
 
-            VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "rotate.3d", text: "Try a different watch position — some positions are easier to read than others.")
-                tipRow(icon: "iphone.gen3", text: "Press the phone firmly against the caseback for solid acoustic contact.")
-                tipRow(icon: "ear", text: "Move to a quieter room — background noise can mask quieter ticks.")
-                tipRow(icon: "wrench.and.screwdriver", text: "If this happens in every position, your watch may be running on insufficient amplitude — consider service.")
-                Spacer(minLength: 0)
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "questionmark.circle")
+                        .font(.title2)
+                        .foregroundStyle(.orange)
+                    Text("Low analytical confidence")
+                        .font(.title3.bold())
+                }
+                .padding(.top, 12)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    failureTipRow(icon: "rotate.3d", text: "Try a different watch position — some positions are easier to read than others.")
+                    failureTipRow(icon: "iphone.gen3", text: "Press the phone firmly against the caseback for solid acoustic contact.")
+                    failureTipRow(icon: "ear", text: "Move to a quieter room — background noise can mask quieter ticks.")
+                    failureTipRow(icon: "wrench.and.screwdriver", text: "If this happens in every position, your watch may be running on insufficient amplitude — consider service.")
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+
+            ActionButton(title: "Try Again") {
+                coordinator.startMonitoring()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
         }
     }
+}
 
-    private var micUnavailableContent: some View {
+struct MicUnavailableScreen: View {
+    /// Optional underlying error string from AVAudioSession (when the engine
+    /// failed to start). Captured for support but not currently displayed.
+    let diagnostic: String?
+    @ObservedObject var coordinator: MeasurementCoordinator
+
+    var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "mic.slash")
-                    .font(.title2)
-                    .foregroundStyle(.orange)
-                Text("Microphone unavailable")
-                    .font(.title3.bold())
-            }
-            .padding(.top, 12)
+            Text("WatchBeat")
+                .font(.largeTitle.bold())
+                .padding(.top, 12)
 
-            VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "phone.down", text: "End any active phone or video call.")
-                tipRow(icon: "waveform", text: "Quit any other recording app holding the microphone (Voice Memos, etc.).")
-                tipRow(icon: "lock.open", text: "Check microphone permission in Settings → Privacy & Security → Microphone.")
-                Spacer(minLength: 0)
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "mic.slash")
+                        .font(.title2)
+                        .foregroundStyle(.orange)
+                    Text("Microphone unavailable")
+                        .font(.title3.bold())
+                }
+                .padding(.top, 12)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    failureTipRow(icon: "phone.down", text: "End any active phone or video call.")
+                    failureTipRow(icon: "waveform", text: "Quit any other recording app holding the microphone (Voice Memos, etc.).")
+                    failureTipRow(icon: "lock.open", text: "Check microphone permission in Settings → Privacy & Security → Microphone.")
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+
+            ActionButton(title: "Try Again") {
+                coordinator.startMonitoring()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
         }
     }
+}
 
-    private var signalTooWeakContent: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.title2)
-                    .foregroundStyle(.orange)
-                Text("Signal too weak")
-                    .font(.title3.bold())
-            }
-            .padding(.top, 12)
-
-            VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "ear", text: "Move to a quieter room. Fans, HVAC, and conversation can mask the ticks.")
-                tipRow(icon: "iphone.slash", text: "Try removing a thick phone case for better acoustic contact.")
-                tipRow(icon: "arrow.down", text: "Press the watch firmly against your iPhone (see diagram).")
-                tipRow(icon: "arrow.left.and.right", text: "Slide the watch left or right to peak the bar for your watch's beat rate.")
-                tipRow(icon: "earpods", text: "For very quiet watches, try wired earbuds with mic — orientation detection won't work.")
-
-                Image("WatchPositioningDiagram")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
-    }
-
-    private func tipRow(icon: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .font(.body)
-                .foregroundStyle(.blue)
-                .frame(width: 24)
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+/// Shared tip-row helper used by all three failure screens. (RateConfusionScreen
+/// and NeedsServiceScreen have their own copies; Phase 2 will consolidate.)
+private func failureTipRow(icon: String, text: String) -> some View {
+    HStack(alignment: .top, spacing: 10) {
+        Image(systemName: icon)
+            .font(.body)
+            .foregroundStyle(.blue)
+            .frame(width: 24)
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

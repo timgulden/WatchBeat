@@ -56,7 +56,9 @@ final class MeasurementCoordinator: ObservableObject {
         case result(MeasurementDisplayData)
         case needsService(NeedsServiceData)
         case rateConfusion(RateConfusionData)
-        case error(String)
+        case weakSignal(diagnostic: String)
+        case lowAnalyticalConfidence
+        case micUnavailable(diagnostic: String?)
     }
 
     /// Shown when a high-quality result is obtained but the rate error is
@@ -202,7 +204,7 @@ final class MeasurementCoordinator: ObservableObject {
             guard let self else { return }
             let granted = await self.captureService.requestPermission()
             guard granted else {
-                self.state = .error("Microphone access denied.")
+                self.state = .micUnavailable(diagnostic: nil)
                 return
             }
             // Fresh buffer on every entry — the previous session's tail is not
@@ -215,7 +217,7 @@ final class MeasurementCoordinator: ObservableObject {
             do {
                 try self.captureService.startRecording()
             } catch {
-                self.state = .error("Could not start audio: \(error.localizedDescription)")
+                self.state = .micUnavailable(diagnostic: "Could not start audio: \(error.localizedDescription)")
                 return
             }
             // Re-init with the real sample rate now that the engine is up.
@@ -420,7 +422,7 @@ final class MeasurementCoordinator: ObservableObject {
             let cf = Int((bestResult?.0.confirmedFraction ?? 0) * 100)
             let sr = Int(captureService.sampleRate)
             let peak = String(format: "%.3f", bestResult?.1.rawPeakAmplitude ?? 0)
-            state = .error("Could not get a clear enough signal. Press the phone firmly against the caseback in a quiet room and watch for the frequency bars.\n\nDiag: q=\(q)% confirmed=\(cf)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
+            state = .weakSignal(diagnostic: "q=\(q)% confirmed=\(cf)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
             return
         }
 
@@ -433,7 +435,7 @@ final class MeasurementCoordinator: ObservableObject {
         // ticks ARE present — this is the "near-stall watch with erratic
         // timing" case, not a bad-recording case.
         if result.isLowConfidence {
-            state = .error("Low analytical confidence. The watch's tick sound was too acoustically complex to lock on consistently in this position. Try a different watch position, press the phone more firmly against the caseback, or move to a quieter room.")
+            state = .lowAnalyticalConfidence
             return
         }
 
