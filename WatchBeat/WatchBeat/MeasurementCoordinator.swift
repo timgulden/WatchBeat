@@ -307,7 +307,6 @@ final class MeasurementCoordinator: ObservableObject {
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError
-        var bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer, ContinuousClock.Instant)?
 
         // Keep the bars live during recording. Polls frequencyMonitor's
         // rate powers at ~5 Hz; the view reads elapsed time via TimelineView.
@@ -320,70 +319,25 @@ final class MeasurementCoordinator: ObservableObject {
             }
         }
 
-        // Wait until the buffer holds a full analysis window.
-        while !Task.isCancelled {
-            let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed > maxRecordingTime { break }
-            let secs = await captureService.secondsCollected()
-            if secs >= analysisWindow { break }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
-
-        // Analysis loop — hard stop at exactly maxRecordingTime.
-        while !Task.isCancelled {
-            let elapsed = (ContinuousClock.now - startTime).asSeconds
-            if elapsed > maxRecordingTime { break }
-
-            if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
-                let (result, diagnostics) = await Task.detached { [pipeline] in
-                    pipeline.measureReferenceWithDiagnostics(buffer)
-                }.value
-
-                let quality = result.qualityScore
-                currentQuality = MeasurementConstants.displayedQuality(result)
-                bestQualitySoFar = max(bestQualitySoFar, currentQuality)
-
-                // Composite score for choosing the "best" window across the
-                // 60-second budget. Trust order:
-                //   confirmed AND non-lowConf  >  confirmed AND lowConf  >  unconfirmed
-                // Within the same trust class, prefer higher quality.
-                func score(_ r: MeasurementResult) -> Double {
-                    var s = r.qualityScore
-                    if r.confirmedFraction >= MeasurementConstants.bestWindowConfirmedTrustThreshold { s += 1.0 }
-                    if !r.isLowConfidence { s += 2.0 }
-                    return s
-                }
-                let scoreNew = score(result)
-                let scoreCur = bestResult.map { score($0.0) } ?? -1
-                if scoreNew > scoreCur {
-                    // Stamp the moment this analysis window ended so we can
-                    // later ask the orientation monitor whether the phone
-                    // stayed in one position across its 15-second span.
-                    bestResult = (result, diagnostics, buffer, ContinuousClock.now)
-                }
-
-                // Auto-stop only on a fully-trustworthy window: high quality,
-                // confirmed (real ticks present), AND not low-confidence
-                // (picker locked on them). A high-SNR result with high
-                // jitter (lowConfidence) used to break the loop early — Tim
-                // wants the loop to keep sliding the window in case a
-                // better one emerges. Same for a high-SNR-but-mostly-noise
-                // recording (low confirmedFraction).
-                if quality >= qualityThreshold
-                    && result.confirmedFraction >= MeasurementConstants.autoStopConfirmedFraction
-                    && !result.isLowConfidence {
-                    break
-                }
+        // Run the analysis loop in a dedicated session. Returns the
+        // best-scoring window across the 60 s budget (or nil if cancelled
+        // / timed out before any window completed).
+        let session = RecordingSession(
+            captureService: captureService,
+            pipeline: pipeline,
+            analysisWindow: analysisWindow,
+            analysisInterval: analysisInterval,
+            maxRecordingTime: maxRecordingTime,
+            qualityThreshold: qualityThreshold,
+            startTime: startTime,
+            progressHandler: { [weak self] current, best in
+                self?.currentQuality = current
+                self?.bestQualitySoFar = best
             }
+        )
+        let bestWindow = await session.run()
 
-            // Sleep until next analysis, capped by remaining budget so we
-            // never overshoot the hard stop.
-            let remaining = maxRecordingTime - (ContinuousClock.now - startTime).asSeconds
-            let sleepSec = min(analysisInterval, max(0.05, remaining))
-            try? await Task.sleep(for: .seconds(sleepSec))
-        }
-
-        // Stop the timer from updating state, THEN cancel it
+        // Stop the live-bar timer, THEN cancel it.
         isRecording = false
         monitorTask?.cancel()
         monitorTask = nil
@@ -394,8 +348,8 @@ final class MeasurementCoordinator: ObservableObject {
         // Capture a position snapshot now, while the orientation monitor is
         // still running, then tear it down. We only need to query it once.
         let windowPosition: WatchPosition? = {
-            guard let (_, _, _, windowEnd) = bestResult else { return nil }
-            return orientationMonitor.position(endingAt: windowEnd,
+            guard let endTime = bestWindow?.endTime else { return nil }
+            return orientationMonitor.position(endingAt: endTime,
                                                duration: analysisWindow)
         }()
         orientationMonitor.stop()
@@ -404,6 +358,10 @@ final class MeasurementCoordinator: ObservableObject {
             state = .idle
             return
         }
+
+        // Bind bestWindow's components to the names the routing ladder uses.
+        let bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer, ContinuousClock.Instant)? =
+            bestWindow.map { ($0.result, $0.diagnostics, $0.buffer, $0.endTime) }
 
         // Routing ladder, in three orthogonal questions:
         //
