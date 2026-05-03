@@ -2,11 +2,11 @@ import Foundation
 import Accelerate
 
 /// Result of tick localization: sub-sample tick times and correlation magnitudes.
-public struct TickLocations: Sendable {
+struct TickLocations: Sendable {
     /// Sub-sample-precise tick times in seconds.
-    public let tickTimesSeconds: [Double]
+    let tickTimesSeconds: [Double]
     /// Peak energy magnitude at each detected tick.
-    public let correlationMagnitudes: [Float]
+    let correlationMagnitudes: [Float]
 }
 
 /// Locates individual ticks in the filtered signal with sub-sample precision.
@@ -17,9 +17,9 @@ public struct TickLocations: Sendable {
 ///
 /// By detecting energy peaks directly (rather than pair-template correlation),
 /// every individual tick and tock is found, preserving beat error asymmetry.
-public struct TickLocator {
+struct TickLocator {
 
-    public init() {}
+    init() {}
 
     /// Locate ticks in the filtered signal.
     public func locate(

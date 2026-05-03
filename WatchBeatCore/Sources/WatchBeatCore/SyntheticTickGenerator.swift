@@ -1,7 +1,7 @@
 import Foundation
 
 /// Shape of a synthetic tick waveform.
-public enum TickShape: Sendable {
+enum TickShape: Sendable {
     /// Short exponentially-decaying burst around 5 kHz (~4 ms).
     case syntheticMechanical
     /// Softer, lower-frequency click typical of a quartz stepper motor.
@@ -9,7 +9,7 @@ public enum TickShape: Sendable {
 }
 
 /// Parameters for generating a synthetic watch signal with known ground truth.
-public struct SyntheticTickParameters: Sendable {
+struct SyntheticTickParameters: Sendable {
     public let beatRate: StandardBeatRate
     public let durationSeconds: Double
     public let sampleRate: Double
@@ -44,14 +44,14 @@ public struct SyntheticTickParameters: Sendable {
 }
 
 /// The result of synthetic signal generation, including the audio and ground truth tick times.
-public struct SyntheticSignal: Sendable {
+struct SyntheticSignal: Sendable {
     public let buffer: AudioBuffer
     public let tickTimesSeconds: [Double]
     public let parameters: SyntheticTickParameters
 }
 
 /// Generates synthetic watch audio signals for testing.
-public struct SyntheticTickGenerator {
+struct SyntheticTickGenerator {
 
     public init() {}
 

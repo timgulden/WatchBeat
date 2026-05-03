@@ -9,9 +9,9 @@ import Accelerate
 /// 2. Precise frequency: FFT of the envelope with parabolic interpolation around
 ///    the peak near the identified rate gives sub-bin frequency resolution.
 ///    The deviation from nominal frequency directly gives rate error in s/day.
-public struct PeriodEstimator {
+struct PeriodEstimator {
 
-    public init() {}
+    init() {}
 
     /// Estimate the beat period from a decimated envelope.
     public func estimate(envelope: AudioBuffer) -> PeriodEstimate {

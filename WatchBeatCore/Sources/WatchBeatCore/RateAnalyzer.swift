@@ -7,12 +7,12 @@ import Accelerate
 /// 1. Assigns each detected tick a beat number based on expected spacing (handles gaps).
 /// 2. Performs iterative outlier rejection using median absolute deviation.
 /// 3. Refits regression on clean ticks only.
-public struct RateAnalyzer {
+struct RateAnalyzer {
 
     /// Maximum number of outlier rejection passes.
     private let maxOutlierPasses = 3
 
-    public init() {}
+    init() {}
 
     /// Analyze tick locations to produce the final measurement result.
     public func analyze(

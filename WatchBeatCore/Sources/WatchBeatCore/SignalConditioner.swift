@@ -3,13 +3,13 @@ import Accelerate
 
 /// Output of signal conditioning: the decimated envelope for period estimation,
 /// plus the bandpass-filtered signal for downstream tick localization.
-public struct ConditionedSignal: Sendable {
+struct ConditionedSignal: Sendable {
     /// Bandpass-filtered signal at the original sample rate.
-    public let filtered: AudioBuffer
+    let filtered: AudioBuffer
     /// Decimated envelope suitable for period estimation.
-    public let envelope: AudioBuffer
+    let envelope: AudioBuffer
     /// The decimation factor used (original rate / envelope rate).
-    public let decimationFactor: Int
+    let decimationFactor: Int
 }
 
 /// Bandpass filters, extracts envelope, and decimates the signal for period estimation.
@@ -21,7 +21,7 @@ public struct SignalConditioner {
     ///
     /// - Parameter input: Raw audio from the microphone.
     /// - Returns: Bandpass-filtered signal and decimated envelope.
-    public func process(_ input: AudioBuffer) -> ConditionedSignal {
+    func process(_ input: AudioBuffer) -> ConditionedSignal {
         // Stage 1: Bandpass filter (200 Hz – 12 kHz, 4th-order Butterworth)
         // Lower cutoff at 200 Hz to capture quartz stepper motor pulses
         // (energy often in 100-500 Hz range) while still rejecting room rumble.

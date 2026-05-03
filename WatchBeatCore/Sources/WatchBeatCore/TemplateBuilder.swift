@@ -2,9 +2,9 @@ import Foundation
 import Accelerate
 
 /// Folds raw signal at the detected period to build an averaged tick template.
-public struct TemplateBuilder {
+struct TemplateBuilder {
 
-    public init() {}
+    init() {}
 
     /// Build a tick template by folding the filtered signal at the detected period.
     ///
