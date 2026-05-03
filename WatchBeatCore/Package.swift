@@ -53,6 +53,10 @@ let package = Package(
             name: "Fourier",
             targets: ["Fourier"]
         ),
+        .executable(
+            name: "FilterAudio",
+            targets: ["FilterAudio"]
+        ),
     ],
     targets: [
         .target(
@@ -110,6 +114,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Accelerate"),
             ]
+        ),
+        .executableTarget(
+            name: "FilterAudio",
+            dependencies: ["WatchBeatCore"]
         ),
         .testTarget(
             name: "WatchBeatCoreTests",
