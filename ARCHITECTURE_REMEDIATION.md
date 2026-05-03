@@ -143,9 +143,9 @@ Surgical changes that unlock other work.
 - [x] Phase 1.1 — Typed error cases (commit `d04b307`)
 - [x] Phase 1.2 — Eliminate tuple tickResiduals (commit `c4a76f6`)
 - [x] Phase 1.3 — Centralize routing thresholds
-- [ ] Phase 2.4 — Split ContentView per screen
-- [ ] Phase 2.5 — Extract RecordingSession
-- [ ] Phase 2.6 — Extract Router
+- [x] Phase 2.4 — Split ContentView per screen (commit `907afe6`)
+- [x] Phase 2.5 — Extract RecordingSession (commit `6ad2216`)
+- [x] Phase 2.6 — Extract Router
 - [ ] Phase 3.7 — Picker protocol + two implementations
 - [ ] Phase 3.8 — Extract shared building blocks
 - [ ] Phase 3.9 — Replace nested closures with named types

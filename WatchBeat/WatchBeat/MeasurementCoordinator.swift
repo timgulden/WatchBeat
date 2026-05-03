@@ -359,92 +359,57 @@ final class MeasurementCoordinator: ObservableObject {
             return
         }
 
-        // Bind bestWindow's components to the names the routing ladder uses.
-        let bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer, ContinuousClock.Instant)? =
-            bestWindow.map { ($0.result, $0.diagnostics, $0.buffer, $0.endTime) }
+        let bestResult = bestWindow?.result
+        let bestDiagnostics = bestWindow?.diagnostics
+        let bestBuffer = bestWindow?.buffer
 
-        // Routing ladder, in three orthogonal questions:
-        //
-        //   1. Are there enough meaningful ticks to analyze?
-        //        → "Weak Signal" if no.
-        //          Tests: raw qualityScore ≥ 30%, confirmedFraction ≥ 50%,
-        //          tickTimings.count ≥ 3 (the timegraph's own minimum).
-        //          The tickTimings check catches FFT-rate-fallback paths
-        //          where σ was high enough to skip per-tick output — pure
-        //          room noise lands here.
-        //
-        //   2. Do the ticks form a coherent pattern?
-        //        → "Low Analytical Confidence" if no.
-        //          Tests: isLowConfidence (high per-class σ from the
-        //          pipeline). Ticks are present but timing is too erratic
-        //          to read — near-stall watch territory.
-        //
-        //   3. Does the rate match the snapped standard cleanly?
-        //        → "Snap Confusion" if not (rate disagrees by >7%).
-        //          Picker locked on a non-standard rate, possibly a
-        //          partially-resolved harmonic.
-        //
-        //   4. Is the rate within plausible spec?
-        //        → "Needs Service" if |rate| > 2000 s/day.
-        //          Picker is solid, rate is real, watch is just far gone.
-        //
-        //   5. otherwise
-        //        → Result.
-        //
-        // Display quality (qualityScore × confirmedFraction) is cosmetic
-        // only — the routing gates use raw fields so the workflow matches
-        // pre-display-change behavior.
-        guard let (result, diagnostics, audioBuffer, _) = bestResult,
-              result.qualityScore >= MeasurementConstants.minimumDisplayQuality,
-              result.confirmedFraction >= MeasurementConstants.weakSignalMinConfirmedFraction,
-              result.tickTimings.count >= MeasurementConstants.weakSignalMinTickCount else {
-            if let (r, _, buf, _) = bestResult {
-                saveRawAudio(buf, result: r)
-            }
-            let q = Int((bestResult?.0.qualityScore ?? 0) * 100)
-            let cf = Int((bestResult?.0.confirmedFraction ?? 0) * 100)
-            let sr = Int(captureService.sampleRate)
-            let peak = String(format: "%.3f", bestResult?.1.rawPeakAmplitude ?? 0)
-            state = .weakSignal(diagnostic: "q=\(q)% confirmed=\(cf)% sr=\(sr)Hz peak=\(peak) mic=\(captureService.lastConfigInfo)")
-            return
+        // Always save raw audio when we have a usable bestResult — for
+        // support / corpus building. Side-effecting; outside the router.
+        if let r = bestResult, let buf = bestBuffer {
+            saveRawAudio(buf, result: r)
         }
 
-        saveRawAudio(audioBuffer, result: result)
+        let decision = Router.classify(
+            bestResult: bestResult,
+            diagnostics: bestDiagnostics,
+            weakSignalContext: Router.WeakSignalContext(
+                sampleRate: Int(captureService.sampleRate),
+                micConfig: captureService.lastConfigInfo
+            ),
+            maxPlausibleRateError: maxRate
+        )
 
-        // Low-confidence check runs BEFORE the snap/rate-range checks
-        // below: if the picker isn't locking consistently we shouldn't
-        // blame the watch's rate. Note that confirmedFraction and
-        // tickTimings.count have already passed Gate 1, so we know real
-        // ticks ARE present — this is the "near-stall watch with erratic
-        // timing" case, not a bad-recording case.
-        if result.isLowConfidence {
+        switch decision {
+        case .weakSignal(let diag):
+            state = .weakSignal(diagnostic: diag)
+        case .lowAnalyticalConfidence:
             state = .lowAnalyticalConfidence
-            return
+        case .rateConfusion(let data):
+            state = .rateConfusion(data)
+        case .needsService(let data):
+            state = .needsService(data)
+        case .displayResult:
+            // Router guarantees bestResult, bestDiagnostics, bestBuffer are
+            // non-nil when it returns .displayResult.
+            guard let result = bestResult,
+                  let diagnostics = bestDiagnostics,
+                  let audioBuffer = bestBuffer else { return }
+            await displayResult(result: result,
+                                diagnostics: diagnostics,
+                                audioBuffer: audioBuffer,
+                                windowPosition: windowPosition)
         }
+    }
 
-        // Snap-confusion: the tick regression's measured rate disagrees sharply
-        // with the chosen standard rate. Adjacent standard rates differ by 10-20%,
-        // so a >7% mismatch means we locked onto the wrong rate. A badly-worn but
-        // correctly-identified watch only drifts a few percent (2000 s/day ≈ 2.3%).
-        let measuredOscHz = diagnostics.periodEstimate.measuredHz / 2.0
-        let snappedOscHz = result.snappedRate.oscillationHz
-        if abs(measuredOscHz - snappedOscHz) / snappedOscHz > MeasurementConstants.snapConfusionMaxFractionalDeviation {
-            state = .rateConfusion(RateConfusionData(
-                measuredOscHz: measuredOscHz,
-                snappedRateBPH: result.snappedRate.rawValue,
-                snappedRateOscHz: snappedOscHz
-            ))
-            return
-        }
-
-        if abs(result.rateErrorSecondsPerDay) > maxRate {
-            state = .needsService(NeedsServiceData(
-                rateBPH: result.snappedRate.rawValue,
-                rateErrorSecondsPerDay: result.rateErrorSecondsPerDay
-            ))
-            return
-        }
-
+    /// Build a display payload for the .result state. Computes pulse widths
+    /// off-main-actor (amplitude estimation is non-trivial work) and
+    /// formats the diagnostic blob the result page may surface for support.
+    private func displayResult(
+        result: MeasurementResult,
+        diagnostics: PipelineDiagnostics,
+        audioBuffer: WatchBeatCore.AudioBuffer,
+        windowPosition: WatchPosition?
+    ) async {
         let pulseWidths = await Task.detached { [amplitudeEstimator] in
             amplitudeEstimator.measurePulseWidths(
                 input: audioBuffer,
