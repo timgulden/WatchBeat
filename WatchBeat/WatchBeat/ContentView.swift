@@ -52,7 +52,10 @@ struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>:
 
     var body: some View {
         GeometryReader { outer in
-            let bigSide = min(outer.size.width - 16, 400)
+            // max(0, ...) guards the initial layout pass where outer.size is
+            // still zero — without it, .frame() gets a negative side and
+            // SwiftUI logs "Invalid frame dimension".
+            let bigSide = max(0, min(outer.size.width - 16, 400))
             VStack(spacing: 0) {
                 Text("WatchBeat")
                     .font(.largeTitle.bold())
