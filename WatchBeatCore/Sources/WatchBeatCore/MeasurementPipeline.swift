@@ -148,63 +148,13 @@ public struct MeasurementPipeline {
         let bandRadiusHz = 0.5
         let bandRadius = max(2, Int(ceil(bandRadiusHz / freqRes)))
 
-        struct Candidate {
-            let snappedRate: StandardBeatRate
-            let fHz: Double
-            let phi: Double
-            let beatPositions: [Double]
-            let slope: Double
-            let intercept: Double
-            let residualsMs: [Double]
-            let evenMean: Double, oddMean: Double
-            let evenStd: Double, oddStd: Double
-            let avgClassStd: Double
-            let beAsymmetryMs: Double
-            let tickEnergies: [Float]
-            let gapEnergies: [Float]
-            let medianTick: Float, medianGap: Float
-            let snr: Double
-            let confirmedFraction: Double
-            let cleanedConfirmed: [Int]
-            // Composite score for ranking candidate rates. Four factors:
-            //   confirmedFraction → "did the picker find ticks at this rate?"
-            //   q (SNR-based)     → "is the audio clean enough to read?"
-            //   sigmaPen          → "are the picks consistent timing-wise?"
-            //   rateConsistency   → "does the regression slope match this
-            //                        candidate's expected period?" — catches
-            //                        harmonic confusion. A 36000-bph candidate
-            //                        running on a 21600-bph watch picks every
-            //                        other real tick; its confirmed-only
-            //                        regression has a slope that matches
-            //                        21600's period, NOT 36000's. Killing
-            //                        score when slope/expected diverges by
-            //                        more than 10% removes the harmonic.
-            //
-            // sigmaPen uses σ² because on lossy recordings the right rate's
-            // σ may be 30-40 ms; a linear penalty barely separates it from a
-            // wrong rate's 50 ms. Quadratic helps without going zero.
-            //   σ = 5  → sigmaPen = 0.50
-            //   σ = 10 → sigmaPen = 0.33
-            //   σ = 30 → sigmaPen = 0.053
-            //   σ = 50 → sigmaPen = 0.020
-            var score: Double {
-                let q = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
-                let sigmaPen = 1.0 / (1.0 + (avgClassStd * avgClassStd) / 50.0)
-                let expectedPeriod = 1.0 / fHz
-                let slopeRatio = expectedPeriod > 0 ? slope / expectedPeriod : 0
-                let logRatio = slopeRatio > 0 ? abs(log(slopeRatio)) : 1.0
-                // Hard cutoff at 10% deviation: harmonic confusion produces
-                // slope ratios near 0.5 or 2.0; clean rate fits hold near 1.0.
-                let rateConsistency = logRatio < 0.1 ? 1.0 : 0.0
-                return confirmedFraction * q * sigmaPen * rateConsistency
-            }
-        }
+        // ReferenceCandidate is defined in its own file (Phase 3.9 extraction).
 
         // Helper: run the FFT-anchored picker for a given band's peak bin
-        // and return a Candidate, or nil if not enough beats.
+        // and return a ReferenceCandidate, or nil if not enough beats.
         let durationSec = Double(n) / sampleRate
         let snrHalfSamples = max(1, Int(0.005 * sampleRate))
-        func candidate(forBin bin: Int, peakMag: Float) -> Candidate? {
+        func candidate(forBin bin: Int, peakMag: Float) -> ReferenceCandidate? {
             // Sub-bin frequency via parabolic interpolation.
             var fHz = Double(bin) * freqRes
             if bin > 1 && bin < halfN - 1 {
@@ -303,90 +253,15 @@ public struct MeasurementPipeline {
             let confirmedFraction = m > 0 ? Double(confirmedBeatIndices.count) / Double(m) : 0
             guard confirmedBeatIndices.count >= 6 else { return nil }
 
-            // --- Per-class quadratic outlier rejection ---
-            //
-            // A single bad pick (e.g., the picker grabbed a noise event in
-            // the gap between beats) can blow out the linear regression: the
-            // outlier biases the slope, residuals carry a trend, and dots
-            // visibly diverge from the line on the timegraph (see
-            // OddRegression.wav, where one tock at +97 ms dragged the slope
-            // by ~43 s/day).
-            //
-            // We fit a quadratic per class (tick / tock) and use it ONLY as a
-            // flexible reference line for residuals. The quadratic absorbs
-            // genuine rate wandering (so real drift doesn't masquerade as
-            // outliers); the linear fit below uses the cleaned set and is
-            // what gets reported. No mode switching, no fallback.
-            //
-            // Threshold: 3 × 1.4826 × MAD (robust 3σ) per class, floored at
-            // 5 ms so a pathologically tight watch doesn't have its real
-            // jitter clipped.
-            func fitQuadratic(_ idxs: [Int]) -> (Double, Double, Double)? {
-                guard idxs.count >= 4 else { return nil }
-                let n = Double(idxs.count)
-                var s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0
-                var sy = 0.0, sxy = 0.0, sx2y = 0.0
-                for i in idxs {
-                    let x = Double(i); let y = beatPositions[i]
-                    let x2 = x * x
-                    s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2
-                    sy += y; sxy += x * y; sx2y += x2 * y
-                }
-                let det =
-                    n * (s2 * s4 - s3 * s3)
-                  - s1 * (s1 * s4 - s3 * s2)
-                  + s2 * (s1 * s3 - s2 * s2)
-                guard abs(det) > 1e-30 else { return nil }
-                let detA =
-                    sy * (s2 * s4 - s3 * s3)
-                  - s1 * (sxy * s4 - s3 * sx2y)
-                  + s2 * (sxy * s3 - s2 * sx2y)
-                let detB =
-                    n * (sxy * s4 - s3 * sx2y)
-                  - sy * (s1 * s4 - s3 * s2)
-                  + s2 * (s1 * sx2y - sxy * s2)
-                let detC =
-                    n * (s2 * sx2y - sxy * s3)
-                  - s1 * (s1 * sx2y - sxy * s2)
-                  + sy * (s1 * s3 - s2 * s2)
-                return (detA / det, detB / det, detC / det)
-            }
-
-            // Iterate fit-detect-drop. A single huge outlier distorts the
-            // quadratic itself, throwing nearby clean points far from its
-            // (corrupted) curve and over-rejecting. After dropping the
-            // worst, the next quadratic fits the cleaner data better, and
-            // residuals are evaluated against the ORIGINAL idxs — so points
-            // dropped on iter 1 can be re-included on iter 2 if the better
-            // quadratic shows they were fine. Converges within 2-3 passes.
-            func cleanClass(_ idxs: [Int]) -> [Int] {
-                guard idxs.count >= 8 else { return idxs }
-                var kept = idxs
-                for _ in 0..<5 {
-                    guard let (a, b, c) = fitQuadratic(kept) else { return kept }
-                    var residuals: [Double] = []; residuals.reserveCapacity(idxs.count)
-                    for i in idxs {
-                        let x = Double(i)
-                        residuals.append(beatPositions[i] - (a + b * x + c * x * x))
-                    }
-                    let sortedR = residuals.sorted()
-                    let medianR = sortedR[sortedR.count / 2]
-                    let absDev = residuals.map { abs($0 - medianR) }.sorted()
-                    let mad = absDev[absDev.count / 2]
-                    let threshold = max(3.0 * 1.4826 * mad, 0.005)  // 5 ms floor
-                    var nextKept: [Int] = []; nextKept.reserveCapacity(idxs.count)
-                    for (k, i) in idxs.enumerated() where abs(residuals[k] - medianR) <= threshold {
-                        nextKept.append(i)
-                    }
-                    if nextKept == kept { return kept }
-                    kept = nextKept
-                }
-                return kept
-            }
-
+            // Per-class quadratic outlier rejection. See OutlierRejector
+            // for the algorithm and rationale; we fit a quadratic per
+            // class (tick / tock) and use it ONLY as a flexible reference
+            // line for residuals. The linear fit below uses the cleaned
+            // set and is what gets reported. No mode switching, no fallback.
+            let rejector = OutlierRejector(beatPositions: beatPositions)
             let evenIdxs = confirmedBeatIndices.filter { $0 % 2 == 0 }
             let oddIdxs = confirmedBeatIndices.filter { $0 % 2 != 0 }
-            let cleanedConfirmed = (cleanClass(evenIdxs) + cleanClass(oddIdxs)).sorted()
+            let cleanedConfirmed = (rejector.clean(evenIdxs) + rejector.clean(oddIdxs)).sorted()
             guard cleanedConfirmed.count >= 6 else { return nil }
 
             // Linear regression on the cleaned set. Use the original beat
@@ -434,7 +309,7 @@ public struct MeasurementPipeline {
             let snr = medianGap > 0 ? Double(medianTick / medianGap) : 100.0
             let cf = confirmedFraction
 
-            return Candidate(
+            return ReferenceCandidate(
                 snappedRate: snappedRate,
                 fHz: fHz, phi: phi,
                 beatPositions: beatPositions,
@@ -453,7 +328,7 @@ public struct MeasurementPipeline {
         }
 
         // For each standard band, find the peak bin and run the picker.
-        var candidates: [Candidate] = []
+        var candidates: [ReferenceCandidate] = []
         for hz in standardHzs {
             let center = Int(round(hz / freqRes))
             let lo = max(1, center - bandRadius)
