@@ -211,7 +211,6 @@ struct TimegraphView: View {
                     // The residuals from regression have the slope removed.
                     // We add it back for the visual so the user sees the drift.
 
-                    let n = residuals.count
                     let driftPerBeatMs = rateErrorPerDay / 86400.0 / beatRateHz * 1000.0
 
                     // Compute all Y values (cumulative deviation)
@@ -240,8 +239,6 @@ struct TimegraphView: View {
 
                     let firstX: CGFloat = margin
                     let lastX: CGFloat = w - margin
-                    let firstY = centerY - CGFloat((firstCumDrift - yCenter) / yWindowMs) * plotHeight
-                    let lastY = centerY - CGFloat((lastCumDrift - yCenter) / yWindowMs) * plotHeight
 
                     // Bands and regression line wrap modulo yWindowMs in dev
                     // space, exactly like the dots. The regression line is

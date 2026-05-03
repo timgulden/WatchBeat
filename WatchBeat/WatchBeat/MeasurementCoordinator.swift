@@ -281,7 +281,6 @@ final class MeasurementCoordinator: ObservableObject {
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError
         var bestResult: (MeasurementResult, PipelineDiagnostics, WatchBeatCore.AudioBuffer, ContinuousClock.Instant)?
-        var bestQuality: Double = 0
 
         // Keep the bars live during recording. Polls frequencyMonitor's
         // rate powers at ~5 Hz; the view reads elapsed time via TimelineView.
@@ -330,7 +329,6 @@ final class MeasurementCoordinator: ObservableObject {
                 let scoreNew = score(result)
                 let scoreCur = bestResult.map { score($0.0) } ?? -1
                 if scoreNew > scoreCur {
-                    bestQuality = quality
                     // Stamp the moment this analysis window ended so we can
                     // later ask the orientation monitor whether the phone
                     // stayed in one position across its 15-second span.
