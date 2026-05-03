@@ -26,6 +26,36 @@ enum MeasurementConstants {
     /// Set generously to accommodate badly-worn movements that still run.
     static let maxPlausibleRateError: Double = 2000.0
 
+    // MARK: - Routing & scoring thresholds
+    //
+    // All gates the recording loop and routing ladder evaluate, in one
+    // place. Numbers here read like a spec; routing code reads as
+    // intent rather than as arithmetic.
+
+    /// Auto-stop also requires confirmedFraction at or above this — high
+    /// SNR alone isn't enough to declare success; we need most beat windows
+    /// to have shown a real tick.
+    static let autoStopConfirmedFraction: Double = 0.80
+
+    /// Best-window selection bonus: any candidate window that confirmed
+    /// at least this fraction of beats earns a trust bonus over those
+    /// that didn't, even at lower raw quality.
+    static let bestWindowConfirmedTrustThreshold: Double = 0.5
+
+    /// Weak Signal gate: minimum confirmedFraction. Below this we treat
+    /// the recording as "too few real ticks to measure" regardless of SNR.
+    static let weakSignalMinConfirmedFraction: Double = 0.5
+
+    /// Weak Signal gate: minimum tickTimings count after outlier rejection.
+    /// 3 is the absolute floor where the timegraph is even drawable; below
+    /// that we have no per-tick evidence to display.
+    static let weakSignalMinTickCount: Int = 3
+
+    /// Snap Confusion gate: maximum allowed |measured − snapped| / snapped.
+    /// Adjacent standard rates differ by ≥10%, so 7% mismatch reliably
+    /// indicates we locked onto something off-grid (harmonic, sub-event).
+    static let snapConfusionMaxFractionalDeviation: Double = 0.07
+
     /// Display-only quality percentage. Multiplies the SNR-based qualityScore
     /// by confirmedFraction so a window of pure room noise (high SNR from
     /// per-window argmax peaks but few windows passing the 2× medianGap
@@ -319,7 +349,7 @@ final class MeasurementCoordinator: ObservableObject {
                 // Within the same trust class, prefer higher quality.
                 func score(_ r: MeasurementResult) -> Double {
                     var s = r.qualityScore
-                    if r.confirmedFraction >= 0.5 { s += 1.0 }
+                    if r.confirmedFraction >= MeasurementConstants.bestWindowConfirmedTrustThreshold { s += 1.0 }
                     if !r.isLowConfidence { s += 2.0 }
                     return s
                 }
@@ -340,7 +370,7 @@ final class MeasurementCoordinator: ObservableObject {
                 // better one emerges. Same for a high-SNR-but-mostly-noise
                 // recording (low confirmedFraction).
                 if quality >= qualityThreshold
-                    && result.confirmedFraction >= 0.8
+                    && result.confirmedFraction >= MeasurementConstants.autoStopConfirmedFraction
                     && !result.isLowConfidence {
                     break
                 }
@@ -407,9 +437,9 @@ final class MeasurementCoordinator: ObservableObject {
         // only — the routing gates use raw fields so the workflow matches
         // pre-display-change behavior.
         guard let (result, diagnostics, audioBuffer, _) = bestResult,
-              result.qualityScore >= minimumDisplayQuality,
-              result.confirmedFraction >= 0.5,
-              result.tickTimings.count >= 3 else {
+              result.qualityScore >= MeasurementConstants.minimumDisplayQuality,
+              result.confirmedFraction >= MeasurementConstants.weakSignalMinConfirmedFraction,
+              result.tickTimings.count >= MeasurementConstants.weakSignalMinTickCount else {
             if let (r, _, buf, _) = bestResult {
                 saveRawAudio(buf, result: r)
             }
@@ -440,7 +470,7 @@ final class MeasurementCoordinator: ObservableObject {
         // correctly-identified watch only drifts a few percent (2000 s/day ≈ 2.3%).
         let measuredOscHz = diagnostics.periodEstimate.measuredHz / 2.0
         let snappedOscHz = result.snappedRate.oscillationHz
-        if abs(measuredOscHz - snappedOscHz) / snappedOscHz > 0.07 {
+        if abs(measuredOscHz - snappedOscHz) / snappedOscHz > MeasurementConstants.snapConfusionMaxFractionalDeviation {
             state = .rateConfusion(RateConfusionData(
                 measuredOscHz: measuredOscHz,
                 snappedRateBPH: result.snappedRate.rawValue,

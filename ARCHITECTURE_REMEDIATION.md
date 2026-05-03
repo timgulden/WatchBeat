@@ -140,9 +140,9 @@ Surgical changes that unlock other work.
 
 ## Status
 
-- [ ] Phase 1.1 — Typed error cases
-- [ ] Phase 1.2 — Eliminate tuple tickResiduals
-- [ ] Phase 1.3 — Centralize routing thresholds
+- [x] Phase 1.1 — Typed error cases (commit `d04b307`)
+- [x] Phase 1.2 — Eliminate tuple tickResiduals (commit `c4a76f6`)
+- [x] Phase 1.3 — Centralize routing thresholds
 - [ ] Phase 2.4 — Split ContentView per screen
 - [ ] Phase 2.5 — Extract RecordingSession
 - [ ] Phase 2.6 — Extract Router
