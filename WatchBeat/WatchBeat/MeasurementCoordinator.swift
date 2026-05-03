@@ -168,15 +168,22 @@ final class MeasurementCoordinator: ObservableObject {
 
     private let captureService = AudioCaptureService()
     private let frequencyMonitor = FrequencyMonitor()
-    private let pipeline = MeasurementPipeline()
-    private let amplitudeEstimator = AmplitudeEstimator()
+    /// Pipeline injected via init for testability — production passes
+    /// MeasurementPipeline (default), tests can pass a mock that returns
+    /// canned results.
+    private let pipeline: BeatPicker
+    /// Amplitude estimator injected via init for the same reason.
+    private let amplitudeEstimator: AmplitudeMeasuring
     private let orientationMonitor = OrientationMonitor()
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
     private static let defaultLiftAngle: Double = 52.0
 
-    init() {
+    init(pipeline: BeatPicker = MeasurementPipeline(),
+         amplitudeEstimator: AmplitudeMeasuring = AmplitudeEstimator()) {
+        self.pipeline = pipeline
+        self.amplitudeEstimator = amplitudeEstimator
         let stored = UserDefaults.standard.double(forKey: "liftAngleDegrees")
         self.liftAngleDegrees = stored > 0 ? stored : Self.defaultLiftAngle
         orientationMonitor.onPositionChange = { [weak self] pos in

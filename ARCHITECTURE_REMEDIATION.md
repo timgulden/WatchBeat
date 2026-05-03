@@ -146,12 +146,12 @@ Surgical changes that unlock other work.
 - [x] Phase 2.4 — Split ContentView per screen (commit `907afe6`)
 - [x] Phase 2.5 — Extract RecordingSession (commit `6ad2216`)
 - [x] Phase 2.6 — Extract Router
-- [ ] Phase 3.7 — Picker protocol + two implementations
-- [ ] Phase 3.8 — Extract shared building blocks
+- [x] Phase 3.7 — Picker protocol (BeatPicker + AmplitudeMeasuring); paired with 4.10
+- [ ] Phase 3.8 — Extract shared building blocks (deferred — see notes)
 - [x] Phase 3.9 — Replace nested closures with named types (commits `fc530e6`, this commit)
   - Sub-step: Reference picker also moved to its own file (ReferencePipeline.swift) as
     an extension on MeasurementPipeline — same intent (decompose the giant function)
-- [ ] Phase 4.10 — Dependency injection for coordinator
+- [x] Phase 4.10 — Dependency injection for coordinator (BeatPicker + AmplitudeMeasuring)
 - [ ] Phase 4.11 — Diagnostics as structured side channel
 
 Update this list as items complete. Phases need not be sequential after

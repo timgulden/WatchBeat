@@ -16,7 +16,7 @@ import WatchBeatCore
 /// the loop cleanly without a final result.
 struct RecordingSession {
     let captureService: AudioCaptureService
-    let pipeline: MeasurementPipeline
+    let pipeline: BeatPicker
     let analysisWindow: Double
     let analysisInterval: Double
     let maxRecordingTime: Double
@@ -63,7 +63,7 @@ struct RecordingSession {
 
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
                 let (result, diagnostics) = await Task.detached { [pipeline] in
-                    pipeline.measureReferenceWithDiagnostics(buffer)
+                    pipeline.pick(buffer)
                 }.value
 
                 let currentDisplayedPercent = MeasurementConstants.displayedQuality(result)
