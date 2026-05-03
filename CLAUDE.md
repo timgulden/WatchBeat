@@ -9,11 +9,12 @@ This is a solo project with no PR review process. Push directly to `main` is the
 ## Project Structure
 
 - **`WatchBeatCore/`** — Standalone Swift Package containing the entire DSP pipeline. Has **no iOS dependencies** (no AVFoundation, UIKit, SwiftUI). Depends only on `Accelerate` and `Foundation`. This is the enforcement boundary: if it imports an iOS framework, the design is wrong.
-  - **`Sources/WatchBeatCore/`** — Pipeline stages and data types.
+  - **`Sources/WatchBeatCore/`** — Pipeline stages and data types. Notable files: `MeasurementPipeline.swift` (production picker + shared helpers), `ReferencePipeline.swift` (Reference picker as an extension on MeasurementPipeline), `ReferenceCandidate.swift` (the candidate-ranking data type), `OutlierRejector.swift` (per-class quadratic-MAD outlier rejection used by the Reference picker), `AmplitudeEstimator.swift`, `MatchedFilterRefinement.swift`.
   - **`Sources/AnalyzeSamples/`** — CLI tool for offline analysis of saved WAV recordings.
   - **`Tests/WatchBeatCoreTests/`** — Synthetic signal tests, no device needed.
-- **`WatchBeat/`** — Xcode iOS app project. Integration layer: audio capture (AVAudioEngine), real-time frequency monitor, session management, and SwiftUI views. Depends on `WatchBeatCore` as a local package.
+- **`WatchBeat/`** — Xcode iOS app project. Integration layer organized as one screen per file (per UI/UX principle 9). Notable files: `ContentView.swift` (state switch), `MeasurementCoordinator.swift` (state machine + lifecycle), `RecordingSession.swift` (post-Measure analysis loop, extracted from coordinator), `Router.swift` (pure routing-decision classifier), per-screen files (`IdleScreen.swift`, `MonitoringScreen.swift`, `RecordingScreen.swift`, `ResultScreen.swift`, `WeakSignalScreen.swift`, `LowAnalyticalConfidenceScreen.swift`, `MicUnavailableScreen.swift`, `NeedsServiceScreen.swift`, `RateConfusionScreen.swift`, `AnalyzingScreen.swift`), shared building blocks (`SquareScreenLayout.swift`, `WatchLogo.swift`, `SharedComponents.swift`), supporting (`AudioCaptureService.swift`, `FrequencyMonitor.swift`, `OrientationMonitor.swift`, `WatchPosition.swift`, `FrequencyBarsView.swift`, `ResultViews.swift`).
 - **`watchbeat-spec.md`** — Technical specification and algorithm reference.
+- **`ARCHITECTURE_REMEDIATION.md`** — Phased plan for ongoing code-quality improvements. Phases 1 and 2 complete; 3.9 complete; 3.7 and 3.8 deferred.
 
 ## Build & Test
 
