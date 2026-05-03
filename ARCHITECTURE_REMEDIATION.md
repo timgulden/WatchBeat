@@ -148,7 +148,9 @@ Surgical changes that unlock other work.
 - [x] Phase 2.6 — Extract Router
 - [ ] Phase 3.7 — Picker protocol + two implementations
 - [ ] Phase 3.8 — Extract shared building blocks
-- [ ] Phase 3.9 — Replace nested closures with named types
+- [x] Phase 3.9 — Replace nested closures with named types (commits `fc530e6`, this commit)
+  - Sub-step: Reference picker also moved to its own file (ReferencePipeline.swift) as
+    an extension on MeasurementPipeline — same intent (decompose the giant function)
 - [ ] Phase 4.10 — Dependency injection for coordinator
 - [ ] Phase 4.11 — Diagnostics as structured side channel
 
