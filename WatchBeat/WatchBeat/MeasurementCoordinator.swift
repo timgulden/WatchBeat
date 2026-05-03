@@ -88,7 +88,7 @@ final class MeasurementCoordinator: ObservableObject {
         let qualityPercent: Int
         let tickCount: Int
         let diagnosticText: String
-        let tickResiduals: [(index: Int, residualMs: Double, isEven: Bool)]
+        let tickTimings: [TickTiming]
         /// Escapement pulse widths for amplitude estimation (independent of lift angle).
         let pulseWidths: PulseWidthEstimate?
         /// True when matched-filter trim dropped too many ticks for a
@@ -100,11 +100,6 @@ final class MeasurementCoordinator: ObservableObject {
         /// this result, or nil if the phone moved between positions during
         /// that window (in which case no position is displayed).
         let watchPosition: WatchPosition?
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.rateBPH == rhs.rateBPH && lhs.rateError == rhs.rateError &&
-            lhs.qualityPercent == rhs.qualityPercent && lhs.tickCount == rhs.tickCount
-        }
     }
 
     @Published var state: State = .idle
@@ -486,10 +481,6 @@ final class MeasurementCoordinator: ObservableObject {
         Top rates: \(scoresText)
         """
 
-        let tickResiduals = result.tickTimings.map {
-            (index: $0.beatIndex, residualMs: $0.residualMs, isEven: $0.isEvenBeat)
-        }
-
         let displayData = MeasurementDisplayData(
             rateBPH: result.snappedRate.rawValue,
             rateError: result.rateErrorSecondsPerDay,
@@ -499,7 +490,7 @@ final class MeasurementCoordinator: ObservableObject {
             qualityPercent: MeasurementConstants.displayedQuality(result),
             tickCount: result.tickCount,
             diagnosticText: diagText,
-            tickResiduals: tickResiduals,
+            tickTimings: result.tickTimings,
             pulseWidths: pulseWidths,
             isLowConfidence: result.isLowConfidence,
             watchPosition: windowPosition

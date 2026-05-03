@@ -671,7 +671,7 @@ struct ResultScreen: View {
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
                         TimegraphView(
-                            residuals: data.tickResiduals,
+                            residuals: data.tickTimings,
                             rateErrorPerDay: data.rateError,
                             beatRateHz: Double(data.rateBPH) / 3600.0
                         )

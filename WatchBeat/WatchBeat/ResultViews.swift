@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchBeatCore
 
 // MARK: - Rate Error Dial
 
@@ -183,7 +184,7 @@ struct Arc: Shape {
 // MARK: - Timegraph
 
 struct TimegraphView: View {
-    let residuals: [(index: Int, residualMs: Double, isEven: Bool)]
+    let residuals: [TickTiming]
     let rateErrorPerDay: Double
     let beatRateHz: Double
 
@@ -216,7 +217,7 @@ struct TimegraphView: View {
                     // Compute all Y values (cumulative deviation)
                     var yValues = [Double]()
                     for tick in residuals {
-                        let cumDrift = driftPerBeatMs * Double(tick.index)
+                        let cumDrift = driftPerBeatMs * Double(tick.beatIndex)
                         yValues.append(tick.residualMs + cumDrift)
                     }
 
@@ -232,8 +233,8 @@ struct TimegraphView: View {
 
                     // Regression line spans the first to last visible beat,
                     // representing the measured rate slope through the data.
-                    let firstIdx = Double(residuals.first?.index ?? 0)
-                    let lastIdx = Double(residuals.last?.index ?? 0)
+                    let firstIdx = Double(residuals.first?.beatIndex ?? 0)
+                    let lastIdx = Double(residuals.last?.beatIndex ?? 0)
                     let firstCumDrift = driftPerBeatMs * firstIdx
                     let lastCumDrift = driftPerBeatMs * lastIdx
 
@@ -327,12 +328,12 @@ struct TimegraphView: View {
                     // Plot dots
                     let dotSize: CGFloat = 3.0
 
-                    let idxFirst = Double(residuals.first?.index ?? 0)
-                    let idxLast = Double(residuals.last?.index ?? 0)
+                    let idxFirst = Double(residuals.first?.beatIndex ?? 0)
+                    let idxLast = Double(residuals.last?.beatIndex ?? 0)
                     let idxSpan = max(idxLast - idxFirst, 1)
 
                     for (i, tick) in residuals.enumerated() {
-                        let xFrac = (Double(tick.index) - idxFirst) / idxSpan
+                        let xFrac = (Double(tick.beatIndex) - idxFirst) / idxSpan
                         let x = margin + (w - 2 * margin) * CGFloat(xFrac)
 
                         // Wrap within the fixed window
@@ -344,7 +345,7 @@ struct TimegraphView: View {
                         let yNorm = dev / yWindowMs  // -0.5 to +0.5
                         let y = centerY - CGFloat(yNorm) * plotHeight
 
-                        let color: Color = tick.isEven ? .blue : .cyan
+                        let color: Color = tick.isEvenBeat ? .blue : .cyan
                         let rect = CGRect(x: x - dotSize/2, y: y - dotSize/2,
                                           width: dotSize, height: dotSize)
                         context.fill(Ellipse().path(in: rect), with: .color(color))

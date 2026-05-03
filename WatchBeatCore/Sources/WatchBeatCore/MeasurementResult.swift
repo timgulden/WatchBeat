@@ -1,7 +1,7 @@
 import Foundation
 
 /// A single tick's timing data for the timegrapher plot.
-public struct TickTiming: Sendable {
+public struct TickTiming: Sendable, Equatable {
     /// Beat index (0, 1, 2, ...).
     public let beatIndex: Int
     /// Residual from regression line in milliseconds.

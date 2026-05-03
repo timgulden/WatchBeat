@@ -4,7 +4,7 @@ import Accelerate
 /// Pulse width measurements from the escapement sounds, independent of lift angle.
 /// The lift angle is only needed for the final amplitude formula, which is trivial
 /// and can be computed in the UI layer.
-public struct PulseWidthEstimate: Sendable {
+public struct PulseWidthEstimate: Sendable, Equatable {
     /// Tick (even beat) pulse width in milliseconds.
     public let tickPulseMs: Double?
     /// Tock (odd beat) pulse width in milliseconds.
