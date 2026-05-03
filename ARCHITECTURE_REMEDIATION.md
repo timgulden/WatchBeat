@@ -147,12 +147,24 @@ Surgical changes that unlock other work.
 - [x] Phase 2.5 — Extract RecordingSession (commit `6ad2216`)
 - [x] Phase 2.6 — Extract Router
 - [x] Phase 3.7 — Picker protocol (BeatPicker + AmplitudeMeasuring); paired with 4.10
-- [ ] Phase 3.8 — Extract shared building blocks (deferred — see notes)
+- [x] Phase 3.8 (partial) — Pure utility helpers extracted to PipelineUtilities.swift
+  - movingAverage, sortedMedian, sortedMedianInt, nextPowerOfTwo are now top-level
+    functions (no class membership). Used by both pickers, no state needed.
+  - Bigger building-block extractions (envelope FFT, regression) deferred — both
+    pickers compute these slightly differently; consolidating without behavior
+    change requires careful equivalence proofs that aren't worth doing
+    speculatively. Will revisit when a specific bug or duplication motivates it.
 - [x] Phase 3.9 — Replace nested closures with named types (commits `fc530e6`, this commit)
   - Sub-step: Reference picker also moved to its own file (ReferencePipeline.swift) as
     an extension on MeasurementPipeline — same intent (decompose the giant function)
 - [x] Phase 4.10 — Dependency injection for coordinator (BeatPicker + AmplitudeMeasuring)
-- [ ] Phase 4.11 — Diagnostics as structured side channel
+- [ ] Phase 4.11 — Diagnostics as structured side channel (DEFERRED — see notes)
+  - The "tuple is bolted on" smell isn't actually painful in practice. The iOS
+    app discards the diagnostics it doesn't need; AnalyzeSamples uses them in
+    full. Wrapping the (MeasurementResult, PipelineDiagnostics) tuple in a
+    MeasurementOutcome struct would add a layer without revealing intent. The
+    BeatPicker protocol's tuple return makes the contract explicit. Worth
+    revisiting if a third caller appears with different needs.
 
 Update this list as items complete. Phases need not be sequential after
 Phase 1 — Phase 2 and Phase 3 work can be interleaved, but each item

@@ -763,34 +763,7 @@ public struct MeasurementPipeline {
     /// where `half = windowSamples / 2`. Window widths are tracked explicitly so
     /// edge samples are correctly averaged over their clipped window rather than
     /// biased by a fixed divisor.
-    func movingAverage(of x: [Float], windowSamples: Int) -> [Float] {
-        let n = x.count
-        guard windowSamples > 1, n > 0 else { return x }
-        let half = windowSamples / 2
-        var out = [Float](repeating: 0, count: n)
-        var runSum: Float = 0
-        var left = 0
-        var right = -1
-        while right + 1 <= min(n - 1, half) {
-            right += 1
-            runSum += x[right]
-        }
-        for i in 0..<n {
-            let width = right - left + 1
-            out[i] = width > 0 ? runSum / Float(width) : 0
-            let nextRight = min(n - 1, i + 1 + half)
-            while right < nextRight {
-                right += 1
-                runSum += x[right]
-            }
-            let nextLeft = max(0, i + 1 - half)
-            while left < nextLeft {
-                runSum -= x[left]
-                left += 1
-            }
-        }
-        return out
-    }
+    // movingAverage moved to PipelineUtilities.swift (Phase 3.8)
 
     /// Centroid (first moment) of a segment of `y` with its minimum subtracted
     /// as a baseline. Returns absolute sub-sample position, or nil if the
@@ -1193,11 +1166,7 @@ public struct MeasurementPipeline {
 
     // MARK: - Helpers
 
-    private func sortedMedianInt(_ values: [Int]) -> Int {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        return sorted[sorted.count / 2]
-    }
+    // sortedMedianInt moved to PipelineUtilities.swift (Phase 3.8)
 
     private struct RegressionResult {
         let slope: Double?
@@ -1234,15 +1203,5 @@ public struct MeasurementPipeline {
         return RegressionResult(slope: slope, intercept: intercept, residualStd: residualStd)
     }
 
-    private func sortedMedian(_ values: [Float]) -> Float {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        return sorted[sorted.count / 2]
-    }
-
-    func nextPowerOfTwo(_ n: Int) -> Int {
-        var v = n - 1
-        v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16
-        return v + 1
-    }
+    // sortedMedian and nextPowerOfTwo moved to PipelineUtilities.swift (Phase 3.8)
 }
