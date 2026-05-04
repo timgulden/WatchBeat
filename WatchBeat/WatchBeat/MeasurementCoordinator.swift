@@ -495,7 +495,7 @@ final class MeasurementCoordinator: ObservableObject {
 
     private func formatRateError(_ value: Double) -> String {
         let sign = value >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", value)) s/day"
+        return "\(sign)\(Int(value.rounded())) s/day"
     }
 
     private func formatBeatError(_ value: Double) -> String {

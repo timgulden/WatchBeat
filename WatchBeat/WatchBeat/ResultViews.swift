@@ -151,10 +151,7 @@ struct RateDialView: View {
 
     private func formatError(_ value: Double) -> String {
         let sign = value >= 0 ? "+" : ""
-        if abs(value) >= 100 {
-            return "\(sign)\(Int(value))"
-        }
-        return "\(sign)\(String(format: "%.1f", value))"
+        return "\(sign)\(Int(value.rounded()))"
     }
 
     private func errorFontSize(_ value: Double, dialSize: CGFloat) -> CGFloat {
