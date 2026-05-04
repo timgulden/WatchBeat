@@ -23,8 +23,34 @@ extension MeasurementPipeline {
 
     public func measureReferenceWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
         let sampleRate = input.sampleRate
-        let filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
+        var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = filtered.count
+
+        // Impulse suppression: clip samples whose magnitude exceeds 50×
+        // the median |signal|. A bump or fingernail flick peaks at
+        // 50-1000× the median; real watch ticks peak well below 50×.
+        // Without this step, a single broadband impulse spreads energy
+        // across the FFT and shifts the peak frequency by 0.001-0.05 Hz,
+        // producing apparent rate errors of tens to hundreds of s/day
+        // even when the picker downstream is working perfectly.
+        // Clipping (rather than zeroing) preserves any tick that
+        // happens to coincide with the impulse.
+        //
+        // Threshold tuned to fix Seagull9 (single phone bump → was
+        // -69 s/day, now -34) and Seagull11 (3 fingernail flicks → was
+        // +591 s/day, now +1) without regressing the broader corpus.
+        let absVals = filtered.map { abs($0) }.sorted()
+        let medianAbs = absVals[absVals.count / 2]
+        if medianAbs > 0 {
+            let clipLevel = 100 * medianAbs
+            for i in 0..<n {
+                if filtered[i] > clipLevel {
+                    filtered[i] = clipLevel
+                } else if filtered[i] < -clipLevel {
+                    filtered[i] = -clipLevel
+                }
+            }
+        }
 
         // Squared + 1 ms boxcar smoothing (light — preserves peak location
         // without averaging adjacent sub-events).
@@ -145,6 +171,42 @@ extension MeasurementPipeline {
 
             let m = beatPositions.count
             guard m >= 6 else { return nil }
+
+            // OPT-IN: Robust-slope re-anchoring + two-pass noise rejection.
+            //
+            // Status (2026-05-04): prototype that catches some noise-
+            // contaminated recordings (Seagull11 at conf 39% routes to
+            // Weak Signal) but regresses muddyticks (conf 27%, wrong
+            // rate selection). Currently disabled by default; enable via
+            // WATCHBEAT_NOISE_REJECT=1 for A/B testing on saved
+            // recordings. Algorithm overview:
+            //
+            //   1. Robust slope: regress all picks, drop worst 50% by
+            //      residual, re-fit. For a noise-contaminated recording
+            //      with <50% noise picks, the robust slope follows the
+            //      real ticks (which fit a line) instead of noise
+            //      (which scatters).
+            //   2. Re-anchor windows at the robust slope + intercept.
+            //   3. NoiseRejector: kill sub-boxes below 2× noise floor
+            //      and positions appearing in <50% of windows.
+            //   4. Re-pick from cleaned signal.
+            //
+            // Known limitation: when >50% of picks are noise, or the
+            // noise is itself rhythmic at a different rate, the robust
+            // slope locks onto the noise instead of the watch. Future
+            // refinement needed before enabling by default.
+            if ProcessInfo.processInfo.environment["WATCHBEAT_NOISE_REJECT"] != nil {
+                let reAnchored = robustReAnchoredCenters(
+                    initialPicks: beatPositions,
+                    windowCount: m
+                )
+                let noiseRejector = NoiseRejector(
+                    smoothed: smoothed,
+                    sampleRate: sampleRate,
+                    halfPeriodSamples: halfPeriodSamples
+                )
+                beatPositions = noiseRejector.clean(windowCenters: reAnchored)
+            }
 
             // Per-window energies — compute BEFORE regression so we can
             // gate which beats contribute to the slope and σ.
@@ -425,5 +487,63 @@ extension MeasurementPipeline {
             sampleCount: n,
             rateScores: []
         )
+    }
+
+    /// Robust slope estimate via two-stage regression: fit on all picks,
+    /// drop the worst 50% by residual magnitude, refit on the survivors.
+    /// Returns the re-anchored window centers (one per index 0..m-1)
+    /// using the robust slope and intercept.
+    ///
+    /// For a real watch, the basic and robust slopes agree (all picks fit
+    /// the line). For a noise-contaminated recording, the robust slope
+    /// follows the real ticks (which fit a line) instead of being biased
+    /// by the scattered noise picks. Re-anchored windows align real ticks
+    /// at consistent sub-box positions in both cases — which is what the
+    /// NoiseRejector's position-consistency check requires to work.
+    func robustReAnchoredCenters(initialPicks: [Double], windowCount m: Int) -> [Double] {
+        // First-pass regression on all picks.
+        var sumI = 0.0, sumT = 0.0, sumII = 0.0, sumIT = 0.0
+        for i in 0..<m {
+            let di = Double(i)
+            sumI += di; sumT += initialPicks[i]
+            sumII += di * di; sumIT += di * initialPicks[i]
+        }
+        let denom1 = Double(m) * sumII - sumI * sumI
+        guard abs(denom1) > 1e-20 else {
+            return initialPicks  // degenerate; just hand back what we got
+        }
+        let slope1 = (Double(m) * sumIT - sumI * sumT) / denom1
+        let intercept1 = (sumT - slope1 * sumI) / Double(m)
+
+        // Compute residuals; sort indices by |residual| ascending; keep
+        // the best (lowest-residual) half.
+        var indexed: [(idx: Int, absRes: Double)] = []
+        indexed.reserveCapacity(m)
+        for i in 0..<m {
+            let predicted = slope1 * Double(i) + intercept1
+            indexed.append((i, abs(initialPicks[i] - predicted)))
+        }
+        indexed.sort { $0.absRes < $1.absRes }
+        let keepCount = max(6, m / 2)
+        let kept = indexed.prefix(keepCount).map { $0.idx }
+
+        // Second-pass regression on kept indices.
+        var sumI2 = 0.0, sumT2 = 0.0, sumII2 = 0.0, sumIT2 = 0.0
+        for i in kept {
+            let di = Double(i)
+            sumI2 += di; sumT2 += initialPicks[i]
+            sumII2 += di * di; sumIT2 += di * initialPicks[i]
+        }
+        let cm2 = Double(kept.count)
+        let denom2 = cm2 * sumII2 - sumI2 * sumI2
+        guard abs(denom2) > 1e-20 else {
+            // Fall back to first-pass slope if second-pass is degenerate.
+            return (0..<m).map { slope1 * Double($0) + intercept1 }
+        }
+        let slope2 = (cm2 * sumIT2 - sumI2 * sumT2) / denom2
+        let intercept2 = (sumT2 - slope2 * sumI2) / cm2
+
+        // Re-anchored window centers using the robust slope.
+        return (0..<m).map { slope2 * Double($0) + intercept2 }
     }
 }
