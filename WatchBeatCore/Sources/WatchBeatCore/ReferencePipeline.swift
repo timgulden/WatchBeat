@@ -28,27 +28,22 @@ extension MeasurementPipeline {
 
         // Impulse suppression — two-tier:
         //   Tier 1 (clip at 100× median |signal|): clamp peak amplitude
-        //     of any sample exceeding the threshold. Catches the loudest
-        //     part of any non-tick impulse without affecting tick
-        //     positions. Some real-tick peaks also exceed 100× — clipping
-        //     them is harmless (just limits one sample's amplitude).
-        //   Tier 2 (excise at 300× median): for samples that exceed the
-        //     much-higher 300× threshold, ALSO zero the surrounding
-        //     ±5 ms region with a 0.5 ms cosine taper at the edges. The
-        //     higher threshold ensures we only excise around very loud
-        //     transients (bumps, flicks); real watch ticks rarely peak
-        //     above 300× median.
+        //     of any sample exceeding the threshold to ±clipLevel.
+        //     Real ticks routinely exceed 100× and survive clipping
+        //     (the post-clip squared envelope still shows a peak at
+        //     the tick); zeroing real ticks instead breaks rate
+        //     identification.
+        //   Tier 2 (region excise for long clip clusters): for clip
+        //     clusters whose span exceeds 3 ms, zero ±5 ms with a
+        //     0.5 ms cosine taper. Real ticks have brief clip clusters
+        //     (<2 ms span); flicks/bumps span ≥ 3 ms — the threshold
+        //     separates them. The 7 ms threshold this replaces was
+        //     leaving short flicks (like the 3 fingernail flicks on
+        //     Seagull11) un-excised, where their clipped plateau in
+        //     the squared envelope was winning argmax over real ticks.
         //
-        // Excision matters because an impulse's broadband ringing
-        // extends beyond its peak. A flick is sharp (~1 ms peak) but
-        // its energy spreads 5-15 ms in the HP-filtered signal.
-        // Clipping just the peak still leaves the ringing in the FFT,
-        // shifting the peak frequency by tens to hundreds of s/day-
-        // worth of rate error. Zeroing the region (not just the peak)
-        // removes the contamination entirely.
-        //
-        // The taper at the excision edges avoids fresh spectral
-        // artifacts from sharp zero-to-signal transitions.
+        // The taper at excision edges avoids fresh spectral artifacts
+        // from sharp zero-to-signal transitions.
         let absVals = filtered.map { abs($0) }.sorted()
         let medianAbs = absVals[absVals.count / 2]
         if medianAbs > 0 {
@@ -67,17 +62,28 @@ extension MeasurementPipeline {
                 }
             }
 
-            // Pass 2 (duration-based excise): cluster clipped positions
-            // that are within ~0.5 ms of each other (clipped samples
-            // from the same physical event come in bursts at the
-            // signal's oscillation period — gaps within an event stay
-            // below 0.5 ms). For each cluster, measure the duration
-            // from first to last clipped sample. Real ticks have brief
-            // clipped clusters (<2 ms span); bumps and flicks have
-            // longer ringing (>3 ms span). Excise only the long ones.
+            // Pass 2 (count-adaptive region excise): cluster clipped
+            // positions that are within ~0.5 ms of each other (clipped
+            // samples from the same physical event come in bursts at
+            // the signal's oscillation period — gaps within an event
+            // stay below 0.5 ms). For each cluster, measure span.
+            //
+            // Tick vs flick discrimination by WIDE-cluster count: pin-
+            // lever Timex ticks span 3-7 ms when clipped (~15-80 wide
+            // clusters per recording); modern Swiss ticks are brief,
+            // <2 ms (zero wide clusters). Isolated flicks/bumps are
+            // wide AND sparse (1-3 wide clusters). The wide-cluster
+            // count cleanly separates these populations: < 10 wide
+            // clusters means flicks (excise them); ≥ 10 means a wide-
+            // tick watch (don't excise — they ARE the ticks).
+            //
+            // The 3 ms span threshold for "wide" was chosen because
+            // Seagull-class Swiss ticks span <2 ms (so 3 ms safely
+            // excludes them) and even narrow Timexes have >10 ticks
+            // exceeding 3 ms (so the count gate fires correctly).
             let clusterGap = max(1, Int(0.0005 * sampleRate))
-            let minImpulseSpan = max(1, Int(0.007 * sampleRate))
-            var excisePositions: [Int] = []
+            let minImpulseSpan = max(1, Int(0.003 * sampleRate))
+            var allClusters: [(start: Int, end: Int)] = []
             var clusterStart = -1
             var clusterEnd = -1
             for pos in clipPositions {
@@ -87,15 +93,32 @@ extension MeasurementPipeline {
                 } else if pos - clusterEnd <= clusterGap {
                     clusterEnd = pos
                 } else {
-                    if clusterEnd - clusterStart >= minImpulseSpan {
-                        excisePositions.append((clusterStart + clusterEnd) / 2)
-                    }
+                    allClusters.append((clusterStart, clusterEnd))
                     clusterStart = pos
                     clusterEnd = pos
                 }
             }
-            if clusterStart >= 0 && clusterEnd - clusterStart >= minImpulseSpan {
-                excisePositions.append((clusterStart + clusterEnd) / 2)
+            if clusterStart >= 0 {
+                allClusters.append((clusterStart, clusterEnd))
+            }
+
+            // Wide-cluster count gate: count clusters that span ≥ 3 ms.
+            // If fewer than 10, the wide clusters are sparse — they're
+            // flicks/bumps in a recording where the watch's actual
+            // ticks are brief (<3 ms span) and don't show up here.
+            // Excise them. If ≥ 10, they're either pin-lever tick
+            // events themselves or a wide-tick watch family — don't
+            // excise (clip-at-threshold suffices).
+            let wideClusters = allClusters.filter { $0.end - $0.start >= minImpulseSpan }
+            var excisePositions: [Int] = []
+            if wideClusters.count < 10 {
+                for (s, e) in wideClusters {
+                    excisePositions.append((s + e) / 2)
+                }
+            }
+
+            if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CLIP"] != nil {
+                FileHandle.standardError.write("[clip] total_clusters=\(allClusters.count) wide(>=3ms)=\(wideClusters.count) excised=\(excisePositions.count)\n".data(using: .utf8)!)
             }
 
             // Build excision mask. mask[i] = 0 inside the core ±5 ms
@@ -262,27 +285,37 @@ extension MeasurementPipeline {
             let m = beatPositions.count
             guard m >= 6 else { return nil }
 
-            // ===== Adaptive matched-filter re-pick =====
+            // ===== Heavy-rejection re-anchor + re-pick =====
             //
-            // Build a tick template from THIS recording's cleanest 50%
-            // initial picks (smallest residuals from a coarse regression).
-            // Cross-correlate that learned template with the squared
-            // signal — output peaks where the local signal MATCHES the
-            // tick shape we just learned. Re-pick using the matched-
-            // filter output instead of the raw smoothed envelope.
+            // The initial picks above use FFT-anchored windows. When
+            // isolated loud transients (flicks, bumps) contaminate a
+            // recording, they bias the FFT peak — windows are placed at
+            // the wrong cadence — and they produce huge-residual picks
+            // wherever the loud event happened to land in a window. The
+            // FFT-anchored slope through ALL initial picks is therefore
+            // unreliable: a few flick picks can drag it off by tens of
+            // s/day.
             //
-            // The point: each watch teaches us its own tick character.
-            // A flick or bump has different shape from the watch's ticks
-            // and scores low in matched output, so the picker prefers
-            // real ticks even when the impulse is louder.
+            // Strategy:
+            //   1. Coarse linear fit on ALL initial picks. The flick-
+            //      contaminated picks have large residuals from this
+            //      line; the real-tick picks have small residuals.
+            //   2. Drop the worst 40% by absolute residual. Keep 60%.
+            //      With 89 windows, 53 kept — plenty to define a line.
+            //      40% gives margin to absorb several flicks plus near-
+            //      flick contamination on a noisy recording.
+            //   3. Re-fit the slope on the 60% kept. This slope follows
+            //      the real-tick cadence, not the FFT-anchored cadence.
+            //   4. Re-anchor windows at the refined slope/intercept and
+            //      re-pick (pure argmax on smoothed envelope, same as
+            //      initial pick — no template, no shape preference). With
+            //      windows now at the right cadence, every window's real
+            //      tick is centered, argmax lands on it.
             //
-            // Template construction is robust to the small number of
-            // initial picks that happen to be on noise events: those
-            // have large residuals from the regression line and land in
-            // the discarded half. As long as <50% of initial picks are
-            // noise-contaminated (true for all real-world recordings
-            // we've seen), the template captures real-tick shape.
-            do {
+            // No template. No shape preference. The slope-by-rejection
+            // step uses the rate ONLY to define windows, not to weight
+            // pick positions.
+            if m >= 10 {
                 var sumI = 0.0, sumT = 0.0, sumII = 0.0, sumIT = 0.0
                 for i in 0..<m {
                     let di = Double(i)
@@ -291,80 +324,46 @@ extension MeasurementPipeline {
                 }
                 let denom = Double(m) * sumII - sumI * sumI
                 if abs(denom) > 1e-20 {
-                    let slope = (Double(m) * sumIT - sumI * sumT) / denom
-                    let intercept = (sumT - slope * sumI) / Double(m)
+                    let slopeC = (Double(m) * sumIT - sumI * sumT) / denom
+                    let interceptC = (sumT - slopeC * sumI) / Double(m)
 
-                    // Sort indices by absolute residual; keep best half.
+                    // Drop worst 40% by absolute residual; keep best 60%.
                     var idxRes: [(idx: Int, absRes: Double)] = []
                     idxRes.reserveCapacity(m)
                     for i in 0..<m {
-                        let pred = slope * Double(i) + intercept
+                        let pred = slopeC * Double(i) + interceptC
                         idxRes.append((i, abs(beatPositions[i] - pred)))
                     }
                     idxRes.sort { $0.absRes < $1.absRes }
-                    let bestHalf = idxRes.prefix(max(6, m / 2)).map { $0.idx }
+                    let keepCount = max(6, (m * 60) / 100)
+                    let keepers = idxRes.prefix(keepCount).map { $0.idx }
 
-                    // Build template: average of squared signal in a
-                    // ±5 ms window around each best pick. 10 ms total
-                    // covers single-event ticks (~2 ms) AND multi-sub-
-                    // event Swiss ticks (~5-7 ms) AND wider Disorder
-                    // ticks. Bumps and flicks (different shape) match
-                    // poorly even at the same total duration.
-                    let templateHalf = max(48, Int(0.005 * sampleRate))
-                    let templateLen = 2 * templateHalf + 1
-                    var template = [Float](repeating: 0, count: templateLen)
-                    var templateCount = 0
-                    for i in bestHalf {
-                        let center = Int(round(beatPositions[i] * sampleRate))
-                        let lo = center - templateHalf
-                        let hi = center + templateHalf
-                        if lo < 0 || hi >= n { continue }
-                        for j in 0..<templateLen {
-                            template[j] += squared[lo + j]
-                        }
-                        templateCount += 1
+                    // Re-fit on the 60% kept.
+                    var sIk = 0.0, sTk = 0.0, sIIk = 0.0, sITk = 0.0
+                    for i in keepers {
+                        let di = Double(i)
+                        sIk += di; sTk += beatPositions[i]
+                        sIIk += di * di; sITk += di * beatPositions[i]
                     }
-                    if templateCount >= 6 {
-                        let inv = 1.0 / Float(templateCount)
-                        for j in 0..<templateLen { template[j] *= inv }
+                    let cmK = Double(keepers.count)
+                    let denomK = cmK * sIIk - sIk * sIk
+                    if abs(denomK) > 1e-20 {
+                        let slopeR = (cmK * sITk - sIk * sTk) / denomK
+                        let interceptR = (sTk - slopeR * sIk) / cmK
 
-                        // Zero-mean the template so the matched filter
-                        // is sensitive to SHAPE rather than absolute
-                        // energy level.
-                        var tMean: Float = 0
-                        vDSP_meanv(template, 1, &tMean, vDSP_Length(templateLen))
-                        for j in 0..<templateLen { template[j] -= tMean }
-
-                        // Cross-correlate template with squared signal.
-                        // Output[centerIdx] = sum over j of
-                        //     template[j] × squared[centerIdx - half + j]
-                        // High where local signal matches template shape.
-                        var matched = [Float](repeating: 0, count: n)
-                        let tLen = vDSP_Length(templateLen)
-                        for centerIdx in templateHalf..<(n - templateHalf) {
-                            var corr: Float = 0
-                            template.withUnsafeBufferPointer { tPtr in
-                                squared.withUnsafeBufferPointer { sPtr in
-                                    vDSP_dotpr(tPtr.baseAddress!, 1,
-                                               sPtr.baseAddress! + (centerIdx - templateHalf), 1,
-                                               &corr, tLen)
-                                }
-                            }
-                            matched[centerIdx] = corr
-                        }
-
-                        // Re-pick using the matched filter output.
+                        // Re-anchor windows at refined slope and re-pick
+                        // (pure argmax on smoothed envelope — no template).
                         for w in 0..<m {
-                            let tc = windowCenters[w]
+                            let tc = slopeR * Double(w) + interceptR
                             let centerSample = Int(round(tc * sampleRate))
-                            let lo = max(templateHalf, centerSample - halfPeriodSamples)
-                            let hi = min(n - 1 - templateHalf, centerSample + halfPeriodSamples)
+                            let lo = max(0, centerSample - halfPeriodSamples)
+                            let hi = min(n - 1, centerSample + halfPeriodSamples)
                             if lo >= hi { continue }
                             var bestIdx = lo
                             var bestVal: Float = -.infinity
                             for i in lo...hi {
-                                if matched[i] > bestVal {
-                                    bestVal = matched[i]; bestIdx = i
+                                if smoothed[i] > bestVal {
+                                    bestVal = smoothed[i]; bestIdx = i
                                 }
                             }
                             beatPositions[w] = Double(bestIdx) / sampleRate
