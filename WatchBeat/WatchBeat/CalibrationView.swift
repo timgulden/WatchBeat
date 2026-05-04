@@ -1,39 +1,28 @@
 import SwiftUI
-import AVFoundation
 
-/// One-shot calibration tool that measures the iPhone's audio sample
-/// clock against an external NTP server.
+/// One-shot calibration tool that measures the iPhone's clock crystal
+/// against an external NTP server.
 ///
 /// Background: the iPhone's audio path runs at a nominal sample rate
 /// (44100 or 48000 Hz) but the actual frequency is set by a crystal that
-/// is offset from nominal by some unknown ppm. That offset shows up as
-/// a constant multiplicative bias in every WatchBeat rate measurement.
-/// Comparison with the timegrapher cluster suggested an offset on the
-/// order of 41 s/day = 475 ppm — enough to be the dominant rate-error
-/// contributor.
+/// is offset from nominal by some unknown ppm. Comparison with the
+/// timegrapher cluster suggested ~41 s/day = ~475 ppm — enough to be
+/// the dominant rate-error contributor.
 ///
-/// This tool measures that offset directly. It runs `AVAudioEngine` for
-/// a long interval (default 10 minutes) and queries an NTP server twice:
-/// once at the start, once at the end. The audio sample clock's elapsed
-/// time is compared to NTP-anchored elapsed time; the ratio gives the
-/// crystal's ppm offset.
+/// On iPhone the audio sample clock and the system monotonic clock
+/// (`mach_continuous_time`) are derived from the same source crystal
+/// via PLL, so measuring system-clock drift directly measures the audio
+/// drift too. No audio session is needed; the tool runs in the
+/// foreground or background, during phone calls, on any device, with
+/// no extra permissions.
 ///
-/// Sub-shifts handled:
-///   * Audio engine `lastRenderTime.hostTime` is in mach time units —
-///     convertible to seconds via mach_timebase_info. Same units as the
-///     `monotonicSeconds()` helper used for SNTP query timestamps.
-///   * Audio engine sample times are tied to the audio crystal; mach
-///     host time tracks the system clock. Difference between the two,
-///     scaled by interval length, is the audio crystal's offset from
-///     nominal.
-///   * NTP gives true wall time. Comparing audio elapsed to NTP elapsed
-///     directly measures the audio crystal vs. truth.
+/// Method: query NTP at t=0 and t=10min, compare elapsed `mach_continuous_time`
+/// against elapsed NTP time. Ratio gives crystal ppm.
 struct CalibrationView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var phase: Phase = .idle
     @State private var startEpoch: Double = 0       // unix seconds at start
-    @State private var startAudioSec: Double = 0    // audio sample-clock seconds at start
     @State private var startMonoSec: Double = 0     // monotonic seconds at start
     @State private var startRTT: Double = 0
     @State private var elapsedSec: Double = 0
@@ -41,7 +30,6 @@ struct CalibrationView: View {
     @State private var resultDetails: String = ""
     @State private var errorMessage: String? = nil
 
-    @State private var engine: AVAudioEngine?
     @State private var timer: Timer?
     @State private var startedAt: Date = .now
 
@@ -55,7 +43,7 @@ struct CalibrationView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
-                Text("Audio Clock Calibration")
+                Text("Clock Calibration")
                     .font(.title2.bold())
                     .padding(.top)
 
@@ -117,8 +105,8 @@ struct CalibrationView: View {
 
     private var statusText: String {
         switch phase {
-        case .idle: return "Compares the iPhone's audio sample clock against an NTP server. Run plugged in, in foreground, on a stable network."
-        case .starting: return "Querying NTP and starting audio engine..."
+        case .idle: return "Compares the iPhone's clock against an NTP server. Runs anywhere — foreground, background, on a call. Network needed at start and end only."
+        case .starting: return "Querying NTP..."
         case .running: return "Measuring..."
         case .finalizing: return "Final NTP query..."
         case .done: return "Calibration complete."
@@ -141,41 +129,18 @@ struct CalibrationView: View {
         resultDetails = ""
         phase = .starting
 
-        // 1. Configure and start audio engine.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [])
-            try session.setActive(true)
-            let eng = AVAudioEngine()
-            // Connect input → main mixer to keep engine running with input
-            // permission. We don't tap or read any samples — we only need
-            // the engine's render clock to advance.
-            let input = eng.inputNode
-            _ = input.outputFormat(forBus: 0)
-            try eng.start()
-            self.engine = eng
-        } catch {
-            phase = .error
-            errorMessage = "Audio engine start failed: \(error.localizedDescription)"
-            return
-        }
-
-        // 2. Initial NTP query.
+        // Initial NTP query.
         ntpQuery(host: ntpHost) { result in
             DispatchQueue.main.async {
                 switch result {
                 case .failure(let err):
                     phase = .error
                     errorMessage = "Initial NTP query failed: \(err)"
-                    self.engine?.stop()
-                    self.engine = nil
                     return
                 case .success(let r):
-                    // Record anchor.
-                    let audioSec = currentAudioSampleSeconds(engine: self.engine)
-                    self.startEpoch = r.serverTime + (currentMonotonicSeconds() - r.clientReceiveTime)
-                    self.startAudioSec = audioSec
-                    self.startMonoSec = currentMonotonicSeconds()
+                    let nowMono = currentMonotonicSeconds()
+                    self.startEpoch = r.serverTime + (nowMono - r.clientReceiveTime)
+                    self.startMonoSec = nowMono
                     self.startRTT = r.roundTripSeconds
                     self.startedAt = .now
                     self.phase = .running
@@ -200,53 +165,39 @@ struct CalibrationView: View {
         phase = .finalizing
         ntpQuery(host: ntpHost) { result in
             DispatchQueue.main.async {
-                guard let eng = self.engine else {
-                    phase = .error
-                    errorMessage = "Engine vanished before final query."
-                    return
-                }
                 switch result {
                 case .failure(let err):
                     phase = .error
                     errorMessage = "Final NTP query failed: \(err)"
-                    eng.stop(); self.engine = nil
                     return
                 case .success(let r):
-                    let endAudioSec = currentAudioSampleSeconds(engine: eng)
                     let endMonoSec = currentMonotonicSeconds()
                     let endEpoch = r.serverTime + (endMonoSec - r.clientReceiveTime)
 
-                    let audioElapsed = endAudioSec - startAudioSec
-                    let trueElapsed = endEpoch - startEpoch
                     let monoElapsed = endMonoSec - startMonoSec
+                    let trueElapsed = endEpoch - startEpoch
 
-                    // ppm = (audio_elapsed / true_elapsed - 1) * 1e6
-                    // If audio runs FAST (audio_elapsed > true_elapsed), ppm > 0.
-                    let ppm = (audioElapsed / trueElapsed - 1.0) * 1e6
-                    let monoPPM = (monoElapsed / trueElapsed - 1.0) * 1e6
+                    // ppm = (mono_elapsed / true_elapsed - 1) * 1e6
+                    // If iPhone clock runs FAST (mono_elapsed > true_elapsed), ppm > 0.
+                    let ppm = (monoElapsed / trueElapsed - 1.0) * 1e6
 
-                    // Uncertainty: (RTT_start + RTT_end) / 2 / true_elapsed.
+                    // Uncertainty: half-RTT each side, summed.
                     let unc = (startRTT + r.roundTripSeconds) * 0.5 / trueElapsed * 1e6
 
                     self.resultPPM = ppm
                     self.resultDetails = String(
                         format: """
-                        audio elapsed: %.4f s
-                        NTP   elapsed: %.4f s
-                        mono  elapsed: %.4f s
-                        audio − NTP:   %+.1f ms
-                        host  − NTP:   %+.1f ms (system clock)
+                        iPhone elapsed: %.4f s
+                        NTP    elapsed: %.4f s
+                        difference:    %+.1f ms
                         RTT start/end: %.0f / %.0f ms
                         uncertainty:   ±%.1f ppm
                         """,
-                        audioElapsed, trueElapsed, monoElapsed,
-                        (audioElapsed - trueElapsed) * 1000,
+                        monoElapsed, trueElapsed,
                         (monoElapsed - trueElapsed) * 1000,
                         startRTT * 1000, r.roundTripSeconds * 1000,
                         unc
                     )
-                    _ = monoPPM   // available in details; kept for future logging
-                    eng.stop(); self.engine = nil
                     phase = .done
                 }
             }
@@ -255,29 +206,14 @@ struct CalibrationView: View {
 
     private func stopAndDismiss() {
         timer?.invalidate(); timer = nil
-        engine?.stop(); engine = nil
         dismiss()
     }
 }
 
-// MARK: - Sample-clock helpers
-
-/// Returns the audio sample clock's current time, in seconds, derived
-/// from the engine's lastRenderTime (which has both sampleTime and
-/// hostTime fields). We use sampleTime / sampleRate — the canonical
-/// audio-crystal-driven clock.
-fileprivate func currentAudioSampleSeconds(engine: AVAudioEngine?) -> Double {
-    guard let eng = engine else { return 0 }
-    guard let lastRender = eng.outputNode.lastRenderTime else { return 0 }
-    let sr = lastRender.sampleRate
-    if sr > 0 {
-        return Double(lastRender.sampleTime) / sr
-    }
-    return 0
-}
+// MARK: - Helpers
 
 /// Helper duplicating monotonicSeconds() from NTPClient.swift. Kept
-/// here to allow @State access within the SwiftUI struct without
+/// here so `@State` fields can be read on the main thread without
 /// crossing module boundaries.
 fileprivate func currentMonotonicSeconds() -> Double {
     var info = mach_timebase_info_data_t()
