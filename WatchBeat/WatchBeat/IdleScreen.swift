@@ -2,10 +2,14 @@ import SwiftUI
 
 struct IdleScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
+    @State private var showCalibration = false
 
     var body: some View {
         SquareScreenLayout {
             WatchLogo()
+                .onLongPressGesture(minimumDuration: 1.5) {
+                    showCalibration = true
+                }
         } bigSquare: {
             // Bullets at the top, diagram anchored to the bottom near the
             // Listen button. The square's size is fixed by SquareScreenLayout
@@ -30,6 +34,9 @@ struct IdleScreen: View {
                 }
                 BottomRow()
             }
+        }
+        .sheet(isPresented: $showCalibration) {
+            CalibrationView()
         }
     }
 }
