@@ -40,8 +40,15 @@ public struct PulseWidthEstimate: Sendable, Equatable {
 ///     pulses materially vs. vacaboja's 1 ms peak-hold.
 ///   - vacaboja sweeps the threshold upward from a noise-based floor until
 ///     both tick and tock amplitudes fall in [135°, 360°] with |Δ| < 60°;
-///     we use a fixed 20% threshold. In vacaboja's algorithm, 20% is the
-///     upper bound of the sweep, not the operating point.
+///     we use a fixed threshold. The default is 0.30 (validated against
+///     the SeagullStudy 2026-05-04 paired with a $150 timegrapher: at
+///     0.30 the cluster reads 240° vs. TG 236°, within combined
+///     uncertainty). On Swiss multi-event escapements, 0.30 sits above
+///     the lock/drop flank peaks and reads the impulse-only width — the
+///     physically meaningful quantity for the amplitude formula. At 0.20
+///     the flanks are captured too, broadening the pulse and reading
+///     amplitude ~50° low. WATCHBEAT_PULSE_THRESHOLD env var overrides
+///     for tuning.
 ///   - vacaboja measures pulse width as the sample distance from the first
 ///     rising envelope peak (unlock) back to the lock anchor; we measure
 ///     full-width at the threshold.
@@ -250,7 +257,14 @@ public struct AmplitudeEstimator {
         let halfLimit = beatPeriod / 2
 
         // Primary: threshold-based, with threshold relative to (peak - baseline).
-        let pwSec = measurePulseWidth(coarseSignal, peakIndex: peak, thresholdFraction: 0.20,
+        // Default 0.30 — chosen to read the impulse alone on Swiss multi-
+        // event escapements (lock/impulse/drop sub-events: 0.30 sits above
+        // the flank peaks). Validated against SeagullStudy 2026-05-04
+        // (cluster reads 240° vs TG 236°). WATCHBEAT_PULSE_THRESHOLD env
+        // var overrides for tuning.
+        let thrEnv = ProcessInfo.processInfo.environment["WATCHBEAT_PULSE_THRESHOLD"]
+        let thrFrac = Float(thrEnv ?? "") ?? 0.30
+        let pwSec = measurePulseWidth(coarseSignal, peakIndex: peak, thresholdFraction: thrFrac,
                                       maxExtent: searchRadius, sampleRate: sampleRate,
                                       baseline: baseline)
         let thresholdMs: Double? = (pwSec > 0 && pwSec < halfLimit) ? pwSec * 1000 : nil
