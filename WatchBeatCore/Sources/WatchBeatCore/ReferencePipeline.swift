@@ -262,6 +262,117 @@ extension MeasurementPipeline {
             let m = beatPositions.count
             guard m >= 6 else { return nil }
 
+            // ===== Adaptive matched-filter re-pick =====
+            //
+            // Build a tick template from THIS recording's cleanest 50%
+            // initial picks (smallest residuals from a coarse regression).
+            // Cross-correlate that learned template with the squared
+            // signal — output peaks where the local signal MATCHES the
+            // tick shape we just learned. Re-pick using the matched-
+            // filter output instead of the raw smoothed envelope.
+            //
+            // The point: each watch teaches us its own tick character.
+            // A flick or bump has different shape from the watch's ticks
+            // and scores low in matched output, so the picker prefers
+            // real ticks even when the impulse is louder.
+            //
+            // Template construction is robust to the small number of
+            // initial picks that happen to be on noise events: those
+            // have large residuals from the regression line and land in
+            // the discarded half. As long as <50% of initial picks are
+            // noise-contaminated (true for all real-world recordings
+            // we've seen), the template captures real-tick shape.
+            do {
+                var sumI = 0.0, sumT = 0.0, sumII = 0.0, sumIT = 0.0
+                for i in 0..<m {
+                    let di = Double(i)
+                    sumI += di; sumT += beatPositions[i]
+                    sumII += di * di; sumIT += di * beatPositions[i]
+                }
+                let denom = Double(m) * sumII - sumI * sumI
+                if abs(denom) > 1e-20 {
+                    let slope = (Double(m) * sumIT - sumI * sumT) / denom
+                    let intercept = (sumT - slope * sumI) / Double(m)
+
+                    // Sort indices by absolute residual; keep best half.
+                    var idxRes: [(idx: Int, absRes: Double)] = []
+                    idxRes.reserveCapacity(m)
+                    for i in 0..<m {
+                        let pred = slope * Double(i) + intercept
+                        idxRes.append((i, abs(beatPositions[i] - pred)))
+                    }
+                    idxRes.sort { $0.absRes < $1.absRes }
+                    let bestHalf = idxRes.prefix(max(6, m / 2)).map { $0.idx }
+
+                    // Build template: average of squared signal in a
+                    // ±5 ms window around each best pick. 10 ms total
+                    // covers single-event ticks (~2 ms) AND multi-sub-
+                    // event Swiss ticks (~5-7 ms) AND wider Disorder
+                    // ticks. Bumps and flicks (different shape) match
+                    // poorly even at the same total duration.
+                    let templateHalf = max(48, Int(0.005 * sampleRate))
+                    let templateLen = 2 * templateHalf + 1
+                    var template = [Float](repeating: 0, count: templateLen)
+                    var templateCount = 0
+                    for i in bestHalf {
+                        let center = Int(round(beatPositions[i] * sampleRate))
+                        let lo = center - templateHalf
+                        let hi = center + templateHalf
+                        if lo < 0 || hi >= n { continue }
+                        for j in 0..<templateLen {
+                            template[j] += squared[lo + j]
+                        }
+                        templateCount += 1
+                    }
+                    if templateCount >= 6 {
+                        let inv = 1.0 / Float(templateCount)
+                        for j in 0..<templateLen { template[j] *= inv }
+
+                        // Zero-mean the template so the matched filter
+                        // is sensitive to SHAPE rather than absolute
+                        // energy level.
+                        var tMean: Float = 0
+                        vDSP_meanv(template, 1, &tMean, vDSP_Length(templateLen))
+                        for j in 0..<templateLen { template[j] -= tMean }
+
+                        // Cross-correlate template with squared signal.
+                        // Output[centerIdx] = sum over j of
+                        //     template[j] × squared[centerIdx - half + j]
+                        // High where local signal matches template shape.
+                        var matched = [Float](repeating: 0, count: n)
+                        let tLen = vDSP_Length(templateLen)
+                        for centerIdx in templateHalf..<(n - templateHalf) {
+                            var corr: Float = 0
+                            template.withUnsafeBufferPointer { tPtr in
+                                squared.withUnsafeBufferPointer { sPtr in
+                                    vDSP_dotpr(tPtr.baseAddress!, 1,
+                                               sPtr.baseAddress! + (centerIdx - templateHalf), 1,
+                                               &corr, tLen)
+                                }
+                            }
+                            matched[centerIdx] = corr
+                        }
+
+                        // Re-pick using the matched filter output.
+                        for w in 0..<m {
+                            let tc = windowCenters[w]
+                            let centerSample = Int(round(tc * sampleRate))
+                            let lo = max(templateHalf, centerSample - halfPeriodSamples)
+                            let hi = min(n - 1 - templateHalf, centerSample + halfPeriodSamples)
+                            if lo >= hi { continue }
+                            var bestIdx = lo
+                            var bestVal: Float = -.infinity
+                            for i in lo...hi {
+                                if matched[i] > bestVal {
+                                    bestVal = matched[i]; bestIdx = i
+                                }
+                            }
+                            beatPositions[w] = Double(bestIdx) / sampleRate
+                        }
+                    }
+                }
+            }
+
             // OPT-IN: Robust-slope re-anchoring + two-pass noise rejection.
             //
             // Status (2026-05-04): prototype that catches some noise-
@@ -466,7 +577,21 @@ extension MeasurementPipeline {
         let beAsymmetryMs = winner.beAsymmetryMs
         let snr = winner.snr
         let confirmedFraction = winner.confirmedFraction
-        let rateErrPerDay = (winner.fHz / snappedRate.hz - 1.0) * 86400.0
+
+        // Rate reporting: prefer FFT-derived rate (integrates over full
+        // 15 s, robust to per-window noise). BUT when an impulse
+        // contamination has shifted the FFT peak, the FFT rate diverges
+        // from the regression slope on the matched-filter-cleaned picks
+        // (which lock onto real ticks). When they disagree by more than
+        // 50 s/day, trust the regression — the matched-filter picks are
+        // more reliable than a noise-shifted FFT bin.
+        let fftRateErrPerDay = (winner.fHz / snappedRate.hz - 1.0) * 86400.0
+        let regRateErrPerDay = slope > 0
+            ? ((1.0 / slope) / snappedRate.hz - 1.0) * 86400.0
+            : fftRateErrPerDay
+        let rateErrPerDay = abs(fftRateErrPerDay - regRateErrPerDay) > 50
+            ? regRateErrPerDay
+            : fftRateErrPerDay
 
         // Quality from the winner's SNR. Same formula as before — see notes
         // on tightening from snr/5 to snr/10 to keep pure noise (snr ~ 2)
