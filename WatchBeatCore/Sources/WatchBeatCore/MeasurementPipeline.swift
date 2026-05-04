@@ -971,7 +971,8 @@ public struct MeasurementPipeline {
                 guard i < peakTimes.count else { continue }
                 let predicted = slope * Double(i) + intercept
                 let residualMs = (peakTimes[i] - predicted) * 1000.0
-                timings.append(TickTiming(beatIndex: i, residualMs: residualMs, isEvenBeat: i % 2 == 0))
+                timings.append(TickTiming(beatIndex: i, residualMs: residualMs,
+                                          isEvenBeat: i % 2 == 0, timeSeconds: peakTimes[i]))
             }
         }
 
@@ -1141,7 +1142,8 @@ public struct MeasurementPipeline {
             for idx in rescuedConfirmed where refinedByBeat[idx] != nil {
                 let predicted = s * Double(idx) + i
                 let residualMs = (rescuedPeakTimes[idx] - predicted) * 1000.0
-                timings.append(TickTiming(beatIndex: idx, residualMs: residualMs, isEvenBeat: idx % 2 == 0))
+                timings.append(TickTiming(beatIndex: idx, residualMs: residualMs,
+                                          isEvenBeat: idx % 2 == 0, timeSeconds: rescuedPeakTimes[idx]))
             }
         }
 

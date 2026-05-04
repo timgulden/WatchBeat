@@ -8,11 +8,15 @@ public struct TickTiming: Sendable, Equatable {
     public let residualMs: Double
     /// Whether this is an even beat (tick vs tock).
     public let isEvenBeat: Bool
+    /// Absolute pick time in seconds from the start of the recording.
+    /// Used by AmplitudeEstimator for per-class folding without re-anchoring.
+    public let timeSeconds: Double
 
-    public init(beatIndex: Int, residualMs: Double, isEvenBeat: Bool) {
+    public init(beatIndex: Int, residualMs: Double, isEvenBeat: Bool, timeSeconds: Double = 0) {
         self.beatIndex = beatIndex
         self.residualMs = residualMs
         self.isEvenBeat = isEvenBeat
+        self.timeSeconds = timeSeconds
     }
 }
 

@@ -649,7 +649,9 @@ extension MeasurementPipeline {
             let kept = Set(winner.cleanedConfirmed)
             tickTimings = (0..<m).compactMap { i -> TickTiming? in
                 guard kept.contains(i) else { return nil }
-                return TickTiming(beatIndex: i, residualMs: residualsMs[i], isEvenBeat: i % 2 == 0)
+                let t = slope * Double(i) + intercept + residualsMs[i] / 1000.0
+                return TickTiming(beatIndex: i, residualMs: residualsMs[i],
+                                  isEvenBeat: i % 2 == 0, timeSeconds: t)
             }
         }
 

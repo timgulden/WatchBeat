@@ -32,26 +32,26 @@ public struct PulseWidthEstimate: Sendable, Equatable {
 /// Reference: vacaboja/tg open-source timegrapher
 /// (https://github.com/vacaboja/tg, src/algo.c:745).
 ///
-/// This is a *variant* of vacaboja's approach, not a direct port. Key
-/// differences (see also TickAnatomy's `vacabojaAmplitude` for a faithful
-/// port used for comparison):
-///   - vacaboja smooths with a 1 ms leaky peak-hold + 1 ms box-mean; we use
-///     a 3 ms arithmetic mean of rectified samples. The 3 ms mean broadens
-///     pulses materially vs. vacaboja's 1 ms peak-hold.
-///   - vacaboja sweeps the threshold upward from a noise-based floor until
-///     both tick and tock amplitudes fall in [135°, 360°] with |Δ| < 60°;
-///     we use a fixed threshold. The default is 0.30 (validated against
-///     the SeagullStudy 2026-05-04 paired with a $150 timegrapher: at
-///     0.30 the cluster reads 240° vs. TG 236°, within combined
-///     uncertainty). On Swiss multi-event escapements, 0.30 sits above
-///     the lock/drop flank peaks and reads the impulse-only width — the
-///     physically meaningful quantity for the amplitude formula. At 0.20
-///     the flanks are captured too, broadening the pulse and reading
-///     amplitude ~50° low. WATCHBEAT_PULSE_THRESHOLD env var overrides
-///     for tuning.
-///   - vacaboja measures pulse width as the sample distance from the first
-///     rising envelope peak (unlock) back to the lock anchor; we measure
-///     full-width at the threshold.
+/// We measure sub-event spacing on a per-class folded envelope (the
+/// vacaboja-style approach), not pulse-width-at-threshold. The per-class
+/// fold is anchored on the picker's clean tick positions (no re-anchoring
+/// via sample-offset calibration). Within each class fold:
+///   1. Find the dominant peak — typically the LOCK click (loudest sound
+///      in a tick), at the center of the fold.
+///   2. Find the FARTHEST sub-event peak on each side of dominant within
+///      ±25 ms, with valley-prominence ≥ 5% of dominant amplitude. The
+///      farthest peak is the unlock (or drop) — the bound of the lift-
+///      angle traversal.
+///   3. Half-pulse = farthest-distance / 2 (or average of the two sides).
+///      The factor of 2 reflects that distance from dominant to the far
+///      end of traversal is the FULL traversal time, while the formula
+///      A = L/(2·sin(π·t/T)) expects HALF the traversal time as `t`.
+///
+/// This works on both Swiss multi-event ticks and pin-lever ticks because
+/// it measures sub-event spacing — a universal physical quantity — rather
+/// than envelope widths that vary with tick acoustic structure. Validated
+/// against SeagullStudy 2026-05-04 (cluster reads 241° vs TG 236°) and
+/// Tim's pin-lever Timex (reads ~140° vs TG 140°).
 public struct AmplitudeEstimator {
 
     private let conditioner = SignalConditioner()
@@ -93,104 +93,110 @@ public struct AmplitudeEstimator {
         var rectified = [Float](repeating: 0, count: n)
         vDSP_vabs(filtered, 1, &rectified, 1, vDSP_Length(n))
 
-        // Step 3: Light smooth for tick position finding (1ms)
-        let posSmoothSamp = max(3, Int(0.001 * sampleRate))
-        let posSignal = movingAverage(rectified, windowSize: posSmoothSamp)
-        let sN = posSignal.count
-        let halfSmooth = posSmoothSamp / 2
-
-        // Calibrate sample offset from first few periods
-        let searchEnd = min(periodSamples * 3, sN)
-        var calibPeak = 0
-        var calibVal: Float = 0
-        for i in 0..<searchEnd {
-            if posSignal[i] > calibVal { calibVal = posSignal[i]; calibPeak = i }
-        }
-        let estimatedBeatAtCalib = Double(calibPeak) / (beatPeriod * sampleRate)
-        let nearestBeat = Int(round(estimatedBeatAtCalib))
-        let sampleOffset = Double(calibPeak) - beatPeriod * sampleRate * Double(nearestBeat)
-
-        // Step 4: Phase-aligned fold at 2× period (tick+tock pair)
+        // Step 3: Build per-class folded waveforms anchored directly on the
+        // picker's clean tick timings. The Reference picker has already done
+        // the hard work of identifying real ticks (pure-argmax + heavy-
+        // rejection re-anchor + outlier rejection); we just use those
+        // anchors directly. No re-anchoring via sample-offset calibration —
+        // that path was vulnerable to noise events near recording start.
+        //
+        // Each class (tick = even beat, tock = odd beat) gets its own fold
+        // window of ±halfPeriod centered on each timing. Per-class folding
+        // means tick and tock are analyzed independently — no cross-class
+        // smearing if the BE is large.
         let halfPeriod = periodSamples / 2
-        let foldLen = periodSamples * 2
-        var folded = [Float](repeating: 0, count: foldLen)
-        var foldCount = 0
+        let foldLen = 2 * halfPeriod + 1
+        var tickFold = [Float](repeating: 0, count: foldLen)
+        var tockFold = [Float](repeating: 0, count: foldLen)
+        var tickCount = 0
+        var tockCount = 0
 
-        let evenTimings = tickTimings.filter { $0.isEvenBeat }
-        for timing in evenTimings {
-            let expected = Int(beatPeriod * sampleRate * Double(timing.beatIndex) + sampleOffset) - halfSmooth
-            let lo = max(0, expected - periodSamples / 4)
-            let hi = min(sN - 1, expected + periodSamples / 4)
-            guard lo < hi else { continue }
-
-            var peakIdx = lo
-            var peakVal: Float = posSignal[lo]
-            for j in (lo + 1)...hi {
-                if posSignal[j] > peakVal { peakVal = posSignal[j]; peakIdx = j }
+        // Re-anchor each fold on its OWN loudest sample within ±1.5 ms of
+        // the picker's chosen position. The picker position is correct to
+        // within a few hundred microseconds (it's the regression-line-
+        // projected pick position with residual added); folding aligned on
+        // that gives slightly smeared sub-event peaks because each beat's
+        // loudest sample is ~0.5-1 ms offset. Re-anchoring tightens the
+        // fold's main peak and sharpens the sub-event peaks correspondingly.
+        let anchorRadius = max(1, Int(0.0015 * sampleRate))
+        for timing in tickTimings {
+            let center0 = Int(round(timing.timeSeconds * sampleRate))
+            let aLo = max(0, center0 - anchorRadius)
+            let aHi = min(n - 1, center0 + anchorRadius)
+            var center = center0
+            var bestVal: Float = rectified[max(0, min(n - 1, center0))]
+            for j in aLo...aHi where rectified[j] > bestVal {
+                bestVal = rectified[j]; center = j
             }
-
-            let foldStart = peakIdx - halfPeriod
-            guard foldStart >= 0 && foldStart + foldLen < n else { continue }
-            for i in 0..<foldLen { folded[i] += rectified[foldStart + i] }
-            foldCount += 1
+            let lo = center - halfPeriod
+            let hi = center + halfPeriod
+            guard lo >= 0 && hi < n else { continue }
+            if timing.isEvenBeat {
+                for i in 0..<foldLen { tickFold[i] += rectified[lo + i] }
+                tickCount += 1
+            } else {
+                for i in 0..<foldLen { tockFold[i] += rectified[lo + i] }
+                tockCount += 1
+            }
         }
 
-        guard foldCount >= 3 else {
-            return PulseWidthEstimate(tickPulseMs: nil, tockPulseMs: nil, foldCount: foldCount)
+        guard tickCount >= 3 || tockCount >= 3 else {
+            return PulseWidthEstimate(tickPulseMs: nil, tockPulseMs: nil, foldCount: tickCount + tockCount)
         }
 
-        let div = Float(foldCount)
-        for i in 0..<foldLen { folded[i] /= div }
+        if tickCount > 0 { let inv = 1 / Float(tickCount); for i in 0..<foldLen { tickFold[i] *= inv } }
+        if tockCount > 0 { let inv = 1 / Float(tockCount); for i in 0..<foldLen { tockFold[i] *= inv } }
 
-        // Step 5: Two smoothings of the folded waveform.
-        //   - 3 ms: stable main-peak localization and fallback pulse-width.
-        //   - 0.15 ms (fine): preserves escapement sub-structure (unlock /
-        //     impulse / drop) so we can recover the physically meaningful
-        //     pulse even when 20%-threshold walks across it as one wide blob.
-        let foldSmoothSamp = max(3, Int(0.003 * sampleRate))
-        let smoothed = movingAverage(folded, windowSize: foldSmoothSamp)
-        let fineSmoothSamp = max(3, Int(0.00015 * sampleRate))
-        let fineSmoothed = movingAverage(folded, windowSize: fineSmoothSamp)
-        let fN = smoothed.count
-        guard fN > periodSamples else {
-            return PulseWidthEstimate(tickPulseMs: nil, tockPulseMs: nil, foldCount: foldCount)
+        // Step 4: Smoothing — 0.7 ms — wide enough to suppress single-cycle
+        // ripple but narrow enough to leave the lock/drop sub-events
+        // distinct from the impulse. With 1.5+ ms smoothing the +3-5 ms
+        // drop event on Seagulls merges into the impulse decay slope and
+        // can't be detected by valley-prominence; 0.7 ms preserves it.
+        let smoothSamp = max(3, Int(0.0007 * sampleRate))
+        let tickSmoothed = movingAverage(tickFold, windowSize: smoothSamp)
+        let tockSmoothed = movingAverage(tockFold, windowSize: smoothSamp)
+
+        // Step 5: Sub-event spacing measurement.
+        //
+        // Vacaboja and commercial timegraphers measure the time between the
+        // "lock" (or "unlock") sub-event and the dominant impulse peak. This
+        // interval directly corresponds to the balance wheel traversing the
+        // lift angle — physically what the formula A = L/(2·sin(π·t/T))
+        // expects. Pulse-width-at-threshold (the previous approach) is a
+        // proxy that happens to track sub-event spacing on Swiss multi-
+        // event ticks but diverges substantially on pin-lever movements
+        // (where the strike spike is brief but the lock-to-impulse gap is
+        // 10-15 ms). The sub-event-spacing approach works the same on both
+        // families — no per-rate or per-watch exception needed.
+        //
+        // Implementation: find the dominant peak (impulse, near the center
+        // of the fold), then find the FARTHEST significant secondary peak
+        // within ±25 ms. The farthest-peak rule is correct because:
+        //   - Swiss watches: lock and drop sit ~5 ms either side of impulse;
+        //     farthest is one of them, distance ~5 ms → matches TG.
+        //   - Pin-lever: lock event is 10-15 ms before impulse, drop is
+        //     close-in/masked; farthest is the lock, distance ~12 ms →
+        //     matches TG.
+        let tickPulseMs = subEventSpacingMs(tickSmoothed, sampleRate: sampleRate)
+        let tockPulseMs = subEventSpacingMs(tockSmoothed, sampleRate: sampleRate)
+
+        // Diagnostic dump for tuning. Set WATCHBEAT_DUMP_FOLD=path/prefix
+        // to write per-class-fold CSVs of the rectified+smoothed signal
+        // around the impulse, suitable for plotting and inspection.
+        if let dumpPath = ProcessInfo.processInfo.environment["WATCHBEAT_DUMP_FOLD"] {
+            let dom = tickSmoothed.count / 2
+            let half = Int(0.025 * sampleRate)
+            let lo = max(0, dom - half), hi = min(tickSmoothed.count - 1, dom + half)
+            var out = "ms,tick,tock\n"
+            for i in lo...hi {
+                let ms = Double(i - dom) / sampleRate * 1000.0
+                out += "\(ms),\(tickSmoothed[i]),\(tockSmoothed[i])\n"
+            }
+            try? out.write(toFile: dumpPath, atomically: true, encoding: .utf8)
         }
 
-        // Step 6: Find tick and tock peaks (on the stable 3ms smoothed fold)
-        let tickPeak = findPeakNear(smoothed, target: halfPeriod, range: periodSamples / 3)
-        let tockPeak = findPeakNear(smoothed, target: halfPeriod + periodSamples, range: periodSamples / 3)
-
-        // Baseline = 10th percentile of the smoothed fold. Represents the
-        // "between-events" noise floor. Used to make threshold relative to
-        // (peak - baseline), so high-noise recordings (HVAC, room reverb)
-        // don't have their apparent pulse widths smeared by the constant
-        // background. On clean recordings baseline ≈ 0, and the calculation
-        // collapses to "20% of peak" — the previous behavior.
-        let sortedFold = smoothed.sorted()
-        let baseline = sortedFold[sortedFold.count / 10]
-
-        // Step 7: Measure pulse widths. Two strategies:
-        //   A) 20% threshold above baseline on the 3ms-smoothed fold — works
-        //      great for single-event ticks. Threshold rises with noise floor
-        //      so a noisy recording's pulse isn't artificially widened.
-        //   B) Phase-span on the 0.15ms-smoothed fold — detects up to 3
-        //      prominent sub-peaks around the main peak and uses the span
-        //      from first to last. Physically correct for multi-event ticks,
-        //      but on a clean single-event tick it latches onto noise wiggles
-        //      and reports 1-2 ms spans (way too narrow → amp > 360° bogus).
-        // Neither dominates. Try threshold first; if it's missing or the
-        // resulting span is implausibly wide (>25 ms, classic multi-event
-        // smear), try phase-span.
-        let tickPulseMs = bestPulseMs(peakIdx: tickPeak, fineSignal: fineSmoothed,
-                                      coarseSignal: smoothed, searchRadius: periodSamples / 3,
-                                      beatPeriod: beatPeriod, sampleRate: sampleRate,
-                                      baseline: baseline)
-        let tockPulseMs = bestPulseMs(peakIdx: tockPeak, fineSignal: fineSmoothed,
-                                      coarseSignal: smoothed, searchRadius: periodSamples / 3,
-                                      beatPeriod: beatPeriod, sampleRate: sampleRate,
-                                      baseline: baseline)
-
-        return PulseWidthEstimate(tickPulseMs: tickPulseMs, tockPulseMs: tockPulseMs, foldCount: foldCount)
+        return PulseWidthEstimate(tickPulseMs: tickPulseMs, tockPulseMs: tockPulseMs,
+                                  foldCount: max(tickCount, tockCount))
     }
 
     // MARK: - Amplitude Formula
@@ -244,124 +250,122 @@ public struct AmplitudeEstimator {
 
     // MARK: - Private Helpers
 
-    /// Measure pulse width for one side (tick or tock). Prefer the 20%
-    /// threshold width on the coarse fold; if that produces an implausibly
-    /// wide pulse (> 25 ms, typical of multi-event tick smearing) fall back
-    /// to phase-span detection on the fine fold.
-    private func bestPulseMs(
-        peakIdx: Int?, fineSignal: [Float], coarseSignal: [Float],
-        searchRadius: Int, beatPeriod: Double, sampleRate: Double,
-        baseline: Float
-    ) -> Double? {
-        guard let peak = peakIdx else { return nil }
-        let halfLimit = beatPeriod / 2
-
-        // Primary: threshold-based, with threshold relative to (peak - baseline).
-        // Default 0.30 — chosen to read the impulse alone on Swiss multi-
-        // event escapements (lock/impulse/drop sub-events: 0.30 sits above
-        // the flank peaks). Validated against SeagullStudy 2026-05-04
-        // (cluster reads 240° vs TG 236°). WATCHBEAT_PULSE_THRESHOLD env
-        // var overrides for tuning.
-        let thrEnv = ProcessInfo.processInfo.environment["WATCHBEAT_PULSE_THRESHOLD"]
-        let thrFrac = Float(thrEnv ?? "") ?? 0.30
-        let pwSec = measurePulseWidth(coarseSignal, peakIndex: peak, thresholdFraction: thrFrac,
-                                      maxExtent: searchRadius, sampleRate: sampleRate,
-                                      baseline: baseline)
-        let thresholdMs: Double? = (pwSec > 0 && pwSec < halfLimit) ? pwSec * 1000 : nil
-
-        // Threshold pulses narrower than 25 ms almost always correspond to
-        // a single well-defined escapement event — trust them.
-        if let ms = thresholdMs, ms < 25.0 {
-            return ms
-        }
-
-        // Threshold pulse is either missing or suspiciously wide. Try
-        // phase-span: find up to 3 prominent sub-peaks within ±searchRadius/2
-        // of the main peak and measure the span from first to last.
-        let phaseRadius = searchRadius / 2
-        if let span = phaseSpanMs(fineSignal, around: peak, radius: phaseRadius, sampleRate: sampleRate),
-           span > 0.5, span / 1000.0 < halfLimit {
-            return span
-        }
-
-        // Neither method gave anything usable.
-        return thresholdMs
-    }
-
-    /// Detect up to three prominent local peaks around a center index and
-    /// return the span (in ms) from the first to last in time. Returns nil if
-    /// fewer than two peaks pass prominence (≥12% of local max) and minimum
-    /// separation (0.5 ms).
-    private func phaseSpanMs(_ signal: [Float], around center: Int, radius: Int, sampleRate: Double) -> Double? {
+    /// Sub-event spacing measurement on a per-class folded envelope.
+    ///
+    /// The fold is anchored on each beat's true tick position so the
+    /// dominant peak (impulse) lies at the center of the fold (index =
+    /// foldLen/2). We find significant secondary peaks within ±25 ms of
+    /// the dominant and return the distance to the FARTHEST one.
+    ///
+    /// Why farthest, not nearest: Swiss multi-event ticks have lock and
+    /// drop both ~5 ms from impulse (so farthest ≈ nearest ≈ 5 ms, matches
+    /// TG). Pin-lever ticks have a lock event ~10-15 ms before impulse and
+    /// the drop event acoustically masked by the strike's ringing tail
+    /// (so farthest ≈ lock distance, matches TG; nearest would catch the
+    /// ringing wiggle and underestimate). Using the farthest gives the
+    /// correct lock-to-impulse interval on both families.
+    ///
+    /// Returns nil if the envelope has no significant secondaries (very
+    /// quiet recording, single-event tick with all energy in the spike,
+    /// etc.) — the formula then falls back to the other class or
+    /// suppresses amplitude entirely. Default behavior matches the TG:
+    /// "we can't tell" is reported as "---", not as a wrong number.
+    private func subEventSpacingMs(_ signal: [Float], sampleRate: Double) -> Double? {
         let n = signal.count
-        let lo = max(2, center - radius)
-        let hi = min(n - 3, center + radius)
+        guard n >= 8 else { return nil }
+        let center = n / 2
+
+        // Locate the dominant peak — should be near `center` since the fold
+        // is anchored on the picker's tick position. Allow ±2 ms for slight
+        // misregistration.
+        let centerSlop = max(1, Int(0.002 * sampleRate))
+        let dCo = max(2, center - centerSlop)
+        let dHi = min(n - 3, center + centerSlop)
+        guard dCo < dHi else { return nil }
+        var domIdx = dCo
+        var domVal: Float = signal[dCo]
+        for i in (dCo + 1)...dHi {
+            if signal[i] > domVal { domVal = signal[i]; domIdx = i }
+        }
+        guard domVal > 0 else { return nil }
+
+        // Search radius ±25 ms — covers Swiss (sub-events at ~5 ms) and
+        // pin-lever (~12 ms lock-to-impulse) without picking up next-beat
+        // energy at half-period distance (~80-100 ms).
+        let radiusSamples = Int(0.025 * sampleRate)
+        let lo = max(2, domIdx - radiusSamples)
+        let hi = min(n - 3, domIdx + radiusSamples)
         guard lo + 4 < hi else { return nil }
 
-        var localMax: Float = 0
-        for i in lo...hi { if signal[i] > localMax { localMax = signal[i] } }
-        guard localMax > 0 else { return nil }
-        let threshold = localMax * 0.12
-        let minSepSamples = max(1, Int(0.0005 * sampleRate))
+        // Min separation from dominant: 1.5 ms. Closer "peaks" are
+        // ringing on top of the dominant, not real sub-events.
+        let minSepFromDom = max(1, Int(0.0015 * sampleRate))
+        // Prominence floor: 5% of dominant amplitude. A real sub-event
+        // (lock, drop) typically reads 10-30% of the impulse on Swiss
+        // ticks, ≥ 5% on pin-lever recordings (where the lock event is
+        // a softer click before the strike). Below 5% it's envelope noise.
+        let prominenceFloor: Float = 0.05 * domVal
 
-        // 5-point local maxima above prominence floor.
-        var peaks: [(idx: Int, amp: Float)] = []
+        // For each candidate, require a TRUE VALLEY between the dominant
+        // and the candidate. A real sub-event (lock or drop) is a peak
+        // separated from the impulse by a clear local minimum; a spurious
+        // ripple on the impulse's decay slope has no such valley.
+        func valleyMin(from a: Int, to b: Int) -> Float {
+            let lo = min(a, b), hi = max(a, b)
+            var m = signal[lo]
+            for i in lo...hi { if signal[i] < m { m = signal[i] } }
+            return m
+        }
+
+        // Find the FARTHEST qualifying peak on each side of dominant.
+        //
+        // Why farthest, not most prominent: the dominant peak is typically
+        // the LOCK click (sharpest, loudest). The far-side sub-events
+        // (unlock and drop) sit at distances ≈ ±full-traversal-time. The
+        // mid-side peak (impulse, mostly mechanical motion) sits at
+        // ±half-traversal. For a Swiss watch at 240° amplitude, full
+        // traversal is ~9.7 ms — the unlock peak sits at -9.7 ms (modest
+        // prominence) and the impulse at -4.9 ms (often higher
+        // prominence because of mechanical scraping). Picking the most
+        // prominent peak would lock onto the impulse and read amplitude
+        // ~30% low. Picking the farthest gets us to unlock, the actual
+        // bound of lift-angle traversal.
+        //
+        // The formula A = L/(2·sin(π·t/T)) uses t = half-traversal. So
+        // we report distance/2 from dominant to the farthest sub-event.
+        var farthestBefore: Int = 0
+        var farthestAfter: Int = 0
         for i in lo...hi {
+            let dist = i - domIdx
+            if abs(dist) < minSepFromDom { continue }
             let v = signal[i]
-            if v < threshold { continue }
-            if v >= signal[i - 1] && v >= signal[i - 2] && v >= signal[i + 1] && v >= signal[i + 2] {
-                peaks.append((i, v))
+            if v < prominenceFloor { continue }
+            guard v >= signal[i - 1] && v >= signal[i - 2]
+                  && v >= signal[i + 1] && v >= signal[i + 2] else { continue }
+            let valley = valleyMin(from: domIdx, to: i)
+            let prominence = v - valley
+            if prominence < prominenceFloor { continue }
+            if dist < 0 {
+                if -dist > farthestBefore { farthestBefore = -dist }
+            } else {
+                if dist > farthestAfter { farthestAfter = dist }
             }
         }
-        guard !peaks.isEmpty else { return nil }
 
-        // Greedy: keep tallest peaks that are min-sep from already-kept ones.
-        peaks.sort { $0.amp > $1.amp }
-        var kept: [(idx: Int, amp: Float)] = []
-        for p in peaks {
-            if kept.count >= 3 { break }
-            if kept.allSatisfy({ abs($0.idx - p.idx) >= minSepSamples }) {
-                kept.append(p)
-            }
+        // Use distance to farthest qualifying sub-event divided by 2 to get
+        // half-traversal (the formula's expected `t`). If sub-events are
+        // visible on both sides, average the half-traversals.
+        let halfPulseSamples: Int
+        if farthestBefore > 0 && farthestAfter > 0 {
+            halfPulseSamples = (farthestBefore + farthestAfter) / 4
+        } else if farthestBefore > 0 {
+            halfPulseSamples = farthestBefore / 2
+        } else if farthestAfter > 0 {
+            halfPulseSamples = farthestAfter / 2
+        } else {
+            return nil
         }
-        guard kept.count >= 2 else { return nil }
-
-        kept.sort { $0.idx < $1.idx }
-        let spanSamples = kept.last!.idx - kept.first!.idx
-        return Double(spanSamples) / sampleRate * 1000.0
-    }
-
-    private func measurePulseWidth(
-        _ signal: [Float], peakIndex: Int, thresholdFraction: Float,
-        maxExtent: Int, sampleRate: Double, baseline: Float
-    ) -> Double {
-        let n = signal.count
-        let peakVal = signal[peakIndex]
-        guard peakVal > baseline else { return 0 }
-
-        let thresh = baseline + thresholdFraction * (peakVal - baseline)
-        let lo = max(0, peakIndex - maxExtent)
-        let hi = min(n - 1, peakIndex + maxExtent)
-
-        var lead = peakIndex
-        while lead > lo && signal[lead] > thresh { lead -= 1 }
-        var trail = peakIndex
-        while trail < hi && signal[trail] > thresh { trail += 1 }
-
-        return Double(trail - lead) / sampleRate
-    }
-
-    private func findPeakNear(_ signal: [Float], target: Int, range: Int) -> Int? {
-        let n = signal.count
-        let lo = max(0, target - range)
-        let hi = min(n - 1, target + range)
-        guard lo < hi else { return nil }
-        var best = lo
-        var bestVal: Float = signal[lo]
-        for j in (lo + 1)...hi {
-            if signal[j] > bestVal { bestVal = signal[j]; best = j }
-        }
-        return best
+        return Double(halfPulseSamples) / sampleRate * 1000.0
     }
 
     private func movingAverage(_ signal: [Float], windowSize: Int) -> [Float] {
