@@ -64,6 +64,7 @@ struct ResultScreen: View {
                             HStack(spacing: 2) {
                                 TextField("", text: $liftAngleText)
                                     .keyboardType(.decimalPad)
+                                    .submitLabel(.done)
                                     .font(.system(.body, design: .rounded, weight: .bold))
                                     .multilineTextAlignment(.center)
                                     .frame(width: 56, height: 36)
@@ -75,6 +76,7 @@ struct ResultScreen: View {
                                             coordinator.liftAngleDegrees = val
                                         }
                                     }
+                                    .onSubmit { liftAngleFocused = false }
                                 Text("°")
                                     .font(.body.bold())
                                     .foregroundStyle(.secondary)
@@ -147,6 +149,19 @@ struct ResultScreen: View {
             }
             .padding(.horizontal, 20)
         }
+        // Tap anywhere on the screen background to dismiss the keyboard
+        // when the lift-angle field is focused. Belt-and-suspenders for
+        // the keyboard toolbar Done button below: SwiftUI's keyboard-
+        // placement toolbar occasionally fails to render (especially in
+        // combination with .ignoresSafeArea(.keyboard)), leaving users
+        // with no way to dismiss the keyboard. The simultaneousGesture
+        // doesn't block child button taps — they still fire normally.
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                if liftAngleFocused { liftAngleFocused = false }
+            }
+        )
         .ignoresSafeArea(.keyboard)
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
