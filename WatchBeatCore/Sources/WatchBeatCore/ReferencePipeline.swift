@@ -577,20 +577,33 @@ extension MeasurementPipeline {
         let snr = winner.snr
         let confirmedFraction = winner.confirmedFraction
 
-        // Rate reporting: prefer FFT-derived rate (integrates over full
-        // 15 s, robust to per-window noise). BUT when an impulse
-        // contamination has shifted the FFT peak, the FFT rate diverges
-        // from the regression slope on the matched-filter-cleaned picks
-        // (which lock onto real ticks). When they disagree by more than
-        // 50 s/day, trust the regression — the matched-filter picks are
-        // more reliable than a noise-shifted FFT bin.
+        // Rate reporting: use the regression slope from cleaned-confirmed
+        // picks. The slope is the average tick spacing in samples /
+        // sampleRate — directly the tick cadence we want to report. The
+        // FFT-derived fHz uses parabolic interpolation for sub-bin
+        // precision and has a small but consistent bias on Hann-windowed
+        // peaks (~0.03 bins ≈ 30-40 s/day at our 15 s window). On the
+        // SeagullStudy this bias gave a -41 s/day offset vs the
+        // timegrapher cluster; the regression slope agrees with the
+        // timegrapher to ±2 s/day on the same recordings.
+        //
+        // The FFT remains essential for identifying which standard band
+        // a recording belongs to, anchoring per-window centers, and the
+        // high-σ fallback path below — but it is no longer the source of
+        // the reported rate.
         let fftRateErrPerDay = (winner.fHz / snappedRate.hz - 1.0) * 86400.0
         let regRateErrPerDay = slope > 0
             ? ((1.0 / slope) / snappedRate.hz - 1.0) * 86400.0
             : fftRateErrPerDay
-        let rateErrPerDay = abs(fftRateErrPerDay - regRateErrPerDay) > 50
-            ? regRateErrPerDay
-            : fftRateErrPerDay
+        let rateErrPerDay = regRateErrPerDay
+
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RATE"] != nil {
+            FileHandle.standardError.write(
+                String(format: "[rate] fft=%+.2f s/d  reg=%+.2f s/d  diff=%+.2f  fHz=%.6f  slope_period=%.6f ms\n",
+                       fftRateErrPerDay, regRateErrPerDay,
+                       fftRateErrPerDay - regRateErrPerDay,
+                       winner.fHz, slope * 1000.0).data(using: .utf8)!)
+        }
 
         // Quality from the winner's SNR. Same formula as before — see notes
         // on tightening from snr/5 to snr/10 to keep pure noise (snr ~ 2)
