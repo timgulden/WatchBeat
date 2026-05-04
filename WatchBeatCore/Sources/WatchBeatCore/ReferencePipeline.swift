@@ -59,6 +59,16 @@ extension MeasurementPipeline {
         let smoothWin = max(3, Int(0.001 * sampleRate)) | 1
         let smoothed = movingAverage(of: squared, windowSamples: smoothWin)
 
+        // Tried: Difference-of-Boxcars matched filter (single-scale and
+        // multi-scale) to suppress broad noise events. Both correctly
+        // preserved Seagull cases but regressed Timex2Odd (whose
+        // multi-sub-event tick character spans wider than typical
+        // Swiss/pin-lever ticks). Reverted — the impulse clipping above
+        // captures the main robustness win without affecting any
+        // watch's tick character. A proper FFT-based matched filter
+        // with a watch-family-specific kernel would be the right next
+        // step if more discrimination is needed.
+
         // Decimate to 1 kHz for FFT.
         let decimFactor = max(1, Int(sampleRate / 1000.0))
         let envRate = sampleRate / Double(decimFactor)
