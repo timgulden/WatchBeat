@@ -71,11 +71,11 @@ struct RecordingScreen: View {
 
     /// Phase title (line 2) tracks the wheel's wedge boundaries:
     /// - 0–15 s post-Measure: "Measuring..." (wedge 0°–90°)
-    /// - 15–18 s:              "Analyzing..." (wedge 90°–108°)
-    /// - 18+ s:                "Refining..." (wedge 108°–360°)
+    /// - 15–20 s:              "Analyzing..." (wedge 90°–120°)
+    /// - 20+ s:                "Refining..."  (wedge 120°–360°)
     private func phaseTitle(elapsed: Double) -> String {
         let measuringEnd = MeasurementConstants.analysisWindow         // 15 s
-        let analyzingEnd = measuringEnd + 3.0                          // +3 s slice
+        let analyzingEnd = measuringEnd + 5.0                          // +5 s slice
         if elapsed < measuringEnd { return "Measuring..." }
         if elapsed < analyzingEnd { return "Analyzing..." }
         return "Refining..."
@@ -85,7 +85,7 @@ struct RecordingScreen: View {
     /// for the user.
     private func phaseSubtitle(elapsed: Double) -> String {
         let measuringEnd = MeasurementConstants.analysisWindow
-        let analyzingEnd = measuringEnd + 3.0
+        let analyzingEnd = measuringEnd + 5.0
         if elapsed < measuringEnd { return "Collecting data." }
         if elapsed < analyzingEnd { return "Processing data." }
         return "Searching for stronger signal."
