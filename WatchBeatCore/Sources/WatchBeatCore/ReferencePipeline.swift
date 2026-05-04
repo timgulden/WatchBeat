@@ -26,29 +26,109 @@ extension MeasurementPipeline {
         var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = filtered.count
 
-        // Impulse suppression: clip samples whose magnitude exceeds 50×
-        // the median |signal|. A bump or fingernail flick peaks at
-        // 50-1000× the median; real watch ticks peak well below 50×.
-        // Without this step, a single broadband impulse spreads energy
-        // across the FFT and shifts the peak frequency by 0.001-0.05 Hz,
-        // producing apparent rate errors of tens to hundreds of s/day
-        // even when the picker downstream is working perfectly.
-        // Clipping (rather than zeroing) preserves any tick that
-        // happens to coincide with the impulse.
+        // Impulse suppression — two-tier:
+        //   Tier 1 (clip at 100× median |signal|): clamp peak amplitude
+        //     of any sample exceeding the threshold. Catches the loudest
+        //     part of any non-tick impulse without affecting tick
+        //     positions. Some real-tick peaks also exceed 100× — clipping
+        //     them is harmless (just limits one sample's amplitude).
+        //   Tier 2 (excise at 300× median): for samples that exceed the
+        //     much-higher 300× threshold, ALSO zero the surrounding
+        //     ±5 ms region with a 0.5 ms cosine taper at the edges. The
+        //     higher threshold ensures we only excise around very loud
+        //     transients (bumps, flicks); real watch ticks rarely peak
+        //     above 300× median.
         //
-        // Threshold tuned to fix Seagull9 (single phone bump → was
-        // -69 s/day, now -34) and Seagull11 (3 fingernail flicks → was
-        // +591 s/day, now +1) without regressing the broader corpus.
+        // Excision matters because an impulse's broadband ringing
+        // extends beyond its peak. A flick is sharp (~1 ms peak) but
+        // its energy spreads 5-15 ms in the HP-filtered signal.
+        // Clipping just the peak still leaves the ringing in the FFT,
+        // shifting the peak frequency by tens to hundreds of s/day-
+        // worth of rate error. Zeroing the region (not just the peak)
+        // removes the contamination entirely.
+        //
+        // The taper at the excision edges avoids fresh spectral
+        // artifacts from sharp zero-to-signal transitions.
         let absVals = filtered.map { abs($0) }.sorted()
         let medianAbs = absVals[absVals.count / 2]
         if medianAbs > 0 {
             let clipLevel = 100 * medianAbs
+
+            // Pass 1: clip individual samples > 100× median, collect
+            // clipped positions.
+            var clipPositions: [Int] = []
             for i in 0..<n {
                 if filtered[i] > clipLevel {
+                    clipPositions.append(i)
                     filtered[i] = clipLevel
                 } else if filtered[i] < -clipLevel {
+                    clipPositions.append(i)
                     filtered[i] = -clipLevel
                 }
+            }
+
+            // Pass 2 (duration-based excise): cluster clipped positions
+            // that are within ~0.5 ms of each other (clipped samples
+            // from the same physical event come in bursts at the
+            // signal's oscillation period — gaps within an event stay
+            // below 0.5 ms). For each cluster, measure the duration
+            // from first to last clipped sample. Real ticks have brief
+            // clipped clusters (<2 ms span); bumps and flicks have
+            // longer ringing (>3 ms span). Excise only the long ones.
+            let clusterGap = max(1, Int(0.0005 * sampleRate))
+            let minImpulseSpan = max(1, Int(0.007 * sampleRate))
+            var excisePositions: [Int] = []
+            var clusterStart = -1
+            var clusterEnd = -1
+            for pos in clipPositions {
+                if clusterStart < 0 {
+                    clusterStart = pos
+                    clusterEnd = pos
+                } else if pos - clusterEnd <= clusterGap {
+                    clusterEnd = pos
+                } else {
+                    if clusterEnd - clusterStart >= minImpulseSpan {
+                        excisePositions.append((clusterStart + clusterEnd) / 2)
+                    }
+                    clusterStart = pos
+                    clusterEnd = pos
+                }
+            }
+            if clusterStart >= 0 && clusterEnd - clusterStart >= minImpulseSpan {
+                excisePositions.append((clusterStart + clusterEnd) / 2)
+            }
+
+            // Build excision mask. mask[i] = 0 inside the core ±5 ms
+            // around any excise position, ramping smoothly to 1 over a
+            // 0.5 ms cosine taper outside. Multiplying filtered by the
+            // mask both zeros the core and smooths the edges. min()
+            // composition handles overlapping regions naturally.
+            if !excisePositions.isEmpty {
+                let excisionHalf = max(1, Int(0.005 * sampleRate))
+                let rampN = max(1, Int(0.0005 * sampleRate))
+                var mask = [Float](repeating: 1.0, count: n)
+                for pos in excisePositions {
+                    let coreLo = max(0, pos - excisionHalf)
+                    let coreHi = min(n - 1, pos + excisionHalf)
+                    for i in coreLo...coreHi { mask[i] = 0 }
+                    let leftLo = max(0, coreLo - rampN)
+                    if leftLo < coreLo {
+                        for i in leftLo..<coreLo {
+                            let t = Float(i - leftLo) / Float(coreLo - leftLo)
+                            let m = 0.5 * (1 + cosf(.pi * t))  // 1 → 0
+                            if m < mask[i] { mask[i] = m }
+                        }
+                    }
+                    let rightHi = min(n - 1, coreHi + rampN)
+                    if rightHi > coreHi {
+                        for i in (coreHi + 1)...rightHi {
+                            let t = Float(i - coreHi) / Float(rightHi - coreHi)
+                            let m = 0.5 * (1 - cosf(.pi * t))  // 0 → 1
+                            if m < mask[i] { mask[i] = m }
+                        }
+                    }
+                }
+                for i in 0..<n { filtered[i] *= mask[i] }
             }
         }
 
