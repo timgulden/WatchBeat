@@ -763,21 +763,17 @@ extension MeasurementPipeline {
         let n = rawSamples.count
         guard n > Int(sampleRate * 5) else { return false }  // need ≥ 5 s
 
-        // Highpass at 500 Hz before envelope detection. The watch's click
-        // — sharp tick or dull stepper "thunk" — has high-frequency
-        // content; the broadband room sound (HVAC, talking, traffic) does
-        // not. Filtering out everything below 500 Hz dramatically
-        // improves the click's signal-to-noise in the rectified envelope.
-        //
-        // Empirical sweep across two quartz recordings + corpus:
-        //   no filter:  Q1=1.53, Q2=1.05, mech_max=1.05  (overlap)
-        //   HP 200 Hz:  Q1=0.76, Q2=1.23, mech_max=1.15  (worse)
-        //   HP 500 Hz:  Q1=1.73, Q2=2.26, mech_max=0.81  (clean separation)
-        //   HP 800 Hz:  Q1=3.43, Q2=2.48, mech_max=0.93  (clean, slightly noisier)
-        // 500 Hz gives the biggest margin between quartz minimum (1.73)
-        // and mechanical maximum (0.81).
+        // Bandpass 6-7 kHz before envelope detection. Tim's spectrum-
+        // analyzer measurements showed both quartz watches have their
+        // 1 Hz click energy concentrated (or at least present) in the
+        // 6-7 kHz band. Isolating that band dramatically improves the
+        // click's signal-to-noise vs ambient sounds (HVAC, voices, mid-
+        // band noise) which sit elsewhere in the spectrum.
         let conditioner = SignalConditioner()
-        let filtered = conditioner.highpassFilter(rawSamples, sampleRate: sampleRate, cutoff: 500)
+        let filtered = conditioner.bandpassFilter(
+            rawSamples, sampleRate: sampleRate,
+            lowCutoff: 6000, highCutoff: min(7000, sampleRate / 2 - 100)
+        )
 
         // Rectify (envelope detection).
         var rectified = [Float](repeating: 0, count: n)
@@ -850,11 +846,15 @@ extension MeasurementPipeline {
             FileHandle.standardError.write(msg.data(using: .utf8)!)
         }
 
-        // Threshold 1.5 with the 500 Hz highpass applied above: both
-        // quartz recordings produce ≥ 1.73, all mechanical corpus
-        // produces ≤ 0.93. Margin 0.8 — comfortable enough that no
-        // single ambiguous recording lands in the gap.
-        return halfSum > 0 && integerSum > 1.5 * halfSum
+        // Threshold 4.0 with the 6-7 kHz bandpass applied above. Tim's
+        // two quartz recordings produce 8.49 and 13.56 — large margin
+        // above the threshold. Clean mechanical recordings that reach
+        // Result via the normal path can show ratios up to ~4.3 (CD1
+        // Omega) but never hit this detector because they don't route
+        // to Weak Signal. Genuinely weak mechanical recordings (which
+        // WOULD hit this detector) should have noise-vs-noise ratios
+        // near 1; 4.0 is safely above any plausible such case.
+        return halfSum > 0 && integerSum > 4.0 * halfSum
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,
