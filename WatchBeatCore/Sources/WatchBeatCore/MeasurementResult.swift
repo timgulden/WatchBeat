@@ -68,6 +68,15 @@ public struct MeasurementResult: Sendable {
     /// (assume all confirmed) for callers that don't compute it.
     public let confirmedFraction: Double
 
+    /// True when the envelope FFT shows a strong peak at ~1 Hz dominating
+    /// all standard mechanical-rate bands. Quartz watches tick at exactly
+    /// 1 Hz; if the recording's strongest periodic content sits there, the
+    /// watch is quartz and WatchBeat can't analyze it (the app is designed
+    /// for mechanical movements at 5-10 Hz). The router uses this to
+    /// surface a clear "this is a quartz watch" page instead of a
+    /// confusing weak-signal failure.
+    public let quartzDetected: Bool
+
     public init(
         snappedRate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
@@ -80,7 +89,8 @@ public struct MeasurementResult: Sendable {
         isLowConfidence: Bool = false,
         measuredPeriod: Double? = nil,
         regressionIntercept: Double? = nil,
-        confirmedFraction: Double = 1.0
+        confirmedFraction: Double = 1.0,
+        quartzDetected: Bool = false
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -94,5 +104,6 @@ public struct MeasurementResult: Sendable {
         self.measuredPeriod = measuredPeriod
         self.regressionIntercept = regressionIntercept
         self.confirmedFraction = confirmedFraction
+        self.quartzDetected = quartzDetected
     }
 }

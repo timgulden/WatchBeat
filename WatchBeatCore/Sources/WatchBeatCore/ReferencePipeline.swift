@@ -574,7 +574,54 @@ extension MeasurementPipeline {
                     "[ref-cand] \(c.snappedRate.rawValue) bph  fHz=\(String(format: "%.4f", c.fHz))  m=\(c.beatPositions.count)  conf=\(String(format: "%.2f", c.confirmedFraction))  σ=\(String(format: "%.2f", c.avgClassStd))  snr=\(String(format: "%.1f", c.snr))  score=\(String(format: "%.4f", c.score))\n".data(using: .utf8)!)
             }
         }
+        // Quartz detection: a quartz watch ticks at exactly 1 Hz, putting
+        // its dominant FFT bin near 1 Hz with very little energy at any of
+        // the standard mechanical rates (5-10 Hz). Compare the peak
+        // magnitude in a narrow band around 1 Hz to the strongest
+        // mechanical-rate candidate's peak magnitude. If the 1 Hz peak is
+        // ≥ 3× stronger, the recording is from a quartz watch and we
+        // surface a dedicated screen rather than letting it fall through
+        // to weak-signal / confusing low-quality result.
+        //
+        // The 3× threshold is loose enough that recordings of mechanical
+        // watches (which can have 1 Hz envelope content from gentle
+        // amplitude modulation, breathing, or slow noise) won't trigger,
+        // but a quartz watch's clean 1 Hz pulse train (with very little
+        // mechanical-rate harmonic content reaching this band) will.
+        let quartzCenterBin = Int(round(1.0 / freqRes))
+        let quartzBandRadius = max(1, Int(ceil(0.2 / freqRes)))
+        let qLo = max(1, quartzCenterBin - quartzBandRadius)
+        let qHi = min(halfN - 2, quartzCenterBin + quartzBandRadius)
+        var quartzPeakMag: Float = 0
+        if qLo < qHi {
+            for b in qLo...qHi {
+                let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
+                if m2 > quartzPeakMag { quartzPeakMag = m2 }
+            }
+            quartzPeakMag = sqrt(quartzPeakMag)
+        }
+        var maxMechPeakMag: Float = 0
+        for hz in standardHzs {
+            let center = Int(round(hz / freqRes))
+            let lo = max(1, center - bandRadius)
+            let hi = min(halfN - 2, center + bandRadius)
+            guard lo < hi else { continue }
+            for b in lo...hi {
+                let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
+                if m2 > maxMechPeakMag { maxMechPeakMag = m2 }
+            }
+        }
+        maxMechPeakMag = sqrt(maxMechPeakMag)
+        let quartzDetected = (maxMechPeakMag > 0) && (quartzPeakMag > 3.0 * maxMechPeakMag)
+
         guard let winner = candidates.max(by: { $0.score < $1.score }) else {
+            // No mechanical candidate at all. If 1 Hz dominated, still
+            // flag as quartz so the router can surface that page rather
+            // than weak-signal.
+            if quartzDetected {
+                return (Self.quartzResult(sampleRate: sampleRate),
+                        Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
+            }
             return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
         }
 
@@ -678,7 +725,8 @@ extension MeasurementPipeline {
             isLowConfidence: isLowConfidence,
             measuredPeriod: slope,
             regressionIntercept: intercept,
-            confirmedFraction: confirmedFraction
+            confirmedFraction: confirmedFraction,
+            quartzDetected: quartzDetected
         )
 
         let diagnostics = PipelineDiagnostics(
@@ -704,6 +752,25 @@ extension MeasurementPipeline {
             isLowConfidence: true,
             measuredPeriod: nil,
             regressionIntercept: nil
+        )
+    }
+
+    /// Result placeholder for quartz-detected recordings: no mechanical
+    /// candidate survived but the 1 Hz peak dominated. Carries the
+    /// quartzDetected flag so the router can route to the quartz screen.
+    static func quartzResult(sampleRate: Double) -> MeasurementResult {
+        MeasurementResult(
+            snappedRate: .bph28800,
+            rateErrorSecondsPerDay: 0,
+            beatErrorMilliseconds: nil,
+            amplitudeProxy: 0,
+            qualityScore: 0,
+            tickCount: 0,
+            tickTimings: [],
+            isLowConfidence: false,
+            measuredPeriod: nil,
+            regressionIntercept: nil,
+            quartzDetected: true
         )
     }
 

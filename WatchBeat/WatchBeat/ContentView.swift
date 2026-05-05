@@ -29,6 +29,8 @@ struct ContentView: View {
                 WeakSignalScreen(diagnostic: diagnostic, coordinator: coordinator)
             case .lowAnalyticalConfidence:
                 LowAnalyticalConfidenceScreen(coordinator: coordinator)
+            case .quartzDetected:
+                QuartzDetectedScreen(coordinator: coordinator)
             case .micUnavailable(let diagnostic):
                 MicUnavailableScreen(diagnostic: diagnostic, coordinator: coordinator)
             }
@@ -63,7 +65,7 @@ struct ContentView: View {
         case .result:
             coordinator.cancelMeasurement()  // returns to .idle
         case .needsService, .rateConfusion, .weakSignal,
-             .lowAnalyticalConfidence, .micUnavailable:
+             .lowAnalyticalConfidence, .quartzDetected, .micUnavailable:
             coordinator.startMonitoring()
         case .idle, .analyzing:
             break

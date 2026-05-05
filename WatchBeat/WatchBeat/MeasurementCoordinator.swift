@@ -88,6 +88,7 @@ final class MeasurementCoordinator: ObservableObject {
         case rateConfusion(RateConfusionData)
         case weakSignal(diagnostic: String)
         case lowAnalyticalConfidence
+        case quartzDetected
         case micUnavailable(diagnostic: String?)
     }
 
@@ -401,6 +402,8 @@ final class MeasurementCoordinator: ObservableObject {
             state = .weakSignal(diagnostic: diag)
         case .lowAnalyticalConfidence:
             state = .lowAnalyticalConfidence
+        case .quartzDetected:
+            state = .quartzDetected
         case .rateConfusion(let data):
             state = .rateConfusion(data)
         case .needsService(let data):

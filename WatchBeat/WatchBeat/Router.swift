@@ -18,6 +18,11 @@ enum Router {
         case lowAnalyticalConfidence
         case rateConfusion(MeasurementCoordinator.RateConfusionData)
         case needsService(MeasurementCoordinator.NeedsServiceData)
+        /// Strong 1 Hz peak with no comparable mechanical-rate content.
+        /// The user is trying to measure a quartz watch; surface a clear
+        /// "this app is for mechanical watches" page rather than a
+        /// confusing weak-signal failure.
+        case quartzDetected
         /// All gates passed. Caller computes pulse widths and builds the
         /// display data from `bestResult` (which is non-nil in this case).
         case displayResult
@@ -41,6 +46,16 @@ enum Router {
         weakSignalContext: WeakSignalContext,
         maxPlausibleRateError: Double
     ) -> Decision {
+        // Gate 0: Quartz Detected. A strong 1 Hz peak with no comparable
+        // mechanical-rate content means the user is measuring a quartz
+        // watch. Route to the quartz screen — the app is for mechanical
+        // movements at 5-10 Hz only. Check before Weak Signal so quartz
+        // recordings (which would otherwise fail Gate 1's tick-count
+        // check) get the right page.
+        if bestResult?.quartzDetected == true {
+            return .quartzDetected
+        }
+
         // Gate 1: Weak Signal. Either no result at all, or not enough
         // meaningful ticks to analyze. Use raw quality (display quality is
         // cosmetic only, see CLAUDE.md UI/UX principle 5).
