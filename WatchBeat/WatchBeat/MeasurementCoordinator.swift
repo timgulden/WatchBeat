@@ -178,7 +178,11 @@ final class MeasurementCoordinator: ObservableObject {
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
-    private static let defaultLiftAngle: Double = 52.0
+    // 50° is the dominant cluster for modern Swiss/Japanese automatics
+    // (ETA 2824/2892/7750, Sellita SW200, Omega 8500/8800/1120, Rolex
+    // 3135, JLC 899). Most likely correct value out of the box for the
+    // largest user group; vintage and pin-lever owners adjust manually.
+    private static let defaultLiftAngle: Double = 50.0
 
     init(pipeline: BeatPicker = MeasurementPipeline(),
          amplitudeEstimator: AmplitudeMeasuring = AmplitudeEstimator()) {

@@ -32,7 +32,7 @@ struct LiftAngleInfoScreen: View {
                     tipRow(icon: "clock.arrow.circlepath",
                            text: "Lift angle does NOT affect rate or beat error. Those readings are accurate regardless of what value is entered.")
                     tipRow(icon: "magnifyingglass",
-                           text: "To find yours: search the web for your watch caliber and \"lift angle\". Common values: ETA 2824 = 50°, ETA 6497/6498 = 49°, Omega 8500 = 50°, vintage Omega (485, 1120, 2500) = 52°, Seagull ST3600 = 44°, vintage Swiss = 38°-44°, vintage pin-lever = 40°.")
+                           text: "To find yours: search the web for your watch caliber and \"lift angle\". Common values: most modern Swiss automatics (ETA 2824/2892/7750, Sellita SW200, Omega 8500, Rolex 3135) = 50°, Miyota and most Seiko = 51°, vintage Omega (485, 1120) = 52°, ETA 6497/6498 = 49°, Seagull ST3600 = 44°, vintage Swiss = 38°-44°, vintage pin-lever = 40°.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)

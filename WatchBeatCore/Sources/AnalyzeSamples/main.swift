@@ -35,8 +35,10 @@ print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  conf
              result.isLowConfidence ? "Y" : "N"))
 
 // Amplitude flow (matches iOS app pipeline): measurePulseWidths → combinedAmplitude.
-// Default lift angle 52° (Omega 485). Override with WATCHBEAT_LIFT_ANGLE env var.
-let liftAngle = Double(ProcessInfo.processInfo.environment["WATCHBEAT_LIFT_ANGLE"] ?? "") ?? 52.0
+// Default lift angle 50° (covers ETA 2824/2892/7750, Sellita SW200, Omega 8500
+// /8800/1120, Rolex 3135, JLC 899 — the dominant cluster for modern Swiss/
+// Japanese automatics). Override with WATCHBEAT_LIFT_ANGLE env var.
+let liftAngle = Double(ProcessInfo.processInfo.environment["WATCHBEAT_LIFT_ANGLE"] ?? "") ?? 50.0
 let amplitudeEstimator = AmplitudeEstimator()
 let pulseWidths = amplitudeEstimator.measurePulseWidths(
     input: buffer,
