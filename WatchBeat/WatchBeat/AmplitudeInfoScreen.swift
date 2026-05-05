@@ -34,7 +34,7 @@ struct AmplitudeInfoScreen: View {
                     tipRow(icon: "chart.bar.doc.horizontal",
                            text: "Typical healthy ranges (full wind, dial up): modern Swiss automatic 280°-310°, modern Japanese 250°-290°, vintage Swiss lever 260°-290°, vintage pin-lever 200°-260°. Below ~200° suggests service is due.")
                     tipRow(icon: "exclamationmark.triangle",
-                           text: "Amplitude readings depend on the lift angle being correct. If your reading seems off, check the lift angle for your specific caliber.")
+                           text: "Amplitude readings are proportional to lift angle. Enter the lift angle for your specific caliber for an accurate reading.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
