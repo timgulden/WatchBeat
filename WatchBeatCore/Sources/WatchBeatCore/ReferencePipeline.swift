@@ -23,6 +23,19 @@ extension MeasurementPipeline {
 
     public func measureReferenceWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
         let sampleRate = input.sampleRate
+
+        // Quartz detection: run BEFORE the 5 kHz highpass on the raw
+        // signal. A quartz watch tick is a small mechanical click whose
+        // audio energy spans a wide band, but is most detectable in the
+        // mid-frequency range — it typically does NOT survive a 5 kHz
+        // highpass (which is tuned for sharp mechanical-watch transients).
+        // Running quartz detection on the raw signal envelope avoids
+        // missing it entirely, as the previous post-HP check did.
+        if Self.detectQuartz(rawSamples: input.samples, sampleRate: sampleRate) {
+            return (Self.quartzResult(sampleRate: sampleRate),
+                    Self.emptyDiagnostics(sampleRate: sampleRate, n: input.samples.count))
+        }
+
         var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = filtered.count
 
@@ -574,54 +587,7 @@ extension MeasurementPipeline {
                     "[ref-cand] \(c.snappedRate.rawValue) bph  fHz=\(String(format: "%.4f", c.fHz))  m=\(c.beatPositions.count)  conf=\(String(format: "%.2f", c.confirmedFraction))  σ=\(String(format: "%.2f", c.avgClassStd))  snr=\(String(format: "%.1f", c.snr))  score=\(String(format: "%.4f", c.score))\n".data(using: .utf8)!)
             }
         }
-        // Quartz detection: a quartz watch ticks at exactly 1 Hz, putting
-        // its dominant FFT bin near 1 Hz with very little energy at any of
-        // the standard mechanical rates (5-10 Hz). Compare the peak
-        // magnitude in a narrow band around 1 Hz to the strongest
-        // mechanical-rate candidate's peak magnitude. If the 1 Hz peak is
-        // ≥ 3× stronger, the recording is from a quartz watch and we
-        // surface a dedicated screen rather than letting it fall through
-        // to weak-signal / confusing low-quality result.
-        //
-        // The 3× threshold is loose enough that recordings of mechanical
-        // watches (which can have 1 Hz envelope content from gentle
-        // amplitude modulation, breathing, or slow noise) won't trigger,
-        // but a quartz watch's clean 1 Hz pulse train (with very little
-        // mechanical-rate harmonic content reaching this band) will.
-        let quartzCenterBin = Int(round(1.0 / freqRes))
-        let quartzBandRadius = max(1, Int(ceil(0.2 / freqRes)))
-        let qLo = max(1, quartzCenterBin - quartzBandRadius)
-        let qHi = min(halfN - 2, quartzCenterBin + quartzBandRadius)
-        var quartzPeakMag: Float = 0
-        if qLo < qHi {
-            for b in qLo...qHi {
-                let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-                if m2 > quartzPeakMag { quartzPeakMag = m2 }
-            }
-            quartzPeakMag = sqrt(quartzPeakMag)
-        }
-        var maxMechPeakMag: Float = 0
-        for hz in standardHzs {
-            let center = Int(round(hz / freqRes))
-            let lo = max(1, center - bandRadius)
-            let hi = min(halfN - 2, center + bandRadius)
-            guard lo < hi else { continue }
-            for b in lo...hi {
-                let m2 = realPart[b] * realPart[b] + imagPart[b] * imagPart[b]
-                if m2 > maxMechPeakMag { maxMechPeakMag = m2 }
-            }
-        }
-        maxMechPeakMag = sqrt(maxMechPeakMag)
-        let quartzDetected = (maxMechPeakMag > 0) && (quartzPeakMag > 3.0 * maxMechPeakMag)
-
         guard let winner = candidates.max(by: { $0.score < $1.score }) else {
-            // No mechanical candidate at all. If 1 Hz dominated, still
-            // flag as quartz so the router can surface that page rather
-            // than weak-signal.
-            if quartzDetected {
-                return (Self.quartzResult(sampleRate: sampleRate),
-                        Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
-            }
             return (Self.emptyResult(sampleRate: sampleRate), Self.emptyDiagnostics(sampleRate: sampleRate, n: n))
         }
 
@@ -725,8 +691,7 @@ extension MeasurementPipeline {
             isLowConfidence: isLowConfidence,
             measuredPeriod: slope,
             regressionIntercept: intercept,
-            confirmedFraction: confirmedFraction,
-            quartzDetected: quartzDetected
+            confirmedFraction: confirmedFraction
         )
 
         let diagnostics = PipelineDiagnostics(
@@ -783,6 +748,108 @@ extension MeasurementPipeline {
             sampleCount: n,
             rateScores: []
         )
+    }
+
+    /// Quartz-watch detection on the RAW (no-highpass) signal.
+    ///
+    /// A quartz watch's stepper-motor click is a small mechanical event
+    /// whose audio energy is concentrated in the mid-frequency band
+    /// (audible click ~1-3 kHz, lower than mechanical-watch tick energy).
+    /// The 5 kHz highpass we use for mechanical tick detection removes
+    /// most of a quartz click — so the post-HP envelope FFT cannot reliably
+    /// see the 1 Hz peak. This detector runs on the raw signal envelope:
+    /// rectify → decimate to 1 kHz → Hann window → FFT → compare 1 Hz
+    /// peak to the strongest peak in the mechanical band (4.5-10.5 Hz).
+    /// If 1 Hz is ≥ 3× stronger, return true.
+    ///
+    /// Threshold tuning: real quartz recordings have 1 Hz peaks dwarfing
+    /// the mechanical band by 5×-50× because there's literally no
+    /// mechanical-rate periodic content. Mechanical recordings have
+    /// strong mechanical-band peaks; their 1 Hz envelope content (from
+    /// breathing, slow movement, ambient drift) sits far below. The 3×
+    /// threshold gives ample margin both directions.
+    static func detectQuartz(rawSamples: [Float], sampleRate: Double) -> Bool {
+        let n = rawSamples.count
+        guard n > Int(sampleRate * 5) else { return false }  // need ≥ 5 s
+
+        // Rectify (envelope detection).
+        var rectified = [Float](repeating: 0, count: n)
+        vDSP_vabs(rawSamples, 1, &rectified, 1, vDSP_Length(n))
+
+        // Decimate to ~1 kHz with simple averaging.
+        let decimFactor = max(1, Int(sampleRate / 1000.0))
+        let envRate = sampleRate / Double(decimFactor)
+        let envN = n / decimFactor
+        var env = [Float](repeating: 0, count: envN)
+        for i in 0..<envN {
+            var ws: Float = 0
+            vDSP_sve(rectified.withUnsafeBufferPointer { $0.baseAddress! + i * decimFactor }, 1,
+                     &ws, vDSP_Length(decimFactor))
+            env[i] = ws / Float(decimFactor)
+        }
+
+        // Remove DC.
+        var meanEnv: Float = 0
+        vDSP_meanv(env, 1, &meanEnv, vDSP_Length(envN))
+        var negMean = -meanEnv
+        vDSP_vsadd(env, 1, &negMean, &env, 1, vDSP_Length(envN))
+
+        // Hann window in place.
+        var hann = [Float](repeating: 0, count: envN)
+        vDSP_hann_window(&hann, vDSP_Length(envN), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(env, 1, hann, 1, &env, 1, vDSP_Length(envN))
+
+        // Pad to next power of 2.
+        let log2N = max(1, Int(ceil(log2(Double(envN)))))
+        let fftLength = 1 << log2N
+        var realIn = [Float](repeating: 0, count: fftLength)
+        var imagIn = [Float](repeating: 0, count: fftLength)
+        for i in 0..<envN { realIn[i] = env[i] }
+
+        guard let setup = vDSP_create_fftsetup(vDSP_Length(log2N), Int32(kFFTRadix2)) else { return false }
+        defer { vDSP_destroy_fftsetup(setup) }
+        realIn.withUnsafeMutableBufferPointer { rb in
+            imagIn.withUnsafeMutableBufferPointer { ib in
+                var split = DSPSplitComplex(realp: rb.baseAddress!, imagp: ib.baseAddress!)
+                vDSP_fft_zip(setup, &split, 1, vDSP_Length(log2N), Int32(FFT_FORWARD))
+            }
+        }
+
+        let halfN = fftLength / 2
+        let freqRes = envRate / Double(fftLength)
+
+        // 1 Hz band: ±0.2 Hz around the 1 Hz bin.
+        let oneHzBin = Int(round(1.0 / freqRes))
+        let radius = max(1, Int(ceil(0.2 / freqRes)))
+        var oneHzPeak: Float = 0
+        let qLo = max(1, oneHzBin - radius)
+        let qHi = min(halfN - 2, oneHzBin + radius)
+        if qLo < qHi {
+            for b in qLo...qHi {
+                let m2 = realIn[b] * realIn[b] + imagIn[b] * imagIn[b]
+                if m2 > oneHzPeak { oneHzPeak = m2 }
+            }
+            oneHzPeak = sqrt(oneHzPeak)
+        }
+
+        // Mechanical band: 4.5-10.5 Hz covers all standard watch rates.
+        let mLo = max(1, Int(round(4.5 / freqRes)))
+        let mHi = min(halfN - 2, Int(round(10.5 / freqRes)))
+        var mechPeak: Float = 0
+        if mLo < mHi {
+            for b in mLo...mHi {
+                let m2 = realIn[b] * realIn[b] + imagIn[b] * imagIn[b]
+                if m2 > mechPeak { mechPeak = m2 }
+            }
+            mechPeak = sqrt(mechPeak)
+        }
+
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_QUARTZ"] != nil {
+            FileHandle.standardError.write(
+                "[quartz] 1Hz=\(oneHzPeak) mech=\(mechPeak) ratio=\(mechPeak > 0 ? oneHzPeak / mechPeak : -1)\n".data(using: .utf8)!)
+        }
+
+        return mechPeak > 0 && oneHzPeak > 3.0 * mechPeak
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,
