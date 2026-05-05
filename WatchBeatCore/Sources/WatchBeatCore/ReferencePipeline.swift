@@ -849,7 +849,14 @@ extension MeasurementPipeline {
                 "[quartz] 1Hz=\(oneHzPeak) mech=\(mechPeak) ratio=\(mechPeak > 0 ? oneHzPeak / mechPeak : -1)\n".data(using: .utf8)!)
         }
 
-        return mechPeak > 0 && oneHzPeak > 3.0 * mechPeak
+        // 2.0× threshold: corpus-validated mechanical recordings have
+        // 1Hz/mech ratios in the range 0.02 to 1.67 (max from
+        // Weak_Internal_q29). 2.0× gives margin from that worst case
+        // while being more aggressive than the prior 3.0× — Tim's first
+        // real-quartz test (chrono-second-hand quartz) didn't trigger
+        // at 3.0×, suggesting some quartz watches have more residual
+        // mechanical-band content than expected and need a tighter gate.
+        return mechPeak > 0 && oneHzPeak > 2.0 * mechPeak
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,
