@@ -613,29 +613,35 @@ extension MeasurementPipeline {
         // Routing: distinguish three classes of "high σ" by what we still
         // know about the recording.
         //
-        // 1. σ > 10 ms AND confirmedFraction < 0.5
+        // 1. σ > 8 ms AND confirmedFraction < 0.5
         //    → bad recording (most windows had no detectable tick).
         //    → isLowConfidence = true; iOS routes to Low Analytical
         //      Confidence page.
         //
-        // 2. σ > 10 ms AND confirmedFraction ≥ 0.5
-        //    → ticks ARE present but timing is messy (lossy speaker→mic
-        //      chain, distant mic, room ambience). The FFT still pins the
-        //      rate accurately (it integrates over all 15 s, robust to
-        //      per-window noise). FALL BACK: report rate from FFT, omit
-        //      beat error and timegraph, mark NOT lowConfidence so the
-        //      result page shows. The user gets a useful rate reading
-        //      even if individual ticks couldn't be pinned to ±1 ms.
+        // 2. σ > 8 ms AND confirmedFraction ≥ 0.5
+        //    → ticks ARE present in most windows but their per-class
+        //      positions are scattered enough that beat error and the
+        //      timegraph would be misleading (e.g. Timex3Mess: σ ~10,
+        //      most picks land on noise events near each beat rather
+        //      than on the real tick — timegraph shows a snowstorm).
+        //      The regression slope still fits a usable rate (the real
+        //      ticks among the picks define the line), so we report
+        //      rate but suppress beat error and timegraph.
+        //    Threshold tuned at 8 ms based on corpus survey: clean watches
+        //    σ < 3, sick-but-readable Timexes/Omegas σ < 6, snowstorm
+        //    Timex3Mess σ ~10. 8 ms gives a 2-ms margin from the worst
+        //    legitimate sick reading.
         //
-        // 3. σ ≤ 10 ms
+        // 3. σ ≤ 8 ms
         //    → normal path; everything reported.
-        let highSigma = avgClassStd > 10.0
+        let highSigma = avgClassStd > 8.0
         let useFftRateFallback = highSigma && confirmedFraction >= 0.5
         let isLowConfidence = highSigma && !useFftRateFallback
 
-        // When using the FFT-rate fallback, suppress beat error and
-        // timegraph since they depend on per-tick precision the picker
-        // couldn't deliver on this recording.
+        // When σ is too high, suppress beat error and timegraph since
+        // they depend on per-tick precision the picker couldn't deliver
+        // on this recording. Rate is still reported (regression slope
+        // through the real-tick subset of the picks).
         let beatErrorReported: Double? = useFftRateFallback ? nil : beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
         // failed the per-class quadratic-MAD test is almost certainly a
