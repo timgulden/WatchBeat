@@ -7,6 +7,7 @@ struct ResultScreen: View {
     @State private var liftAngleText: String = ""
     @FocusState private var liftAngleFocused: Bool
     @State private var showLiftAngleInfo = false
+    @State private var showAmplitudeInfo = false
 
     /// Compute amplitude on the fly from stored pulse widths + current lift angle.
     private var amplitudeDegrees: Double? {
@@ -98,9 +99,19 @@ struct ResultScreen: View {
 
                         // Amplitude display (right)
                         VStack(spacing: 2) {
-                            Text("Amplitude")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 4) {
+                                Text("Amplitude")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    showAmplitudeInfo = true
+                                } label: {
+                                    Image(systemName: "info.circle")
+                                        .font(.caption)
+                                        .foregroundStyle(.blue)
+                                }
+                                .accessibilityLabel("About amplitude")
+                            }
                             if let amp = amplitudeDegrees {
                                 Text("\(Int(amp))°")
                                     .font(.system(.title3, design: .rounded, weight: .bold))
@@ -185,6 +196,9 @@ struct ResultScreen: View {
         }
         .sheet(isPresented: $showLiftAngleInfo) {
             LiftAngleInfoScreen()
+        }
+        .sheet(isPresented: $showAmplitudeInfo) {
+            AmplitudeInfoScreen()
         }
     }
 }
