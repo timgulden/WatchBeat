@@ -374,11 +374,17 @@ final class MeasurementCoordinator: ObservableObject {
         let bestDiagnostics = bestWindow?.diagnostics
         let bestBuffer = bestWindow?.buffer
 
-        // Always save raw audio when we have a usable bestResult — for
-        // support / corpus building. Side-effecting; outside the router.
+        // Save raw audio in DEBUG builds only — for support / corpus
+        // building during development. Production / TestFlight / App Store
+        // builds never save audio: the privacy promise in the listing
+        // ("microphone audio is never saved to disk") is enforced at
+        // compile time. Recordings are accessible from a DEBUG build via
+        // Xcode's Devices & Simulators → installed-app container browser.
+        #if DEBUG
         if let r = bestResult, let buf = bestBuffer {
             saveRawAudio(buf, result: r)
         }
+        #endif
 
         let decision = Router.classify(
             bestResult: bestResult,
@@ -462,8 +468,9 @@ final class MeasurementCoordinator: ObservableObject {
         state = .result(displayData)
     }
 
-    // MARK: - File saving (disabled, call from performContinuousMeasurement to re-enable)
+    // MARK: - File saving (DEBUG-only diagnostic — call site gated above)
 
+    #if DEBUG
     private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer, result: MeasurementResult) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let formatter = DateFormatter()
@@ -496,6 +503,7 @@ final class MeasurementCoordinator: ObservableObject {
         samples.withUnsafeBytes { data.append(contentsOf: $0) }
         try? data.write(to: url)
     }
+    #endif
 
     private func formatRateError(_ value: Double) -> String {
         let sign = value >= 0 ? "+" : ""
