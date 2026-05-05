@@ -44,21 +44,11 @@ enum Router {
         // Gate 1: Weak Signal. Either no result at all, or not enough
         // meaningful ticks to analyze. Use raw quality (display quality is
         // cosmetic only, see CLAUDE.md UI/UX principle 5).
-        //
-        // tickTimings.count is checked only when beatErrorMilliseconds is
-        // not nil. A nil beatError indicates the pipeline INTENTIONALLY
-        // suppressed per-tick output — either via the high-σ fallback
-        // (rate is good, individual ticks too scattered to display) or
-        // the harmonic tiebreak (rate report at the parent rate, ticks
-        // belong to the harmonic). In both cases an empty tickTimings
-        // is by design, not weak signal — quality and confirmedFraction
-        // alone determine whether there's a real watch.
-        let suppressedTicks = bestResult?.beatErrorMilliseconds == nil
         guard let result = bestResult,
               let diagnostics = diagnostics,
               result.qualityScore >= MeasurementConstants.minimumDisplayQuality,
               result.confirmedFraction >= MeasurementConstants.weakSignalMinConfirmedFraction,
-              suppressedTicks || result.tickTimings.count >= MeasurementConstants.weakSignalMinTickCount else {
+              result.tickTimings.count >= MeasurementConstants.weakSignalMinTickCount else {
             let q = Int((bestResult?.qualityScore ?? 0) * 100)
             let cf = Int((bestResult?.confirmedFraction ?? 0) * 100)
             let peak = String(format: "%.3f", diagnostics?.rawPeakAmplitude ?? 0)

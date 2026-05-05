@@ -507,6 +507,20 @@ extension MeasurementPipeline {
             let evenStd = sqrt(evenVar)
             let oddStd = sqrt(oddVar)
 
+            // Beat error: mean of |tick_residual − tock_residual| across
+            // adjacent (even, even+1) pairs. The previous formulation
+            // |mean(even) − mean(odd)| reduced to ~0 on scattered residuals
+            // (random scatter symmetric around zero on each class), giving
+            // misleading sub-millisecond BE on watches where individual
+            // pair differences are 10+ ms (Timex3Mess, 2026-05-05). MPAD
+            // is the canonical formulation also used by the production
+            // picker (see BeatError.meanPairedAbsDifference).
+            var residualsByBeatSec: [Int: Double] = [:]
+            for idx in cleanedConfirmed {
+                residualsByBeatSec[idx] = residualsMs[idx] / 1000.0
+            }
+            let mpadMs = (BeatError.meanPairedAbsDifference(residualsByBeat: residualsByBeatSec) ?? 0) * 1000.0
+
             // SNR from confirmed tickEnergies (those passed the gate, so
             // their median is an honest "typical real-tick energy") vs
             // medianGap (background).
@@ -524,7 +538,7 @@ extension MeasurementPipeline {
                 evenMean: evenMean, oddMean: oddMean,
                 evenStd: evenStd, oddStd: oddStd,
                 avgClassStd: (evenStd + oddStd) / 2.0,
-                beAsymmetryMs: abs(evenMean - oddMean),
+                beAsymmetryMs: mpadMs,
                 tickEnergies: tickEnergies, gapEnergies: gapEnergies,
                 medianTick: medianTick, medianGap: medianGap,
                 snr: snr,
@@ -610,48 +624,28 @@ extension MeasurementPipeline {
         // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
-        // Routing: distinguish three classes of "high σ" by what we still
-        // know about the recording.
+        // High-σ gate: route to LowAnalyticalConfidence whenever per-class
+        // residual scatter exceeds 8 ms. A watch whose individual tick
+        // positions scatter by 8+ ms is too erratic for a useful per-tick
+        // display — even the dedicated timegrapher cannot make sense of
+        // these recordings (Tim's Timex3Mess: σ ≈ 10, regression slope
+        // still hits the right rate but most picks land on noise events
+        // near each beat). The user gets a clear "watch is too erratic
+        // to analyze" page instead of a misleading rate-with-snowstorm.
         //
-        // 1. σ > 8 ms AND confirmedFraction < 0.5
-        //    → bad recording (most windows had no detectable tick).
-        //    → isLowConfidence = true; iOS routes to Low Analytical
-        //      Confidence page.
-        //
-        // 2. σ > 8 ms AND confirmedFraction ≥ 0.5
-        //    → ticks ARE present in most windows but their per-class
-        //      positions are scattered enough that beat error and the
-        //      timegraph would be misleading (e.g. Timex3Mess: σ ~10,
-        //      most picks land on noise events near each beat rather
-        //      than on the real tick — timegraph shows a snowstorm).
-        //      The regression slope still fits a usable rate (the real
-        //      ticks among the picks define the line), so we report
-        //      rate but suppress beat error and timegraph.
-        //    Threshold tuned at 8 ms based on corpus survey: clean watches
-        //    σ < 3, sick-but-readable Timexes/Omegas σ < 6, snowstorm
-        //    Timex3Mess σ ~10. 8 ms gives a 2-ms margin from the worst
-        //    legitimate sick reading.
-        //
-        // 3. σ ≤ 8 ms
-        //    → normal path; everything reported.
-        let highSigma = avgClassStd > 8.0
-        let useFftRateFallback = highSigma && confirmedFraction >= 0.5
-        let isLowConfidence = highSigma && !useFftRateFallback
+        // Threshold tuned from corpus: clean watches σ < 3, sick-but-
+        // readable Timexes/Omegas σ < 6, snowstorm Timex3Mess σ ≈ 10.
+        // 8 ms gives ~2 ms margin from the worst legitimate sick reading.
+        let isLowConfidence = avgClassStd > 8.0
 
-        // When σ is too high, suppress beat error and timegraph since
-        // they depend on per-tick precision the picker couldn't deliver
-        // on this recording. Rate is still reported (regression slope
-        // through the real-tick subset of the picks).
-        let beatErrorReported: Double? = useFftRateFallback ? nil : beAsymmetryMs
+        let beatErrorReported: Double? = beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
         // failed the per-class quadratic-MAD test is almost certainly a
         // misread (noise event in the gap, wrong sub-event, etc.) — not a
         // real beat that happened at a wildly different time. Don't show
         // it on the timegraph.
         let tickTimings: [TickTiming]
-        if useFftRateFallback {
-            tickTimings = []
-        } else {
+        do {
             let kept = Set(winner.cleanedConfirmed)
             tickTimings = (0..<m).compactMap { i -> TickTiming? in
                 guard kept.contains(i) else { return nil }
