@@ -399,7 +399,19 @@ final class MeasurementCoordinator: ObservableObject {
 
         switch decision {
         case .weakSignal(let diag):
-            state = .weakSignal(diagnostic: diag)
+            // Before showing Weak Signal, check whether the recording
+            // looks like a quartz watch. The main pipeline only sees
+            // post-5-kHz-HP signal which strips most quartz energy, so
+            // this fallback runs on the raw audio looking for the
+            // 1-Hz-harmonic-comb signature of a quartz watch's once-per-
+            // second click. If found, show the (more useful) Quartz
+            // Detected screen instead of generic Weak Signal.
+            if let buf = bestBuffer,
+               MeasurementPipeline.detectQuartz(rawSamples: buf.samples, sampleRate: buf.sampleRate) {
+                state = .quartzDetected
+            } else {
+                state = .weakSignal(diagnostic: diag)
+            }
         case .lowAnalyticalConfidence:
             state = .lowAnalyticalConfidence
         case .quartzDetected:

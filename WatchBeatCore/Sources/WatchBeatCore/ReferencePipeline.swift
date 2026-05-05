@@ -23,19 +23,6 @@ extension MeasurementPipeline {
 
     public func measureReferenceWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
         let sampleRate = input.sampleRate
-
-        // Quartz detection: run BEFORE the 5 kHz highpass on the raw
-        // signal. A quartz watch tick is a small mechanical click whose
-        // audio energy spans a wide band, but is most detectable in the
-        // mid-frequency range — it typically does NOT survive a 5 kHz
-        // highpass (which is tuned for sharp mechanical-watch transients).
-        // Running quartz detection on the raw signal envelope avoids
-        // missing it entirely, as the previous post-HP check did.
-        if Self.detectQuartz(rawSamples: input.samples, sampleRate: sampleRate) {
-            return (Self.quartzResult(sampleRate: sampleRate),
-                    Self.emptyDiagnostics(sampleRate: sampleRate, n: input.samples.count))
-        }
-
         var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = filtered.count
 
@@ -752,23 +739,27 @@ extension MeasurementPipeline {
 
     /// Quartz-watch detection on the RAW (no-highpass) signal.
     ///
-    /// A quartz watch's stepper-motor click is a small mechanical event
-    /// whose audio energy is concentrated in the mid-frequency band
-    /// (audible click ~1-3 kHz, lower than mechanical-watch tick energy).
-    /// The 5 kHz highpass we use for mechanical tick detection removes
-    /// most of a quartz click — so the post-HP envelope FFT cannot reliably
-    /// see the 1 Hz peak. This detector runs on the raw signal envelope:
-    /// rectify → decimate to 1 kHz → Hann window → FFT → compare 1 Hz
-    /// peak to the strongest peak in the mechanical band (4.5-10.5 Hz).
-    /// If 1 Hz is ≥ 3× stronger, return true.
+    /// Quartz watches click once per second, producing a sharp pulse
+    /// train at exactly 1 Hz. The FFT of a 1 Hz pulse train shows energy
+    /// at INTEGER Hz harmonics: 1, 2, 3, 4, 5 Hz, etc. The exact
+    /// distribution across harmonics depends on the click waveform — a
+    /// simple click peaks at 1 Hz; a chrono-running quartz often peaks
+    /// at higher harmonics (4 Hz observed on real recordings). The
+    /// invariant is that the integer-Hz bins are systematically larger
+    /// than their half-integer neighbors (1.5, 2.5, 3.5, 4.5 Hz).
     ///
-    /// Threshold tuning: real quartz recordings have 1 Hz peaks dwarfing
-    /// the mechanical band by 5×-50× because there's literally no
-    /// mechanical-rate periodic content. Mechanical recordings have
-    /// strong mechanical-band peaks; their 1 Hz envelope content (from
-    /// breathing, slow movement, ambient drift) sits far below. The 3×
-    /// threshold gives ample margin both directions.
-    static func detectQuartz(rawSamples: [Float], sampleRate: Double) -> Bool {
+    /// Detection: rectify raw signal → decimate to 1 kHz → Hann + FFT →
+    /// compare sum of integer-Hz bins (1, 2, 3, 4 Hz) to sum of half-
+    /// integer-Hz bins (1.5, 2.5, 3.5, 4.5 Hz). If integer/half > 1.3,
+    /// the recording has quartz harmonic structure.
+    ///
+    /// Intended call site: ONLY when the main pipeline would otherwise
+    /// route to Weak Signal. Mechanical recordings with broadband noise
+    /// (e.g., flicks) can also produce integer-dominant patterns, but
+    /// those reach the result page successfully via the normal path
+    /// (low σ, high confirmedFraction) and never hit this fallback. The
+    /// 1.3 threshold is corpus-tuned for the post-Weak-Signal context.
+    public static func detectQuartz(rawSamples: [Float], sampleRate: Double) -> Bool {
         let n = rawSamples.count
         guard n > Int(sampleRate * 5) else { return false }  // need ≥ 5 s
 
@@ -818,45 +809,38 @@ extension MeasurementPipeline {
         let halfN = fftLength / 2
         let freqRes = envRate / Double(fftLength)
 
-        // 1 Hz band: ±0.2 Hz around the 1 Hz bin.
-        let oneHzBin = Int(round(1.0 / freqRes))
-        let radius = max(1, Int(ceil(0.2 / freqRes)))
-        var oneHzPeak: Float = 0
-        let qLo = max(1, oneHzBin - radius)
-        let qHi = min(halfN - 2, oneHzBin + radius)
-        if qLo < qHi {
-            for b in qLo...qHi {
-                let m2 = realIn[b] * realIn[b] + imagIn[b] * imagIn[b]
-                if m2 > oneHzPeak { oneHzPeak = m2 }
-            }
-            oneHzPeak = sqrt(oneHzPeak)
+        // Helper: magnitude at the FFT bin nearest a given Hz value.
+        func mag(at hz: Double) -> Float {
+            let bin = Int(round(hz / freqRes))
+            guard bin > 0 && bin < halfN - 1 else { return 0 }
+            return sqrt(realIn[bin] * realIn[bin] + imagIn[bin] * imagIn[bin])
         }
 
-        // Mechanical band: 4.5-10.5 Hz covers all standard watch rates.
-        let mLo = max(1, Int(round(4.5 / freqRes)))
-        let mHi = min(halfN - 2, Int(round(10.5 / freqRes)))
-        var mechPeak: Float = 0
-        if mLo < mHi {
-            for b in mLo...mHi {
-                let m2 = realIn[b] * realIn[b] + imagIn[b] * imagIn[b]
-                if m2 > mechPeak { mechPeak = m2 }
-            }
-            mechPeak = sqrt(mechPeak)
-        }
+        // Sum integer-Hz peaks (1, 2, 3, 4 Hz) and half-integer-Hz peaks
+        // (1.5, 2.5, 3.5, 4.5 Hz). Quartz produces a 1 Hz pulse train
+        // whose harmonic comb stands above the half-integer noise floor.
+        let integerSum = mag(at: 1.0) + mag(at: 2.0) + mag(at: 3.0) + mag(at: 4.0)
+        let halfSum = mag(at: 1.5) + mag(at: 2.5) + mag(at: 3.5) + mag(at: 4.5)
 
         if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_QUARTZ"] != nil {
+            let ratio = halfSum > 0 ? integerSum / halfSum : -1
             FileHandle.standardError.write(
-                "[quartz] 1Hz=\(oneHzPeak) mech=\(mechPeak) ratio=\(mechPeak > 0 ? oneHzPeak / mechPeak : -1)\n".data(using: .utf8)!)
+                "[quartz] int(1-4)=\(integerSum) half(1.5-4.5)=\(halfSum) ratio=\(ratio)\n".data(using: .utf8)!)
+            var msg = "[quartz-spectrum]"
+            for fhz in stride(from: 0.5, through: 12.0, by: 0.5) {
+                msg += String(format: " %.1fHz=%.4f", fhz, mag(at: fhz))
+            }
+            msg += "\n"
+            FileHandle.standardError.write(msg.data(using: .utf8)!)
         }
 
-        // 2.0× threshold: corpus-validated mechanical recordings have
-        // 1Hz/mech ratios in the range 0.02 to 1.67 (max from
-        // Weak_Internal_q29). 2.0× gives margin from that worst case
-        // while being more aggressive than the prior 3.0× — Tim's first
-        // real-quartz test (chrono-second-hand quartz) didn't trigger
-        // at 3.0×, suggesting some quartz watches have more residual
-        // mechanical-band content than expected and need a tighter gate.
-        return mechPeak > 0 && oneHzPeak > 2.0 * mechPeak
+        // Threshold 1.3: clean mechanical corpus runs 0.36-1.05; quartz
+        // runs 1.53. Margin of 0.25 above the noisiest clean mechanical
+        // (Strong_Internal at 1.05). Recordings with broadband noise
+        // (Seagull11 with 3 flicks at 1.68) can also exceed this, but
+        // they reach the result page via the normal path — this detector
+        // only runs when the main pipeline already failed (Weak Signal).
+        return halfSum > 0 && integerSum > 1.3 * halfSum
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,
