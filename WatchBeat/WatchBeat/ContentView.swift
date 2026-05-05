@@ -33,10 +33,40 @@ struct ContentView: View {
                 MicUnavailableScreen(diagnostic: diagnostic, coordinator: coordinator)
             }
         }
+        // iOS-style edge-pan swipe-right "back" gesture. Triggers when the
+        // user starts a drag near the left edge (within 30 pt) and drags
+        // rightward at least 80 pt without much vertical wander. Routing:
+        //   - monitoring / recording / result: → idle (start fresh)
+        //   - all failure screens: → monitoring (back to listen)
+        //   - idle / analyzing: no-op
+        .gesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    let startedAtEdge = value.startLocation.x < 30
+                    let movedRight = value.translation.width > 80
+                    let mostlyHorizontal = abs(value.translation.height) < abs(value.translation.width)
+                    guard startedAtEdge && movedRight && mostlyHorizontal else { return }
+                    handleSwipeBack()
+                }
+        )
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background {
                 coordinator.handleBackgrounded()
             }
+        }
+    }
+
+    private func handleSwipeBack() {
+        switch coordinator.state {
+        case .monitoring, .recording:
+            coordinator.cancelMeasurement()
+        case .result:
+            coordinator.cancelMeasurement()  // returns to .idle
+        case .needsService, .rateConfusion, .weakSignal,
+             .lowAnalyticalConfidence, .micUnavailable:
+            coordinator.startMonitoring()
+        case .idle, .analyzing:
+            break
         }
     }
 }

@@ -11,7 +11,10 @@ struct FrequencyBarsView: View {
         let maxPower = ratePowers.values.max() ?? 1.0
 
         GeometryReader { geo in
-            let labelHeight: CGFloat = 16
+            // Two-line label: bph (e.g. "18,000") above oscillation Hz
+            // (e.g. "2.5 Hz"). bph appears with no unit suffix to save
+            // horizontal space; the Hz line carries the unit.
+            let labelHeight: CGFloat = 30
             let barAreaHeight = max(10, geo.size.height - labelHeight - 4)
 
             HStack(alignment: .bottom, spacing: 4) {
@@ -27,18 +30,33 @@ struct FrequencyBarsView: View {
                             .fill(isStrongest ? Color.green : Color.blue)
                             .frame(height: max(2, normalizedHeight * barAreaHeight))
 
-                        Text("\(formatOscHz(rate.oscillationHz)) Hz")
-                            .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
-                            .foregroundStyle(isStrongest ? .primary : .secondary)
-                            .frame(height: labelHeight)
+                        VStack(spacing: 0) {
+                            Text(formatBph(rate.rawValue))
+                                .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
+                                .foregroundStyle(isStrongest ? .primary : .secondary)
+                            Text("\(formatOscHz(rate.oscillationHz)) Hz")
+                                .font(.system(size: 10, weight: isStrongest ? .bold : .regular))
+                                .foregroundStyle(isStrongest ? .primary : .secondary)
+                        }
+                        .frame(height: labelHeight)
                     }
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(formatOscHz(rate.oscillationHz)) hertz")
+                    .accessibilityLabel("\(rate.rawValue) beats per hour, \(formatOscHz(rate.oscillationHz)) hertz")
                     .accessibilityValue(isStrongest ? "strongest signal" : "\(Int(normalizedHeight * 100)) percent")
                 }
             }
         }
     }
+}
+
+/// Format bph as a thousands-grouped integer (e.g. 18000 → "18,000").
+/// Uses the user's locale for the grouping separator — most English
+/// locales use comma; some European locales use period or space.
+private func formatBph(_ bph: Int) -> String {
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = true
+    return formatter.string(from: NSNumber(value: bph)) ?? "\(bph)"
 }
 
 /// Format oscillation Hz for display — shows decimal for non-integer values like 2.75.
