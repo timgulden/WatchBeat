@@ -763,9 +763,25 @@ extension MeasurementPipeline {
         let n = rawSamples.count
         guard n > Int(sampleRate * 5) else { return false }  // need ≥ 5 s
 
+        // Highpass at 500 Hz before envelope detection. The watch's click
+        // — sharp tick or dull stepper "thunk" — has high-frequency
+        // content; the broadband room sound (HVAC, talking, traffic) does
+        // not. Filtering out everything below 500 Hz dramatically
+        // improves the click's signal-to-noise in the rectified envelope.
+        //
+        // Empirical sweep across two quartz recordings + corpus:
+        //   no filter:  Q1=1.53, Q2=1.05, mech_max=1.05  (overlap)
+        //   HP 200 Hz:  Q1=0.76, Q2=1.23, mech_max=1.15  (worse)
+        //   HP 500 Hz:  Q1=1.73, Q2=2.26, mech_max=0.81  (clean separation)
+        //   HP 800 Hz:  Q1=3.43, Q2=2.48, mech_max=0.93  (clean, slightly noisier)
+        // 500 Hz gives the biggest margin between quartz minimum (1.73)
+        // and mechanical maximum (0.81).
+        let conditioner = SignalConditioner()
+        let filtered = conditioner.highpassFilter(rawSamples, sampleRate: sampleRate, cutoff: 500)
+
         // Rectify (envelope detection).
         var rectified = [Float](repeating: 0, count: n)
-        vDSP_vabs(rawSamples, 1, &rectified, 1, vDSP_Length(n))
+        vDSP_vabs(filtered, 1, &rectified, 1, vDSP_Length(n))
 
         // Decimate to ~1 kHz with simple averaging.
         let decimFactor = max(1, Int(sampleRate / 1000.0))
@@ -834,13 +850,11 @@ extension MeasurementPipeline {
             FileHandle.standardError.write(msg.data(using: .utf8)!)
         }
 
-        // Threshold 1.3: clean mechanical corpus runs 0.36-1.05; quartz
-        // runs 1.53. Margin of 0.25 above the noisiest clean mechanical
-        // (Strong_Internal at 1.05). Recordings with broadband noise
-        // (Seagull11 with 3 flicks at 1.68) can also exceed this, but
-        // they reach the result page via the normal path — this detector
-        // only runs when the main pipeline already failed (Weak Signal).
-        return halfSum > 0 && integerSum > 1.3 * halfSum
+        // Threshold 1.5 with the 500 Hz highpass applied above: both
+        // quartz recordings produce ≥ 1.73, all mechanical corpus
+        // produces ≤ 0.93. Margin 0.8 — comfortable enough that no
+        // single ambiguous recording lands in the gap.
+        return halfSum > 0 && integerSum > 1.5 * halfSum
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,
