@@ -27,7 +27,7 @@ struct QuartzDetectedScreen: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     tipRow(icon: "battery.100",
-                           text: "WatchBeat is designed for mechanical watches — hand-wound or automatic. Quartz watches use a battery and a tuning-fork crystal that ticks once per second, which doesn't fit the analysis model.")
+                           text: "WatchBeat is designed for mechanical watches — hand-wound or automatic. Quartz watches use a battery and a high-frequency crystal oscillator (typically vibrating at 32,768 Hz); circuitry divides that down to step the second hand once per second — a different mechanism that doesn't fit the analysis model.")
                     tipRow(icon: "gearshape.2",
                            text: "Mechanical watches tick 5 to 10 times per second, producing a rich acoustic signature that WatchBeat is built to analyze.")
                     tipRow(icon: "magnifyingglass",
