@@ -6,6 +6,7 @@ struct ResultScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
     @State private var liftAngleText: String = ""
     @FocusState private var liftAngleFocused: Bool
+    @State private var showLiftAngleInfo = false
 
     /// Compute amplitude on the fly from stored pulse widths + current lift angle.
     private var amplitudeDegrees: Double? {
@@ -58,9 +59,19 @@ struct ResultScreen: View {
                     HStack(alignment: .top) {
                         // Lift Angle input (left)
                         VStack(spacing: 2) {
-                            Text("Lift Angle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 4) {
+                                Text("Lift Angle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    showLiftAngleInfo = true
+                                } label: {
+                                    Image(systemName: "info.circle")
+                                        .font(.caption)
+                                        .foregroundStyle(.blue)
+                                }
+                                .accessibilityLabel("About lift angle")
+                            }
                             HStack(spacing: 2) {
                                 TextField("", text: $liftAngleText)
                                     .keyboardType(.decimalPad)
@@ -171,6 +182,9 @@ struct ResultScreen: View {
         }
         .onAppear {
             liftAngleText = String(format: "%.0f", coordinator.liftAngleDegrees)
+        }
+        .sheet(isPresented: $showLiftAngleInfo) {
+            LiftAngleInfoScreen()
         }
     }
 }
