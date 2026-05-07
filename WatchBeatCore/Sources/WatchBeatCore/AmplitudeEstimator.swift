@@ -54,6 +54,15 @@ public struct PulseWidthEstimate: Sendable, Equatable {
 /// Tim's pin-lever Timex (reads ~140° vs TG 140°).
 public struct AmplitudeEstimator {
 
+    /// SNR floor below which per-class fold amplitude readings are
+    /// suppressed (formula returns nil → result page shows "---").
+    /// SNR = peak / 10th-percentile-background within ±25 ms of the
+    /// fold center. Tuned 2026-05-06 from Tim's airplane Seagull (SNR
+    /// 2.0/2.5, would have read 95° vs ground-truth ~240°) vs clean
+    /// TG-validated Seagulls (SNR 10.6+, read correctly). 5 sits in
+    /// the gap.
+    public static let minFoldSNR: Double = 5.0
+
     private let conditioner = SignalConditioner()
 
     public init() {}
@@ -177,29 +186,22 @@ public struct AmplitudeEstimator {
         //   - Pin-lever: lock event is 10-15 ms before impulse, drop is
         //     close-in/masked; farthest is the lock, distance ~12 ms →
         //     matches TG.
-        // Per-class SNR gate. SNR = peak / 10th-percentile-background
-        // within ±25 ms of the fold center. A noisy recording (e.g.,
-        // airplane cabin) raises the background floor and the click's
-        // shoulders stay above it longer than they should — sub-event
-        // spacing measures wide, amplitude reads low. Below SNR 5,
-        // suppress the pulse measurement entirely; the user sees "---"
-        // instead of a wrong number.
-        //
-        // Threshold tuned from Tim's airplane recording (SNR 2.0/2.5,
-        // amp read 95°) vs clean TG-validated Seagulls (SNR 10.6+, amp
-        // read correctly at 237-245°). Threshold 5 sits in the gap.
+        // Per-class SNR gate (threshold = AmplitudeEstimator.minFoldSNR).
+        // Below the floor, suppress the pulse measurement entirely; the
+        // result page renders "---" rather than a noise-inflated wrong
+        // number. The threshold's tuning is documented on the constant
+        // declaration.
         let tickSNR = amplitudeFoldSNR(tickSmoothed, sampleRate: sampleRate)
         let tockSNR = amplitudeFoldSNR(tockSmoothed, sampleRate: sampleRate)
-        let snrThreshold: Double = 5.0
 
         var tickPulseMs = subEventSpacingMs(tickSmoothed, sampleRate: sampleRate)
         var tockPulseMs = subEventSpacingMs(tockSmoothed, sampleRate: sampleRate)
-        if tickSNR < snrThreshold { tickPulseMs = nil }
-        if tockSNR < snrThreshold { tockPulseMs = nil }
+        if tickSNR < Self.minFoldSNR { tickPulseMs = nil }
+        if tockSNR < Self.minFoldSNR { tockPulseMs = nil }
 
         if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_AMP_SNR"] != nil {
             FileHandle.standardError.write(
-                "[amp-snr] tick=\(tickSNR) tock=\(tockSNR) (threshold=\(snrThreshold))\n".data(using: .utf8)!)
+                "[amp-snr] tick=\(tickSNR) tock=\(tockSNR) (threshold=\(Self.minFoldSNR))\n".data(using: .utf8)!)
         }
 
         // Diagnostic dump for tuning. Set WATCHBEAT_DUMP_FOLD=path/prefix

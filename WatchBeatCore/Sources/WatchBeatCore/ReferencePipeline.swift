@@ -633,10 +633,8 @@ extension MeasurementPipeline {
         // near each beat). The user gets a clear "watch is too erratic
         // to analyze" page instead of a misleading rate-with-snowstorm.
         //
-        // Threshold tuned from corpus: clean watches σ < 3, sick-but-
-        // readable Timexes/Omegas σ < 6, snowstorm Timex3Mess σ ≈ 10.
-        // 8 ms gives ~2 ms margin from the worst legitimate sick reading.
-        let isLowConfidence = avgClassStd > 8.0
+        // Threshold lives in MeasurementPipeline.lowConfidenceMaxClassSigmaMs.
+        let isLowConfidence = avgClassStd > Self.lowConfidenceMaxClassSigmaMs
 
         let beatErrorReported: Double? = beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
@@ -704,25 +702,6 @@ extension MeasurementPipeline {
             isLowConfidence: true,
             measuredPeriod: nil,
             regressionIntercept: nil
-        )
-    }
-
-    /// Result placeholder for quartz-detected recordings: no mechanical
-    /// candidate survived but the 1 Hz peak dominated. Carries the
-    /// quartzDetected flag so the router can route to the quartz screen.
-    static func quartzResult(sampleRate: Double) -> MeasurementResult {
-        MeasurementResult(
-            snappedRate: .bph28800,
-            rateErrorSecondsPerDay: 0,
-            beatErrorMilliseconds: nil,
-            amplitudeProxy: 0,
-            qualityScore: 0,
-            tickCount: 0,
-            tickTimings: [],
-            isLowConfidence: false,
-            measuredPeriod: nil,
-            regressionIntercept: nil,
-            quartzDetected: true
         )
     }
 
@@ -846,15 +825,8 @@ extension MeasurementPipeline {
             FileHandle.standardError.write(msg.data(using: .utf8)!)
         }
 
-        // Threshold 4.0 with the 6-7 kHz bandpass applied above. Tim's
-        // two quartz recordings produce 8.49 and 13.56 — large margin
-        // above the threshold. Clean mechanical recordings that reach
-        // Result via the normal path can show ratios up to ~4.3 (CD1
-        // Omega) but never hit this detector because they don't route
-        // to Weak Signal. Genuinely weak mechanical recordings (which
-        // WOULD hit this detector) should have noise-vs-noise ratios
-        // near 1; 4.0 is safely above any plausible such case.
-        return halfSum > 0 && integerSum > 4.0 * halfSum
+        // Threshold lives in MeasurementPipeline.quartzDetectorIntegerToHalfMinRatio.
+        return halfSum > 0 && integerSum > Float(Self.quartzDetectorIntegerToHalfMinRatio) * halfSum
     }
 
     /// Robust slope estimate via two-stage regression: fit on all picks,

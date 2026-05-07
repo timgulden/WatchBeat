@@ -37,6 +37,23 @@ public struct MeasurementPipeline {
     /// noisy-environment recordings that 5 kHz can't separate the ticks from.
     public static let alternateHighpassCutoffHz: Double = 8000.0
 
+    /// Per-class residual σ (ms) above which a recording is considered
+    /// too erratic for a per-tick result. Triggers `isLowConfidence` →
+    /// LAC routing. Tuned 2026-05-05 from corpus survey: clean watches
+    /// σ < 3 ms, sick-but-readable Timexes/Omegas σ < 6 ms, snowstorm
+    /// Timex3Mess σ ≈ 10 ms. 8 ms gives margin from the worst legitimate
+    /// sick reading.
+    public static let lowConfidenceMaxClassSigmaMs: Double = 8.0
+
+    /// Quartz detector threshold. Ratio of FFT magnitude sum at integer
+    /// Hz (1+2+3+4) over half-integer Hz (1.5+2.5+3.5+4.5), measured on
+    /// the rectified+highpassed envelope of the raw audio. Quartz watches
+    /// produce a 1 Hz pulse train with energy at all integer harmonics;
+    /// mechanical watches sit cleanly below 4× ratio. Tuned 2026-05-05
+    /// against two real quartz recordings (8.49 and 13.56) and a corpus
+    /// of mechanical watches (max 4.26). 4.0 sits safely between.
+    public static let quartzDetectorIntegerToHalfMinRatio: Double = 4.0
+
     let conditioner = SignalConditioner()
 
     public init() {}

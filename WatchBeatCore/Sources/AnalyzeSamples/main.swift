@@ -34,11 +34,13 @@ print(String(format: "%@Rate %d bph  err %+.1f s/day  beatErr %@  q=%.1f%%  conf
              result.confirmedFraction * 100,
              result.isLowConfidence ? "Y" : "N"))
 
-// Diagnostic: also run quartz detection on the raw signal so we can see
-// what the post-Weak-Signal fallback would do, regardless of how the
-// main pipeline routed.
-let isQuartz = MeasurementPipeline.detectQuartz(rawSamples: buffer.samples, sampleRate: buffer.sampleRate)
-print("[quartz-detector] returns=\(isQuartz)")
+// Diagnostic (env-gated): run quartz detection on the raw signal so we
+// can see what the Router's quartz override would do regardless of how
+// the main pipeline routed. Set WATCHBEAT_DEBUG_QUARTZ_CLI=1 to enable.
+if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_QUARTZ_CLI"] != nil {
+    let isQuartz = MeasurementPipeline.detectQuartz(rawSamples: buffer.samples, sampleRate: buffer.sampleRate)
+    print("[quartz-detector] returns=\(isQuartz)")
+}
 
 // Amplitude flow (matches iOS app pipeline): measurePulseWidths → combinedAmplitude.
 // Default lift angle 50° (covers ETA 2824/2892/7750, Sellita SW200, Omega 8500

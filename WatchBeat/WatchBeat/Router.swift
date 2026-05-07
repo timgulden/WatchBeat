@@ -1,27 +1,33 @@
 import Foundation
 import WatchBeatCore
 
-/// Pure classification of a recording's outcome into one of the five
-/// terminal pages. No side effects, no async work — the coordinator
-/// interprets the decision and performs the state transition (and any
-/// associated work like computing pulse widths or saving raw audio).
+/// Pure classification of a recording's outcome into one of the terminal
+/// pages. No async work — the coordinator interprets the decision and
+/// performs the state transition (and any associated work like computing
+/// pulse widths or saving raw audio).
 ///
-/// The four gates are evaluated in order:
+/// Gates evaluated in order:
 ///   1. Weak Signal       — not enough meaningful ticks
 ///   2. Low Confidence    — ticks present but timing erratic
 ///   3. Rate Confusion    — picker locked onto an off-grid rate
 ///   4. Needs Service     — rate plausible but watch is far gone
 ///   5. Display Result    — everything passed
+///
+/// Quartz override: when gate 1 OR gate 2 would fire AND the raw audio
+/// shows a 1 Hz harmonic-comb signature, route to Quartz Detected
+/// instead of the original failure. The quartz check runs on the same
+/// audio buffer Router receives, so all routing logic stays in one
+/// place rather than splitting across Router + Coordinator.
 enum Router {
     enum Decision: Equatable {
         case weakSignal(diagnostic: String)
         case lowAnalyticalConfidence
         case rateConfusion(MeasurementCoordinator.RateConfusionData)
         case needsService(MeasurementCoordinator.NeedsServiceData)
-        /// Strong 1 Hz peak with no comparable mechanical-rate content.
-        /// The user is trying to measure a quartz watch; surface a clear
-        /// "this app is for mechanical watches" page rather than a
-        /// confusing weak-signal failure.
+        /// Strong 1 Hz harmonic comb in the raw audio. The user is
+        /// trying to measure a quartz watch; surface a clear "this app
+        /// is for mechanical watches" page rather than a confusing
+        /// weak-signal or low-confidence failure.
         case quartzDetected
         /// All gates passed. Caller computes pulse widths and builds the
         /// display data from `bestResult` (which is non-nil in this case).
@@ -40,22 +46,17 @@ enum Router {
     /// the recording loop produced no usable window (cancelled or timed
     /// out before any analysis completed) — that path also routes to
     /// weakSignal.
+    ///
+    /// `audioBuffer` is the raw audio of the best window. Used for the
+    /// quartz-detection override on the weakSignal/lowConfidence
+    /// branches; nil safely skips that override.
     static func classify(
         bestResult: MeasurementResult?,
         diagnostics: PipelineDiagnostics?,
+        audioBuffer: AudioBuffer?,
         weakSignalContext: WeakSignalContext,
         maxPlausibleRateError: Double
     ) -> Decision {
-        // Gate 0: Quartz Detected. A strong 1 Hz peak with no comparable
-        // mechanical-rate content means the user is measuring a quartz
-        // watch. Route to the quartz screen — the app is for mechanical
-        // movements at 5-10 Hz only. Check before Weak Signal so quartz
-        // recordings (which would otherwise fail Gate 1's tick-count
-        // check) get the right page.
-        if bestResult?.quartzDetected == true {
-            return .quartzDetected
-        }
-
         // Gate 1: Weak Signal. Either no result at all, or not enough
         // meaningful ticks to analyze. Use raw quality (display quality is
         // cosmetic only, see CLAUDE.md UI/UX principle 5).
@@ -64,6 +65,7 @@ enum Router {
               result.qualityScore >= MeasurementConstants.minimumDisplayQuality,
               result.confirmedFraction >= MeasurementConstants.weakSignalMinConfirmedFraction,
               result.tickTimings.count >= MeasurementConstants.weakSignalMinTickCount else {
+            if isQuartz(audioBuffer) { return .quartzDetected }
             let q = Int((bestResult?.qualityScore ?? 0) * 100)
             let cf = Int((bestResult?.confirmedFraction ?? 0) * 100)
             let peak = String(format: "%.3f", diagnostics?.rawPeakAmplitude ?? 0)
@@ -76,6 +78,7 @@ enum Router {
         // their timing is so erratic the picker can't lock — near-stall
         // watch territory.
         if result.isLowConfidence {
+            if isQuartz(audioBuffer) { return .quartzDetected }
             return .lowAnalyticalConfidence
         }
 
@@ -104,5 +107,13 @@ enum Router {
 
         // Gate 5: success.
         return .displayResult
+    }
+
+    /// Quartz check, only called when Router would otherwise route to
+    /// weakSignal or lowAnalyticalConfidence. Pure delegation to
+    /// MeasurementPipeline.detectQuartz; nil buffer safely returns false.
+    private static func isQuartz(_ audioBuffer: AudioBuffer?) -> Bool {
+        guard let buf = audioBuffer else { return false }
+        return MeasurementPipeline.detectQuartz(rawSamples: buf.samples, sampleRate: buf.sampleRate)
     }
 }
