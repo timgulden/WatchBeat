@@ -34,9 +34,9 @@ struct AmplitudeInfoScreen: View {
                     tipRow(icon: "chart.bar.doc.horizontal",
                            text: "Typical healthy ranges (full wind, dial up): modern Swiss automatic 280°-310°, modern Japanese 250°-290°, vintage Swiss lever 260°-290°, vintage pin-lever 200°-260°.")
                     tipRow(icon: "exclamationmark.triangle",
-                           text: "Amplitude readings are proportional to lift angle. Enter the lift angle for your caliber for an accurate reading.")
+                           text: "Find the lift angle for your caliber with a web search and enter it for an accurate reading.")
                     tipRow(icon: "ear",
-                           text: "A quiet environment helps. Background noise inflates the apparent pulse width and drops the reading; very noisy recordings show \"---\" rather than a wrong number.")
+                           text: "A quiet environment helps. Background noise inflates pulse width and drops the reading; very noisy recordings show \"---\" rather than a wrong number.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
