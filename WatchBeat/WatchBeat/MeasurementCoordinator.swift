@@ -380,7 +380,8 @@ final class MeasurementCoordinator: ObservableObject {
         // builds never save audio: the privacy promise in the listing
         // ("microphone audio is never saved to disk") is enforced at
         // compile time. Recordings are accessible from a DEBUG build via
-        // Xcode's Devices & Simulators → installed-app container browser.
+        // Xcode's Devices & Simulators → installed-app container browser,
+        // or the iOS Files app on the development device.
         #if DEBUG
         if let r = bestResult, let buf = bestBuffer {
             saveRawAudio(buf, result: r)
