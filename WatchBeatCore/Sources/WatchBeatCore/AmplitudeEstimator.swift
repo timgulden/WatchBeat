@@ -177,18 +177,29 @@ public struct AmplitudeEstimator {
         //   - Pin-lever: lock event is 10-15 ms before impulse, drop is
         //     close-in/masked; farthest is the lock, distance ~12 ms →
         //     matches TG.
-        let tickPulseMs = subEventSpacingMs(tickSmoothed, sampleRate: sampleRate)
-        let tockPulseMs = subEventSpacingMs(tockSmoothed, sampleRate: sampleRate)
+        // Per-class SNR gate. SNR = peak / 10th-percentile-background
+        // within ±25 ms of the fold center. A noisy recording (e.g.,
+        // airplane cabin) raises the background floor and the click's
+        // shoulders stay above it longer than they should — sub-event
+        // spacing measures wide, amplitude reads low. Below SNR 5,
+        // suppress the pulse measurement entirely; the user sees "---"
+        // instead of a wrong number.
+        //
+        // Threshold tuned from Tim's airplane recording (SNR 2.0/2.5,
+        // amp read 95°) vs clean TG-validated Seagulls (SNR 10.6+, amp
+        // read correctly at 237-245°). Threshold 5 sits in the gap.
+        let tickSNR = amplitudeFoldSNR(tickSmoothed, sampleRate: sampleRate)
+        let tockSNR = amplitudeFoldSNR(tockSmoothed, sampleRate: sampleRate)
+        let snrThreshold: Double = 5.0
 
-        // Per-class SNR diagnostic. Compute "peak / background" for each
-        // fold: peak = the dominant value at the fold center; background
-        // = 10th percentile of fold values within ±25 ms of the dominant.
-        // High SNR = clean recording; low SNR = noisy environment that
-        // inflates pulse-width measurements (apparent amplitude reads
-        // low). Set WATCHBEAT_DEBUG_AMP_SNR=1 on AnalyzeSamples to dump.
+        var tickPulseMs = subEventSpacingMs(tickSmoothed, sampleRate: sampleRate)
+        var tockPulseMs = subEventSpacingMs(tockSmoothed, sampleRate: sampleRate)
+        if tickSNR < snrThreshold { tickPulseMs = nil }
+        if tockSNR < snrThreshold { tockPulseMs = nil }
+
         if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_AMP_SNR"] != nil {
             FileHandle.standardError.write(
-                "[amp-snr] tick=\(amplitudeFoldSNR(tickSmoothed, sampleRate: sampleRate)) tock=\(amplitudeFoldSNR(tockSmoothed, sampleRate: sampleRate))\n".data(using: .utf8)!)
+                "[amp-snr] tick=\(tickSNR) tock=\(tockSNR) (threshold=\(snrThreshold))\n".data(using: .utf8)!)
         }
 
         // Diagnostic dump for tuning. Set WATCHBEAT_DUMP_FOLD=path/prefix
