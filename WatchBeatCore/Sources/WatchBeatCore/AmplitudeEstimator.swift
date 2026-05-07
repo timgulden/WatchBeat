@@ -180,6 +180,17 @@ public struct AmplitudeEstimator {
         let tickPulseMs = subEventSpacingMs(tickSmoothed, sampleRate: sampleRate)
         let tockPulseMs = subEventSpacingMs(tockSmoothed, sampleRate: sampleRate)
 
+        // Per-class SNR diagnostic. Compute "peak / background" for each
+        // fold: peak = the dominant value at the fold center; background
+        // = 10th percentile of fold values within ±25 ms of the dominant.
+        // High SNR = clean recording; low SNR = noisy environment that
+        // inflates pulse-width measurements (apparent amplitude reads
+        // low). Set WATCHBEAT_DEBUG_AMP_SNR=1 on AnalyzeSamples to dump.
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_AMP_SNR"] != nil {
+            FileHandle.standardError.write(
+                "[amp-snr] tick=\(amplitudeFoldSNR(tickSmoothed, sampleRate: sampleRate)) tock=\(amplitudeFoldSNR(tockSmoothed, sampleRate: sampleRate))\n".data(using: .utf8)!)
+        }
+
         // Diagnostic dump for tuning. Set WATCHBEAT_DUMP_FOLD=path/prefix
         // to write per-class-fold CSVs of the rectified+smoothed signal
         // around the impulse, suitable for plotting and inspection.
@@ -366,6 +377,40 @@ public struct AmplitudeEstimator {
             return nil
         }
         return Double(halfPulseSamples) / sampleRate * 1000.0
+    }
+
+    /// Per-class fold SNR: dominant peak amplitude divided by the 10th-
+    /// percentile fold value within ±25 ms of the dominant peak. Used
+    /// both as a diagnostic and (eventually) as a gate on whether to
+    /// trust the amplitude reading.
+    ///
+    /// Clean recordings give SNR > ~20 (dominant peak well above the
+    /// noise floor). Recordings with high ambient noise (e.g., airplane
+    /// cabin) give SNR ~5-10 — the noise floor is high, the dominant
+    /// peak isn't much above it, and the sub-event spacing measurement
+    /// gets stretched because the click's "shoulders" stay above the
+    /// (high) local floor longer than they should.
+    private func amplitudeFoldSNR(_ signal: [Float], sampleRate: Double) -> Double {
+        let n = signal.count
+        guard n >= 8 else { return 0 }
+        let center = n / 2
+        let centerSlop = max(1, Int(0.002 * sampleRate))
+        let dCo = max(0, center - centerSlop)
+        let dHi = min(n - 1, center + centerSlop)
+        guard dCo < dHi else { return 0 }
+        var domVal: Float = signal[dCo]
+        for i in (dCo + 1)...dHi where signal[i] > domVal { domVal = signal[i] }
+
+        let radiusSamples = Int(0.025 * sampleRate)
+        let lo = max(0, center - radiusSamples)
+        let hi = min(n - 1, center + radiusSamples)
+        guard lo < hi else { return 0 }
+
+        var slice = Array(signal[lo...hi])
+        slice.sort()
+        let p10 = slice[max(0, slice.count / 10)]
+        guard p10 > 0 else { return Double.greatestFiniteMagnitude }
+        return Double(domVal) / Double(p10)
     }
 
     private func movingAverage(_ signal: [Float], windowSize: Int) -> [Float] {
