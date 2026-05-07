@@ -26,15 +26,17 @@ struct AmplitudeInfoScreen: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     tipRow(icon: "arrow.left.and.right.circle",
-                           text: "Amplitude is the angular swing of the balance wheel. Higher generally means better health: more energy, better timekeeping.")
+                           text: "Amplitude is the angular swing of the balance wheel. Higher generally means better health and timekeeping.")
                     tipRow(icon: "iphone.gen3",
                            text: "Position matters. Dial-up and dial-down are typically highest. Pendant positions (crown up/down, 6 up, 12 up) run 30°-60° lower due to extra pivot friction.")
                     tipRow(icon: "wrench.and.screwdriver",
-                           text: "Power reserve and service state matter. Amplitude drops 30°-50° from full wind to 24 hours later, and a watch needing service runs 30°-80° lower than freshly serviced.")
+                           text: "Power reserve and service state matter. Amplitude drops 30°-50° from full wind to 24 hours later, and another 30°-80° on a watch needing service.")
                     tipRow(icon: "chart.bar.doc.horizontal",
-                           text: "Typical healthy ranges (full wind, dial up): modern Swiss automatic 280°-310°, modern Japanese 250°-290°, vintage Swiss lever 260°-290°, vintage pin-lever 200°-260°. Below ~200° suggests service is due.")
+                           text: "Typical healthy ranges (full wind, dial up): modern Swiss automatic 280°-310°, modern Japanese 250°-290°, vintage Swiss lever 260°-290°, vintage pin-lever 200°-260°.")
                     tipRow(icon: "exclamationmark.triangle",
-                           text: "Amplitude readings are proportional to lift angle. Enter the lift angle for your specific caliber for an accurate reading.")
+                           text: "Amplitude readings are proportional to lift angle. Enter the lift angle for your caliber for an accurate reading.")
+                    tipRow(icon: "ear",
+                           text: "A quiet environment helps. Background noise inflates the apparent pulse width and drops the reading; very noisy recordings show \"---\" rather than a wrong number.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
