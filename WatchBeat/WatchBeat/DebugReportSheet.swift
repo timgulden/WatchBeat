@@ -17,6 +17,12 @@ struct DebugReportSheet: View {
     @State private var watchName: String = ""
     @State private var notes: String = ""
     @State private var presentingShareSheet = false
+    @State private var presentingMailComposer = false
+
+    /// Developer email baked into the app so users don't need to know
+    /// or look it up. Visible to anyone reading the app source — that's
+    /// fine, this is the support address.
+    private let developerEmail = "tgulden@gmail.com"
 
     var body: some View {
         NavigationStack {
@@ -73,7 +79,15 @@ struct DebugReportSheet: View {
                         .padding(.vertical, 10)
                         .foregroundStyle(.secondary)
                     Button("Send") {
-                        presentingShareSheet = true
+                        // Prefer the iOS mail composer — gives a one-tap
+                        // "send to developer" experience with recipient
+                        // pre-filled. Fall back to the share sheet (user
+                        // picks any messaging app) if Mail isn't set up.
+                        if MailComposer.canSend() {
+                            presentingMailComposer = true
+                        } else {
+                            presentingShareSheet = true
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -83,45 +97,70 @@ struct DebugReportSheet: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 40)
             }
+            .sheet(isPresented: $presentingMailComposer, onDismiss: { dismiss() }) {
+                MailComposer(
+                    recipients: [developerEmail],
+                    subject: emailSubject,
+                    body: composedBody,
+                    attachmentURL: zipAttachmentURL(),
+                    onCompletion: {}
+                )
+            }
             .sheet(isPresented: $presentingShareSheet, onDismiss: { dismiss() }) {
                 ShareSheet(activityItems: shareItems)
             }
         }
     }
 
-    /// Items handed to UIActivityViewController. The body string carries
-    /// the user-typed context plus a compact diagnostic dump; the WAV
-    /// (and JSON sidecar) are file attachments — copied to uniquely-
-    /// named temp files at share time so the receiver sees something
-    /// like `Timex1_2026-05-09_14-32-15.wav` instead of the generic
-    /// fixed on-disk filename.
-    private var shareItems: [Any] {
-        var items: [Any] = []
+    /// Mail subject. Always leads with "WatchBeat Debug" so Tim's inbox
+    /// is filterable; appends the watch name when present.
+    private var emailSubject: String {
+        let trimmed = watchName.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "WatchBeat Debug" : "WatchBeat Debug — \(trimmed)"
+    }
 
-        var bodyLines: [String] = []
+    /// Body text shared with both the mail composer and the share sheet.
+    /// Watch name + notes + diagnostic dump.
+    private var composedBody: String {
+        var lines: [String] = []
         if !watchName.trimmingCharacters(in: .whitespaces).isEmpty {
-            bodyLines.append("Watch: \(watchName)")
+            lines.append("Watch: \(watchName)")
         }
         if !notes.trimmingCharacters(in: .whitespaces).isEmpty {
-            bodyLines.append("Notes: \(notes)")
+            lines.append("Notes: \(notes)")
         }
         if let ctx = debugRecording.currentContext {
-            bodyLines.append("")
-            bodyLines.append("--- App diagnostics ---")
-            bodyLines.append("Outcome: \(ctx.outcome)")
-            bodyLines.append("Rate: \(ctx.measuredRateBPH) bph, \(String(format: "%+.1f", ctx.rateErrorSecondsPerDay)) s/day")
+            lines.append("")
+            lines.append("--- App diagnostics ---")
+            lines.append("Outcome: \(ctx.outcome)")
+            lines.append("Rate: \(ctx.measuredRateBPH) bph, \(String(format: "%+.1f", ctx.rateErrorSecondsPerDay)) s/day")
             if let be = ctx.beatErrorMilliseconds {
-                bodyLines.append("Beat error: \(String(format: "%.2f", be)) ms")
+                lines.append("Beat error: \(String(format: "%.2f", be)) ms")
             }
             if let amp = ctx.amplitudeDegrees {
-                bodyLines.append("Amplitude: \(Int(amp))°")
+                lines.append("Amplitude: \(Int(amp))°")
             }
-            bodyLines.append("Lift angle: \(Int(ctx.liftAngleDegrees))°")
-            bodyLines.append("Quality: \(Int(ctx.qualityScore * 100))% / Confirmed: \(Int(ctx.confirmedFraction * 100))% / LowConf: \(ctx.isLowConfidence)")
-            bodyLines.append("App: \(ctx.appVersion) (\(ctx.buildNumber)) on \(ctx.deviceModel) iOS \(ctx.iOSVersion)")
-            bodyLines.append("Recorded: \(ctx.timestamp)")
+            lines.append("Lift angle: \(Int(ctx.liftAngleDegrees))°")
+            lines.append("Quality: \(Int(ctx.qualityScore * 100))% / Confirmed: \(Int(ctx.confirmedFraction * 100))% / LowConf: \(ctx.isLowConfidence)")
+            lines.append("App: \(ctx.appVersion) (\(ctx.buildNumber)) on \(ctx.deviceModel) iOS \(ctx.iOSVersion)")
+            lines.append("Recorded: \(ctx.timestamp)")
         }
-        items.append(bodyLines.joined(separator: "\n"))
+        return lines.joined(separator: "\n")
+    }
+
+    /// Single zip URL for mail attachment. Returns nil if the zip
+    /// couldn't be produced (rare).
+    private func zipAttachmentURL() -> URL? {
+        namedAttachmentURLs().first
+    }
+
+    /// Items handed to UIActivityViewController on the fallback path
+    /// (Mail.app not configured). Body text + zip attachment. The body
+    /// includes the developer's email so the user knows where to send.
+    private var shareItems: [Any] {
+        var body = "Send to: \(developerEmail)\n\n"
+        body += composedBody
+        var items: [Any] = [body]
         items.append(contentsOf: namedAttachmentURLs())
         return items
     }
