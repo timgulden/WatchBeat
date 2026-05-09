@@ -157,7 +157,21 @@ final class MeasurementCoordinator: ObservableObject {
     /// User-entered lift angle for amplitude calculation. Persists across sessions.
     /// Defaults to 52° (most common value used by timegraphers).
     @Published var liftAngleDegrees: Double {
-        didSet { UserDefaults.standard.set(liftAngleDegrees, forKey: "liftAngleDegrees") }
+        didSet {
+            UserDefaults.standard.set(liftAngleDegrees, forKey: "liftAngleDegrees")
+            // If a result is currently on screen, recompute amplitude
+            // with the new lift angle and rewrite the JSON sidecar so
+            // a Send Debug carries the value the user is seeing.
+            if case let .result(displayData) = state, let pw = displayData.pulseWidths {
+                let amp = AmplitudeEstimator.combinedAmplitude(
+                    pulseWidths: pw,
+                    beatRate: StandardBeatRate.nearest(toHz: Double(displayData.rateBPH) / 3600.0),
+                    rateErrorSecondsPerDay: displayData.rateError,
+                    liftAngleDegrees: liftAngleDegrees
+                )
+                debugRecording.updateAmplitude(amp, liftAngleDegrees: liftAngleDegrees)
+            }
+        }
     }
 
     /// Manages the transient WAV that backs the "Send Debug" feature.
@@ -537,6 +551,20 @@ final class MeasurementCoordinator: ObservableObject {
             isLowConfidence: result.isLowConfidence,
             watchPosition: windowPosition
         )
+
+        // Now that pulse widths are computed, fold the user-visible
+        // amplitude into the debug recording's JSON sidecar so a
+        // Send Debug from this screen carries the same number the user
+        // is reading. Subsequent lift-angle changes update the JSON
+        // again via liftAngleDegrees didSet.
+        let initialAmplitude = AmplitudeEstimator.combinedAmplitude(
+            pulseWidths: pulseWidths,
+            beatRate: result.snappedRate,
+            rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+            liftAngleDegrees: liftAngleDegrees
+        )
+        debugRecording.updateAmplitude(initialAmplitude, liftAngleDegrees: liftAngleDegrees)
+
         state = .result(displayData)
     }
 

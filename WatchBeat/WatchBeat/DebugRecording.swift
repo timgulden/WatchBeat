@@ -30,6 +30,11 @@ final class DebugRecording {
     /// Diagnostic context attached as a JSON sidecar. Lets the developer
     /// correlate the audio with what the app actually computed without
     /// asking the user to describe everything.
+    ///
+    /// Most fields are set once at recording-save time; `amplitudeDegrees`
+    /// and `liftAngleDegrees` are updated later (in displayResult and
+    /// when the user adjusts lift angle) so the JSON always reflects
+    /// what the user is currently seeing on the result screen.
     struct Context: Codable {
         let appVersion: String
         let buildNumber: String
@@ -38,8 +43,8 @@ final class DebugRecording {
         let measuredRateBPH: Int
         let rateErrorSecondsPerDay: Double
         let beatErrorMilliseconds: Double?
-        let amplitudeDegrees: Double?
-        let liftAngleDegrees: Double
+        var amplitudeDegrees: Double?
+        var liftAngleDegrees: Double
         let qualityScore: Double
         let confirmedFraction: Double
         let isLowConfidence: Bool
@@ -105,6 +110,23 @@ final class DebugRecording {
         try? FileManager.default.removeItem(at: wavURL)
         try? FileManager.default.removeItem(at: jsonURL)
         currentContext = nil
+    }
+
+    /// Re-write the JSON sidecar with updated amplitude and lift-angle
+    /// fields. Called from the coordinator whenever the result screen's
+    /// displayed amplitude could differ from the snapshot at save time
+    /// (initial computation in displayResult, plus user adjustments to
+    /// lift angle while the result is on screen).
+    func updateAmplitude(_ amplitude: Double?, liftAngleDegrees: Double) {
+        guard var ctx = currentContext else { return }
+        ctx.amplitudeDegrees = amplitude
+        ctx.liftAngleDegrees = liftAngleDegrees
+        currentContext = ctx
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        if let json = try? encoder.encode(ctx) {
+            try? json.write(to: jsonURL)
+        }
     }
 
     /// Called once at app start. Removes any recording left over from a
