@@ -133,7 +133,17 @@ final class MeasurementCoordinator: ObservableObject {
         let watchPosition: WatchPosition?
     }
 
-    @Published var state: State = .idle
+    @Published var state: State = .idle {
+        didSet {
+            // Discard any debug recording the moment the user moves
+            // away from a result/failure screen. The recording lives
+            // only as long as the user is actively viewing the page
+            // it backs.
+            if Self.holdsDebugRecording(state: oldValue) && !Self.holdsDebugRecording(state: state) {
+                debugRecording.discard()
+            }
+        }
+    }
     @Published var ratePowers: [StandardBeatRate: Float] = [:]
     @Published var rawPeak: Float = 0
     /// Live watch position (from accelerometer). Nil while the phone is
@@ -148,6 +158,36 @@ final class MeasurementCoordinator: ObservableObject {
     /// Defaults to 52° (most common value used by timegraphers).
     @Published var liftAngleDegrees: Double {
         didSet { UserDefaults.standard.set(liftAngleDegrees, forKey: "liftAngleDegrees") }
+    }
+
+    /// Manages the transient WAV that backs the "Send Debug" feature.
+    /// Saved when a measurement transitions to a result/failure screen,
+    /// discarded when the user leaves that screen.
+    let debugRecording = DebugRecording()
+
+    /// True for states that own the current debug recording. Outside
+    /// these states the recording is discarded by the state didSet.
+    static func holdsDebugRecording(state: State) -> Bool {
+        switch state {
+        case .result, .weakSignal, .lowAnalyticalConfidence, .rateConfusion, .needsService:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Maps a Router.Decision to a human-readable outcome name for the
+    /// debug-recording context, or "" for cases we don't save (currently
+    /// just .quartzDetected).
+    static func debugOutcomeName(decision: Router.Decision) -> String {
+        switch decision {
+        case .weakSignal: return "weakSignal"
+        case .lowAnalyticalConfidence: return "lowAnalyticalConfidence"
+        case .rateConfusion: return "rateConfusion"
+        case .needsService: return "needsService"
+        case .displayResult: return "result"
+        case .quartzDetected: return ""
+        }
     }
 
     /// Best quality seen so far during this recording session.
@@ -191,6 +231,7 @@ final class MeasurementCoordinator: ObservableObject {
         self.amplitudeEstimator = amplitudeEstimator
         let stored = UserDefaults.standard.double(forKey: "liftAngleDegrees")
         self.liftAngleDegrees = stored > 0 ? stored : Self.defaultLiftAngle
+        debugRecording.cleanupStaleOnLaunch()
         orientationMonitor.onPositionChange = { [weak self] pos in
             self?.currentPosition = pos
         }
@@ -398,6 +439,32 @@ final class MeasurementCoordinator: ObservableObject {
             ),
             maxPlausibleRateError: maxRate
         )
+
+        // Save the debug recording for any terminal state that lets the
+        // user invoke "Send Debug" (everything except quartzDetected,
+        // which has no diagnostic value). Saving here means the file
+        // is in place by the time the screen renders. State didSet
+        // takes care of discarding when the user leaves the screen.
+        let outcomeName = Self.debugOutcomeName(decision: decision)
+        if !outcomeName.isEmpty, let buf = bestBuffer {
+            let ctx = DebugRecording.Context(
+                appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
+                buildNumber: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?",
+                deviceModel: UIDevice.current.model,
+                iOSVersion: UIDevice.current.systemVersion,
+                measuredRateBPH: bestResult?.snappedRate.rawValue ?? 0,
+                rateErrorSecondsPerDay: bestResult?.rateErrorSecondsPerDay ?? 0,
+                beatErrorMilliseconds: bestResult?.beatErrorMilliseconds,
+                amplitudeDegrees: nil,  // computed later in displayResult; not in this snapshot
+                liftAngleDegrees: liftAngleDegrees,
+                qualityScore: bestResult?.qualityScore ?? 0,
+                confirmedFraction: bestResult?.confirmedFraction ?? 0,
+                isLowConfidence: bestResult?.isLowConfidence ?? false,
+                outcome: outcomeName,
+                timestamp: ISO8601DateFormatter().string(from: Date())
+            )
+            debugRecording.save(buffer: buf, context: ctx)
+        }
 
         switch decision {
         case .weakSignal(let diag):

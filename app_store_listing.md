@@ -65,7 +65,7 @@ WatchBeat isn't a substitute for a watchmaker. It tells you what the watch is do
 
 PRIVACY
 
-WatchBeat does all signal processing on-device. Microphone audio is never saved to disk, never transmitted off your device, and never shared with anyone. Motion data (used only for detecting watch position during measurement) is also processed locally and never leaves your phone.
+WatchBeat does all signal processing on-device. Audio is held only during your current measurement session and discarded as soon as you leave the result screen — there is no recording history on the device. The app does not transmit audio off your device unless you explicitly tap "Send Debug" to share a single recording with the developer for analysis (a disclosure screen describes what the recording contains before you send). Motion data (used only for detecting watch position during measurement) is processed locally and never leaves your phone.
 
 
 ## Keywords (100 char max, comma-separated)

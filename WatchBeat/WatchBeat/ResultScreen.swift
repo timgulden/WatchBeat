@@ -165,6 +165,7 @@ struct ResultScreen: View {
                         .font(.footnote.weight(.bold))
                         .foregroundStyle(.primary)
                     Spacer()
+                    SendDebugButton(coordinator: coordinator)
                 }
                 .padding(.top, 6)
                 .padding(.bottom, 20)

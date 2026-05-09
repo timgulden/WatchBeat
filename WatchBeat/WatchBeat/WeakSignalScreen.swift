@@ -43,6 +43,11 @@ struct WeakSignalScreen: View {
                 coordinator.startMonitoring()
             }
             .padding(.horizontal, 20)
+            HStack {
+                Spacer()
+                SendDebugButton(coordinator: coordinator)
+            }
+            .padding(.horizontal, 20)
             .padding(.bottom, 40)
         }
     }

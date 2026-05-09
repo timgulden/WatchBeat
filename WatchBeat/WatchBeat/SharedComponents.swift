@@ -78,6 +78,36 @@ struct BottomRow: View {
     }
 }
 
+// MARK: - Send Debug Button
+
+/// Small unobtrusive button shown on terminal screens (result + failure
+/// pages) when a debug recording is available. Opens DebugReportSheet
+/// where the user can review what's being sent and trigger the share
+/// sheet. Disabled (greyed) if there's no current recording.
+struct SendDebugButton: View {
+    @ObservedObject var coordinator: MeasurementCoordinator
+    @State private var presentingSheet = false
+
+    var body: some View {
+        Button {
+            presentingSheet = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "envelope")
+                    .font(.footnote)
+                Text("Send Debug")
+                    .font(.footnote.weight(.medium))
+            }
+        }
+        .foregroundStyle(coordinator.debugRecording.currentRecordingURL == nil ? Color.secondary : Color.blue)
+        .disabled(coordinator.debugRecording.currentRecordingURL == nil)
+        .accessibilityLabel("Send debug recording to developer")
+        .sheet(isPresented: $presentingSheet) {
+            DebugReportSheet(debugRecording: coordinator.debugRecording)
+        }
+    }
+}
+
 // MARK: - Tip Row
 
 /// Shared tip row used by all failure screens (and the Idle / RateConfusion
