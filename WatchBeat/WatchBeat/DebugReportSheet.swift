@@ -151,8 +151,11 @@ struct DebugReportSheet: View {
         // Build a directory holding the renamed source files. Using a
         // directory (not a single file) is what triggers NSFileCoordinator
         // to produce a .zip — coordinating a single file would return
-        // the file itself, not a zip.
-        let stagingDir = tmp.appendingPathComponent("WatchBeatDebug_\(UUID().uuidString)")
+        // the file itself, not a zip. The directory name becomes the
+        // root folder name inside the zip, so name it the same as the
+        // share's base name so unzipping yields a folder matching the
+        // archive's name.
+        let stagingDir = tmp.appendingPathComponent(base)
         try? FileManager.default.removeItem(at: stagingDir)
         do {
             try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
