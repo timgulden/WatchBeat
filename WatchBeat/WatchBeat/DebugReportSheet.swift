@@ -126,33 +126,79 @@ struct DebugReportSheet: View {
         return items
     }
 
-    /// Copy the current debug recording's WAV/JSON to uniquely-named
-    /// temp files, named like `WatchName_YYYY-MM-DD_HH-MM-SS.wav` so
-    /// the developer can drop incoming files straight into SoundSamples/
-    /// without renaming. If the user typed no watch name, falls back
-    /// to "WatchBeat" as the prefix. The on-disk single-file invariant
-    /// (used for cleanup) is preserved — these are copies in tmp/.
+    /// Bundle the WAV and JSON sidecar into a single .zip archive named
+    /// `WatchName_YYYY-MM-DD_HH-MM-SS.zip`, then return its URL as the
+    /// share-sheet attachment. The single-archive approach is important
+    /// because iMessage transcodes any standalone audio attachment to
+    /// .m4a in transit (unavoidable, controlled by iOS). A zip avoids
+    /// that — bytes pass through unchanged. AirDrop and Mail also
+    /// preserve the WAV's bytes inside the zip.
+    ///
+    /// The zip is generated via NSFileCoordinator's .forUploading
+    /// reading option, the same iOS-native packaging used when AirDrop
+    /// shares a folder. No third-party dependencies.
+    ///
+    /// On-disk single-file invariant (used for cleanup) is preserved —
+    /// the zip and its source directory are temp files that iOS will
+    /// purge.
     private func namedAttachmentURLs() -> [URL] {
         let originals = debugRecording.attachmentURLs
         guard !originals.isEmpty else { return [] }
 
         let base = filenameBase()
-        let dir = FileManager.default.temporaryDirectory
-        var renamed: [URL] = []
+        let tmp = FileManager.default.temporaryDirectory
+
+        // Build a directory holding the renamed source files. Using a
+        // directory (not a single file) is what triggers NSFileCoordinator
+        // to produce a .zip — coordinating a single file would return
+        // the file itself, not a zip.
+        let stagingDir = tmp.appendingPathComponent("WatchBeatDebug_\(UUID().uuidString)")
+        try? FileManager.default.removeItem(at: stagingDir)
+        do {
+            try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        } catch {
+            // If we can't even create the staging dir, fall back to
+            // the originals (filename will be the on-disk fixed name,
+            // and Messages will transcode the WAV — but the share
+            // still works).
+            return originals
+        }
         for url in originals {
             let ext = url.pathExtension
-            let dest = dir.appendingPathComponent("\(base).\(ext)")
+            let dest = stagingDir.appendingPathComponent("\(base).\(ext)")
+            try? FileManager.default.copyItem(at: url, to: dest)
+        }
+
+        // Coordinate a read with .forUploading — iOS produces a .zip of
+        // the directory at a temp URL. We then copy that to a named
+        // location so the share sheet shows the meaningful filename.
+        let coordinator = NSFileCoordinator()
+        var coordError: NSError?
+        var producedZipURL: URL?
+        coordinator.coordinate(readingItemAt: stagingDir,
+                               options: [.forUploading],
+                               error: &coordError) { providedURL in
+            // providedURL is a temp .zip iOS will clean up after this
+            // block returns. Copy it to a stable name in tmp/.
+            let dest = tmp.appendingPathComponent("\(base).zip")
             try? FileManager.default.removeItem(at: dest)
             do {
-                try FileManager.default.copyItem(at: url, to: dest)
-                renamed.append(dest)
+                try FileManager.default.copyItem(at: providedURL, to: dest)
+                producedZipURL = dest
             } catch {
-                // If the copy fails for any reason, fall back to the
-                // original URL so the share still works.
-                renamed.append(url)
+                producedZipURL = nil
             }
         }
-        return renamed
+        try? FileManager.default.removeItem(at: stagingDir)
+
+        if let zipURL = producedZipURL {
+            return [zipURL]
+        } else {
+            // Zip creation failed (rare) — fall back to attaching the
+            // raw files. Messages may transcode the WAV but the share
+            // still happens.
+            return originals
+        }
     }
 
     /// Sanitized "WatchName_YYYY-MM-DD_HH-MM-SS" from the user-typed
