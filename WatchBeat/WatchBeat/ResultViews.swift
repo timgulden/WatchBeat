@@ -61,7 +61,7 @@ struct RateDialView: View {
                     Text(formatError(rateError))
                         .font(.system(size: errorFontSize(rateError, dialSize: size),
                                       weight: .bold, design: .rounded))
-                        .foregroundStyle(rateError > 0 ? .blue : rateError < 0 ? .red : .primary)
+                        .foregroundStyle(rateColor(rateError))
                         .minimumScaleFactor(0.5)
                         .lineLimit(1)
 
@@ -79,7 +79,7 @@ struct RateDialView: View {
                     } else if abs(rateError) > 0.5 {
                         Text(rateError > 0 ? "FAST" : "SLOW")
                             .font(.system(size: size * 0.055, weight: .semibold))
-                            .foregroundStyle(rateError > 0 ? .blue : .red)
+                            .foregroundStyle(rateColor(rateError))
                     }
                 }
                 .position(center)
@@ -122,6 +122,16 @@ struct RateDialView: View {
             desc += ". Beat error \(String(format: "%.1f", be)) milliseconds, \(beatErrorLabel(be).lowercased())"
         }
         return desc
+    }
+
+    /// Color the rate number / FAST-SLOW label by tier. Within ±30 s/day
+    /// the rate qualifies as Healthy or better (see rateTier), so the
+    /// number is rendered in `.primary` (black in light mode, white in
+    /// dark) — reinforcing the qualitative judgment shown beneath. Beyond
+    /// ±30 the FAST/SLOW direction is highlighted with blue/red.
+    private func rateColor(_ rate: Double) -> Color {
+        if abs(rate) <= 30 { return .primary }
+        return rate > 0 ? .blue : .red
     }
 
     /// Highest accuracy tier the measured rate qualifies for. Returns nil
