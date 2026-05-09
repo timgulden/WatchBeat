@@ -91,7 +91,10 @@ struct DebugReportSheet: View {
 
     /// Items handed to UIActivityViewController. The body string carries
     /// the user-typed context plus a compact diagnostic dump; the WAV
-    /// (and JSON sidecar) are file attachments.
+    /// (and JSON sidecar) are file attachments — copied to uniquely-
+    /// named temp files at share time so the receiver sees something
+    /// like `Timex1_2026-05-09_14-32-15.wav` instead of the generic
+    /// fixed on-disk filename.
     private var shareItems: [Any] {
         var items: [Any] = []
 
@@ -119,8 +122,65 @@ struct DebugReportSheet: View {
             bodyLines.append("Recorded: \(ctx.timestamp)")
         }
         items.append(bodyLines.joined(separator: "\n"))
-        items.append(contentsOf: debugRecording.attachmentURLs)
+        items.append(contentsOf: namedAttachmentURLs())
         return items
+    }
+
+    /// Copy the current debug recording's WAV/JSON to uniquely-named
+    /// temp files, named like `WatchName_YYYY-MM-DD_HH-MM-SS.wav` so
+    /// the developer can drop incoming files straight into SoundSamples/
+    /// without renaming. If the user typed no watch name, falls back
+    /// to "WatchBeat" as the prefix. The on-disk single-file invariant
+    /// (used for cleanup) is preserved — these are copies in tmp/.
+    private func namedAttachmentURLs() -> [URL] {
+        let originals = debugRecording.attachmentURLs
+        guard !originals.isEmpty else { return [] }
+
+        let base = filenameBase()
+        let dir = FileManager.default.temporaryDirectory
+        var renamed: [URL] = []
+        for url in originals {
+            let ext = url.pathExtension
+            let dest = dir.appendingPathComponent("\(base).\(ext)")
+            try? FileManager.default.removeItem(at: dest)
+            do {
+                try FileManager.default.copyItem(at: url, to: dest)
+                renamed.append(dest)
+            } catch {
+                // If the copy fails for any reason, fall back to the
+                // original URL so the share still works.
+                renamed.append(url)
+            }
+        }
+        return renamed
+    }
+
+    /// Sanitized "WatchName_YYYY-MM-DD_HH-MM-SS" from the user-typed
+    /// watch name and the recording's timestamp.
+    private func filenameBase() -> String {
+        let trimmedName = watchName.trimmingCharacters(in: .whitespaces)
+        let safeName: String
+        if trimmedName.isEmpty {
+            safeName = "WatchBeat"
+        } else {
+            // Replace whitespace with underscores; strip everything that
+            // isn't alphanumeric, underscore, or hyphen. Keeps filenames
+            // safe across iOS / macOS / iCloud / shared storage.
+            let collapsed = trimmedName.replacingOccurrences(of: " ", with: "_")
+            let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+            let cleaned = String(collapsed.filter { allowed.contains($0) })
+            safeName = cleaned.isEmpty ? "WatchBeat" : cleaned
+        }
+
+        // Convert ISO-8601 timestamp (e.g. "2026-05-09T14:32:15Z") to a
+        // filename-safe variant ("2026-05-09_14-32-15"). Falls back to
+        // "now" if context is missing.
+        let raw = debugRecording.currentContext?.timestamp ?? ISO8601DateFormatter().string(from: Date())
+        let timeStamp = raw
+            .replacingOccurrences(of: "T", with: "_")
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "Z", with: "")
+        return "\(safeName)_\(timeStamp)"
     }
 }
 
