@@ -67,6 +67,33 @@ print(String(format: "  amplitude: tick_pulse=%@  tock_pulse=%@  folds=%d  combi
              amp.map { String(format: "%.0f", $0) } ?? "nil",
              liftAngle))
 
+// Optional: write per-tick residuals as a CSV next to the WAV so they
+// can be plotted. Set WATCHBEAT_DUMP_RESIDUALS=1 to enable.
+// Output columns: beatIndex,isEvenBeat,residualMs
+// Drops tickTimings exactly as they appear on the iOS result page (post-
+// outlier-rejection, post-confirmation). NOTE: also drops absolute
+// time so the plotter can reconstruct an x-axis in seconds:
+//   absTimeSec ≈ slope*beatIndex + intercept + residualMs/1000
+// and we expose slope and intercept via the file header for that purpose.
+if ProcessInfo.processInfo.environment["WATCHBEAT_DUMP_RESIDUALS"] != nil {
+    let outURL = url.deletingPathExtension().appendingPathExtension("residuals.csv")
+    var s = ""
+    // Header comment lines (prefixed with #) carry context; the data
+    // header is the line immediately after.
+    s += "# file=\(url.lastPathComponent)\n"
+    s += "# rateBPH=\(result.snappedRate.rawValue) rateErrSpD=\(result.rateErrorSecondsPerDay) "
+    s += "beatErrMs=\(result.beatErrorMilliseconds.map { String($0) } ?? "nil") "
+    s += "amplitudeDeg=\(amp.map { String($0) } ?? "nil") "
+    s += "lift=\(liftAngle) q=\(result.qualityScore) conf=\(result.confirmedFraction) "
+    s += "lowConf=\(result.isLowConfidence)\n"
+    s += "beatIndex,isEvenBeat,residualMs,timeSeconds\n"
+    for t in result.tickTimings {
+        s += "\(t.beatIndex),\(t.isEvenBeat),\(t.residualMs),\(t.timeSeconds)\n"
+    }
+    try? s.write(to: outURL, atomically: true, encoding: .utf8)
+    print("  wrote residuals: \(outURL.lastPathComponent)")
+}
+
 // Per-class μ/σ + one-sidedness — direct read of what the disorderly rule sees.
 // Also test the "label-flip" hypothesis: split the residuals by beat index
 // into early/late halves and check whether the per-class mean changes sign.

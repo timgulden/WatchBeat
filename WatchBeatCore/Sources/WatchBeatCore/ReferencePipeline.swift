@@ -26,61 +26,48 @@ extension MeasurementPipeline {
         var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         let n = filtered.count
 
-        // Impulse suppression — two-tier:
-        //   Tier 1 (clip at 100× median |signal|): clamp peak amplitude
-        //     of any sample exceeding the threshold to ±clipLevel.
-        //     Real ticks routinely exceed 100× and survive clipping
-        //     (the post-clip squared envelope still shows a peak at
-        //     the tick); zeroing real ticks instead breaks rate
-        //     identification.
-        //   Tier 2 (region excise for long clip clusters): for clip
-        //     clusters whose span exceeds 3 ms, zero ±5 ms with a
-        //     0.5 ms cosine taper. Real ticks have brief clip clusters
-        //     (<2 ms span); flicks/bumps span ≥ 3 ms — the threshold
-        //     separates them. The 7 ms threshold this replaces was
-        //     leaving short flicks (like the 3 fingernail flicks on
-        //     Seagull11) un-excised, where their clipped plateau in
-        //     the squared envelope was winning argmax over real ticks.
+        // Impulse suppression — phase-aware:
+        //   Each sample above 100× median |signal| is a candidate for
+        //   suppression. Candidates that are within ~0.5 ms of each
+        //   other are grouped into clusters; clusters spanning ≥ 3 ms
+        //   are "wide" (flick-like by shape).
         //
-        // The taper at excision edges avoids fresh spectral artifacts
-        // from sharp zero-to-signal transitions.
+        //   Before suppressing, we check whether the wide clusters lie
+        //   on a rhythm matching a standard mechanical beat rate. A
+        //   loud watch (close mic, high amplitude) can produce wide
+        //   clusters at every tock or every tick — those are real beats,
+        //   not flicks, and suppressing them makes the picker lock onto
+        //   adjacent sub-events instead of the dominant peak. Phase-
+        //   awareness preserves loud rhythmic events while still
+        //   excising scattered taps/bumps.
+        //
+        //   Per-cluster classification (not all-or-nothing): each wide
+        //   cluster is judged independently. A cluster is "in rhythm"
+        //   if its time gaps to both neighbors are integer multiples of
+        //   the best-fit standard-rate base period within ±5 ms. Edge
+        //   clusters check their single available gap. In-rhythm wide
+        //   clusters are left alone (no per-sample clip, no excise);
+        //   off-rhythm wide clusters AND all narrow clusters get per-
+        //   sample clipped, and off-rhythm wide clusters are also
+        //   excised when their count is < 10 (the flick-vs-tick gate
+        //   the old code used unconditionally).
         let absVals = filtered.map { abs($0) }.sorted()
         let medianAbs = absVals[absVals.count / 2]
         if medianAbs > 0 {
             let clipLevel = 100 * medianAbs
 
-            // Pass 1: clip individual samples > 100× median, collect
-            // clipped positions.
+            // Find clip-worthy positions WITHOUT modifying the signal —
+            // we need to inspect the cluster structure before deciding
+            // which positions to actually clip.
             var clipPositions: [Int] = []
             for i in 0..<n {
-                if filtered[i] > clipLevel {
+                if filtered[i] > clipLevel || filtered[i] < -clipLevel {
                     clipPositions.append(i)
-                    filtered[i] = clipLevel
-                } else if filtered[i] < -clipLevel {
-                    clipPositions.append(i)
-                    filtered[i] = -clipLevel
                 }
             }
 
-            // Pass 2 (count-adaptive region excise): cluster clipped
-            // positions that are within ~0.5 ms of each other (clipped
-            // samples from the same physical event come in bursts at
-            // the signal's oscillation period — gaps within an event
-            // stay below 0.5 ms). For each cluster, measure span.
-            //
-            // Tick vs flick discrimination by WIDE-cluster count: pin-
-            // lever Timex ticks span 3-7 ms when clipped (~15-80 wide
-            // clusters per recording); modern Swiss ticks are brief,
-            // <2 ms (zero wide clusters). Isolated flicks/bumps are
-            // wide AND sparse (1-3 wide clusters). The wide-cluster
-            // count cleanly separates these populations: < 10 wide
-            // clusters means flicks (excise them); ≥ 10 means a wide-
-            // tick watch (don't excise — they ARE the ticks).
-            //
-            // The 3 ms span threshold for "wide" was chosen because
-            // Seagull-class Swiss ticks span <2 ms (so 3 ms safely
-            // excludes them) and even narrow Timexes have >10 ticks
-            // exceeding 3 ms (so the count gate fires correctly).
+            // Form clusters: groups of clip positions within ~0.5 ms of
+            // each other (same physical event).
             let clusterGap = max(1, Int(0.0005 * sampleRate))
             let minImpulseSpan = max(1, Int(0.003 * sampleRate))
             var allClusters: [(start: Int, end: Int)] = []
@@ -102,23 +89,50 @@ extension MeasurementPipeline {
                 allClusters.append((clusterStart, clusterEnd))
             }
 
-            // Wide-cluster count gate: count clusters that span ≥ 3 ms.
-            // If fewer than 10, the wide clusters are sparse — they're
-            // flicks/bumps in a recording where the watch's actual
-            // ticks are brief (<3 ms span) and don't show up here.
-            // Excise them. If ≥ 10, they're either pin-lever tick
-            // events themselves or a wide-tick watch family — don't
-            // excise (clip-at-threshold suffices).
             let wideClusters = allClusters.filter { $0.end - $0.start >= minImpulseSpan }
+
+            // Phase-aware classification of wide clusters.
+            let preservedStarts: Set<Int> = Self.identifyInRhythmWideClusters(
+                wideClusters, sampleRate: sampleRate
+            )
+
+            // Per-sample clip everything EXCEPT samples inside preserved
+            // (in-rhythm wide) clusters. Walk clip positions and active
+            // cluster in tandem — both lists are sorted, so this is O(n).
+            var clusterIdx = 0
+            for pos in clipPositions {
+                while clusterIdx < allClusters.count && allClusters[clusterIdx].end < pos {
+                    clusterIdx += 1
+                }
+                if clusterIdx < allClusters.count,
+                   allClusters[clusterIdx].start <= pos,
+                   pos <= allClusters[clusterIdx].end,
+                   preservedStarts.contains(allClusters[clusterIdx].start) {
+                    continue
+                }
+                if filtered[pos] > clipLevel {
+                    filtered[pos] = clipLevel
+                } else if filtered[pos] < -clipLevel {
+                    filtered[pos] = -clipLevel
+                }
+            }
+
+            // Excise only off-rhythm wide clusters. Preserves the count-
+            // adaptive gate (< 10 = flicks → excise; ≥ 10 = wide-tick
+            // watch family → not excised even if off-rhythm) on the
+            // OFF-RHYTHM subset — so a sick watch whose ticks all fall
+            // off rhythm still doesn't get its ticks zeroed if there
+            // are many of them.
+            let offRhythmWide = wideClusters.filter { !preservedStarts.contains($0.start) }
             var excisePositions: [Int] = []
-            if wideClusters.count < 10 {
-                for (s, e) in wideClusters {
+            if offRhythmWide.count < 10 {
+                for (s, e) in offRhythmWide {
                     excisePositions.append((s + e) / 2)
                 }
             }
 
             if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CLIP"] != nil {
-                FileHandle.standardError.write("[clip] total_clusters=\(allClusters.count) wide(>=3ms)=\(wideClusters.count) excised=\(excisePositions.count)\n".data(using: .utf8)!)
+                FileHandle.standardError.write("[clip] total_clusters=\(allClusters.count) wide(>=3ms)=\(wideClusters.count) preserved=\(preservedStarts.count) offRhythm=\(offRhythmWide.count) excised=\(excisePositions.count)\n".data(using: .utf8)!)
             }
 
             // Build excision mask. mask[i] = 0 inside the core ±5 ms
@@ -368,6 +382,77 @@ extension MeasurementPipeline {
                             }
                             beatPositions[w] = Double(bestIdx) / sampleRate
                         }
+                    }
+                }
+            }
+
+            // Class-consensus rescue: after pure-argmax picking, some beats
+            // can lock onto a secondary sub-event instead of the dominant
+            // peak — most often a tock whose dominant peak momentarily
+            // dips below an adjacent post-tock echo (or vice versa for
+            // ticks). The picker has no per-beat way to choose between
+            // competing peaks; class consensus does. Algorithm:
+            //   1. Fit joint regression to current beatPositions.
+            //   2. Compute per-class (even / odd) median residual — the
+            //      typical position of each parity relative to the
+            //      regression line.
+            //   3. For each beat, expected_t = regression(beat_idx) +
+            //      class_median. If pick is > 2 ms from expected AND a
+            //      competing peak exists within ±2 ms of expected with
+            //      amplitude ≥ 50% of the current pick's amplitude,
+            //      switch to that peak. The amplitude ratio prevents
+            //      pulling picks to noise floors when there's no credible
+            //      alternative; the 2 ms tolerance leaves room for
+            //      legitimate per-beat variation while catching obvious
+            //      sub-event flips.
+            if m >= 10 {
+                var sumI3 = 0.0, sumT3 = 0.0, sumII3 = 0.0, sumIT3 = 0.0
+                for i in 0..<m {
+                    let di = Double(i)
+                    sumI3 += di; sumT3 += beatPositions[i]
+                    sumII3 += di * di; sumIT3 += di * beatPositions[i]
+                }
+                let denom3 = Double(m) * sumII3 - sumI3 * sumI3
+                if abs(denom3) > 1e-20 {
+                    let slope3 = (Double(m) * sumIT3 - sumI3 * sumT3) / denom3
+                    let intercept3 = (sumT3 - slope3 * sumI3) / Double(m)
+                    var evenRes: [Double] = []
+                    var oddRes: [Double] = []
+                    for i in 0..<m {
+                        let pred = slope3 * Double(i) + intercept3
+                        let r = beatPositions[i] - pred
+                        if i % 2 == 0 { evenRes.append(r) } else { oddRes.append(r) }
+                    }
+                    evenRes.sort(); oddRes.sort()
+                    let evenMedian = evenRes.isEmpty ? 0 : evenRes[evenRes.count / 2]
+                    let oddMedian = oddRes.isEmpty ? 0 : oddRes[oddRes.count / 2]
+                    let consensusTolSec = 0.002
+                    let rescueHalf = max(1, Int(0.002 * sampleRate))
+                    let amplitudeRatio: Float = 0.5
+                    var rescueCount = 0
+                    for w in 0..<m {
+                        let pred = slope3 * Double(w) + intercept3
+                        let classMedian = w % 2 == 0 ? evenMedian : oddMedian
+                        let expected = pred + classMedian
+                        if abs(beatPositions[w] - expected) <= consensusTolSec { continue }
+                        let expSample = Int(round(expected * sampleRate))
+                        let lo = max(0, expSample - rescueHalf)
+                        let hi = min(n - 1, expSample + rescueHalf)
+                        guard lo < hi else { continue }
+                        var bestIdx = lo
+                        var bestVal: Float = -.infinity
+                        for i in lo...hi {
+                            if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
+                        }
+                        let curIdx = Int(round(beatPositions[w] * sampleRate))
+                        let curVal: Float = (curIdx >= 0 && curIdx < n) ? smoothed[curIdx] : 0
+                        if curVal > 0 && bestVal >= amplitudeRatio * curVal {
+                            beatPositions[w] = Double(bestIdx) / sampleRate
+                            rescueCount += 1
+                        }
+                    }
+                    if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
+                        FileHandle.standardError.write("[rescue] rate=\(snappedRate.rawValue) evenMed=\(String(format: "%+.2f", evenMedian * 1000))ms oddMed=\(String(format: "%+.2f", oddMedian * 1000))ms rescued=\(rescueCount)/\(m)\n".data(using: .utf8)!)
                     }
                 }
             }
@@ -885,5 +970,103 @@ extension MeasurementPipeline {
 
         // Re-anchored window centers using the robust slope.
         return (0..<m).map { slope2 * Double($0) + intercept2 }
+    }
+
+    /// Identify wide impulse clusters that fit a standard mechanical
+    /// beat-rate rhythm — loud watch ticks that should NOT be suppressed.
+    ///
+    /// Algorithm:
+    ///   - For each standard oscillation Hz, the tick-to-tock base
+    ///     period is 1/(2·oscHz). Real ticks/tocks have inter-event
+    ///     gaps that are integer multiples of this period (k=1 when
+    ///     both tick and tock are loud enough to clip, k=2 when only
+    ///     one parity clips, larger k when some intermediate ticks
+    ///     are quieter and don't trip clipping).
+    ///   - For each candidate base period, count clusters whose gaps
+    ///     to both neighbors are integer multiples (k ∈ [1, 10])
+    ///     within ±5 ms. Edge clusters check only their single available
+    ///     gap.
+    ///   - Pick the base period with the highest count. If at least
+    ///     50% of wide clusters fit that period, return those clusters
+    ///     (identified by their `start` sample) as the "preserved" set.
+    ///   - With < 3 wide clusters, no rhythm can be established —
+    ///     return empty (fall back to old all-or-nothing excise).
+    ///
+    /// Tolerance is fixed at 5 ms because rate drift over 15 s is
+    /// sub-millisecond, beat error rarely exceeds 3 ms, and 5 ms is
+    /// well below the smallest base period (50 ms for 36000 bph).
+    static func identifyInRhythmWideClusters(
+        _ wideClusters: [(start: Int, end: Int)],
+        sampleRate: Double
+    ) -> Set<Int> {
+        guard wideClusters.count >= 3 else { return [] }
+
+        let centers = wideClusters.map { Double(($0.start + $0.end) / 2) / sampleRate }
+        var gaps: [Double] = []
+        for i in 1..<centers.count {
+            gaps.append(centers[i] - centers[i - 1])
+        }
+
+        // Standard mechanical oscillation Hz (matches the rates in the
+        // app — quartz excluded since it doesn't have a tick/tock split).
+        let standardOscHz: [Double] = [2.5, 2.75, 3.0, 3.5, 4.0, 5.0]
+        let tolerance: Double = 0.005
+        let kMax = 10
+
+        func fits(_ gap: Double, basePeriod: Double) -> Bool {
+            let k = (gap / basePeriod).rounded()
+            return k >= 1 && k <= Double(kMax) && abs(gap - k * basePeriod) <= tolerance
+        }
+
+        func countFitting(basePeriod: Double) -> Int {
+            var count = 0
+            for i in 0..<wideClusters.count {
+                let prevGap: Double? = (i > 0) ? gaps[i - 1] : nil
+                let nextGap: Double? = (i < gaps.count) ? gaps[i] : nil
+                let prevFits = prevGap.map { fits($0, basePeriod: basePeriod) } ?? false
+                let nextFits = nextGap.map { fits($0, basePeriod: basePeriod) } ?? false
+                let inRhythm: Bool
+                if prevGap == nil { inRhythm = nextFits }
+                else if nextGap == nil { inRhythm = prevFits }
+                else { inRhythm = prevFits && nextFits }
+                if inRhythm { count += 1 }
+            }
+            return count
+        }
+
+        var bestOsc: Double? = nil
+        var bestCount = 0
+        for oscHz in standardOscHz {
+            let c = countFitting(basePeriod: 1.0 / (2.0 * oscHz))
+            if c > bestCount {
+                bestCount = c
+                bestOsc = oscHz
+            }
+        }
+
+        // Require at least 50% of wide clusters fit before declaring
+        // "rhythmic." Below that, the cluster set is dominated by
+        // arrhythmic events (flicks/bumps) and the few coincidental
+        // matches don't justify preserving anything.
+        guard let oscHz = bestOsc, bestCount * 2 >= wideClusters.count else {
+            return []
+        }
+
+        let basePeriod = 1.0 / (2.0 * oscHz)
+        var preserved: Set<Int> = []
+        for i in 0..<wideClusters.count {
+            let prevGap: Double? = (i > 0) ? gaps[i - 1] : nil
+            let nextGap: Double? = (i < gaps.count) ? gaps[i] : nil
+            let prevFits = prevGap.map { fits($0, basePeriod: basePeriod) } ?? false
+            let nextFits = nextGap.map { fits($0, basePeriod: basePeriod) } ?? false
+            let inRhythm: Bool
+            if prevGap == nil { inRhythm = nextFits }
+            else if nextGap == nil { inRhythm = prevFits }
+            else { inRhythm = prevFits && nextFits }
+            if inRhythm {
+                preserved.insert(wideClusters[i].start)
+            }
+        }
+        return preserved
     }
 }
