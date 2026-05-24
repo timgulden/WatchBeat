@@ -23,7 +23,26 @@ extension MeasurementPipeline {
 
     public func measureReferenceWithDiagnostics(_ input: AudioBuffer) -> (MeasurementResult, PipelineDiagnostics) {
         let sampleRate = input.sampleRate
-        var filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
+
+        // Front-end filter: spectrogram-based adaptive band selection.
+        // Run STFT, score each frequency bin's rhythmicity at standard
+        // mechanical beat rates, and bandpass at whatever narrow band
+        // shows the strongest periodic signal. Falls back to the broadband
+        // 5 kHz highpass when no narrow band meaningfully beats it (1.5×
+        // margin gate) — so already-clean broadband recordings stay on
+        // the broadband path. Set WATCHBEAT_NO_MULTIBAND=1 to force the
+        // broadband-only behavior for diagnostic A/B comparisons.
+        var filtered: [Float]
+        let multibandEnabled = ProcessInfo.processInfo.environment["WATCHBEAT_NO_MULTIBAND"] == nil
+        if multibandEnabled,
+           let band = MultibandSelector.selectBestBand(samples: input.samples, sampleRate: sampleRate) {
+            filtered = conditioner.bandpassFilter(
+                input.samples, sampleRate: sampleRate,
+                lowCutoff: band.lowHz, highCutoff: band.highHz
+            )
+        } else {
+            filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
+        }
         let n = filtered.count
 
         // Impulse suppression — phase-aware:
