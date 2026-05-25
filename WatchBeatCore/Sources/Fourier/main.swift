@@ -531,6 +531,49 @@ print("  δ (BE):       \(String(format: "%+.3f", fitDelta)) ms")
 print("  p_T:          \(String(format: "%+.3f", fitPT)) ms")
 print("  Final SSE:    \(String(format: "%.6e", bestObj))")
 
+// MARK: - 5e. Amplitude from Fourier-fitted sub-event geometry
+//
+// Standard amplitude formula: A = L / (2·sin(π·t_pulse/T_beat)).
+// "t_pulse" traditionally means the time the balance takes to traverse
+// the lift angle — the duration from lock-release to drop, captured
+// acoustically as the time between a pair of sub-events of the tick.
+//
+// On a three-part Swiss tick, the candidate spacings are |t_2 - 0|,
+// |t_3 - 0|, |t_3 - t_2|. Without per-caliber knowledge of which
+// sub-events correspond to "lock-release" and "drop", we compute
+// amplitude for EACH spacing and print all three for comparison.
+//
+// Discriminator: the Nelder-Mead SSE tells us how well the symmetric
+// three-sub-event model fits. Below ~0.05 the fit is clean (multi-sub-
+// event watch — use FFT method); above ~0.30 the model is the wrong
+// shape (pin-lever single-peak — fall back to pulse-width method).
+
+let liftAngleHere: Double = 52.0
+let beatPeriodSec = 1.0 / fHz
+let absT2 = abs(bestParams[0])
+let absT3 = abs(bestParams[1])
+let absT3mT2 = abs(bestParams[1] - bestParams[0])
+
+func ampFromPulse(_ pulseSec: Double, lift: Double) -> Double? {
+    let ratio = pulseSec / beatPeriodSec
+    guard ratio > 0.001 && ratio < 0.25 else { return nil }
+    let s = sin(.pi * ratio)
+    guard s > 1e-10 else { return nil }
+    let a = lift / (2.0 * s)
+    return (a >= 90 && a <= 360) ? a : nil
+}
+
+let ampT2 = ampFromPulse(absT2, lift: liftAngleHere)
+let ampT3 = ampFromPulse(absT3, lift: liftAngleHere)
+let ampT3T2 = ampFromPulse(absT3mT2, lift: liftAngleHere)
+
+print("")
+print("  --- Amplitude from FFT-fitted sub-event geometry (lift=\(Int(liftAngleHere))°) ---")
+print("  using |t_2|     =\(String(format: "%5.2f", absT2*1000)) ms  → amp = \(ampT2.map { String(format: "%.0f°", $0) } ?? "nil")")
+print("  using |t_3|     =\(String(format: "%5.2f", absT3*1000)) ms  → amp = \(ampT3.map { String(format: "%.0f°", $0) } ?? "nil")")
+print("  using |t_3-t_2| =\(String(format: "%5.2f", absT3mT2*1000)) ms  → amp = \(ampT3T2.map { String(format: "%.0f°", $0) } ?? "nil")")
+print("  Fit SSE: \(String(format: "%.4f", bestObj))  (clean fit <0.05, pin-lever-shaped >0.30 → use pulse-width fallback)")
+
 // MARK: - 5d. Full asymmetric fit (tick ≠ tock)
 //
 // Model: tick has sub-events (0, t_2, t_3) with amplitudes (1, A_2, A_3).
