@@ -4,10 +4,18 @@ import WatchBeatCore
 
 /// Shared measurement and display constants.
 enum MeasurementConstants {
-    /// Auto-stop recording when quality reaches this threshold.
-    static let autoStopQuality: Double = 0.80
+    /// Auto-stop recording when quality reaches this threshold. Lowered
+    /// from 0.80 after the ST3600 distance test (2026-05-25) showed the
+    /// picker is reliable on Swiss movements at q=0.4-0.7 — same rate
+    /// and BE as q=1.0 at close range. Auto-stopping at 0.50 saves
+    /// 45 s of unnecessary recording on borderline cases.
+    static let autoStopQuality: Double = 0.50
     /// Minimum quality to show results (below this, show "try again").
-    static let minimumDisplayQuality: Double = 0.30
+    /// Lowered from 0.30 after the same test showed q=0.38 producing a
+    /// rate accurate to ±0.5 s/day on an ST3600 at 8" distance. At
+    /// q=0.20 we still get plausible (within ~3 s/day) rates that beat
+    /// "no answer at all" for borderline-distance readings.
+    static let minimumDisplayQuality: Double = 0.20
     /// Rolling analysis window in seconds.
     static let analysisWindow: Double = 15.0
     /// Seconds between analysis passes during recording.
