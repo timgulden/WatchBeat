@@ -78,25 +78,20 @@ def main():
             ax.scatter([t], [lane_y], marker='o', s=tick_trimmed_size,
                        facecolor='none', edgecolor=c, linewidth=1.2, zorder=3)
 
-    # Legend manually (avoid matplotlib auto-legend duplicates).
-    legend_y = -0.35
+    # Legend in figure coordinates so it doesn't paint dots in the data area.
     legend_entries = [
-        (0.5,  tick_color, True,  "kept tick"),
-        (1.5,  tick_color, False, "trimmed tick"),
-        (2.5,  tock_color, True,  "kept tock"),
-        (3.5,  tock_color, False, "trimmed tock"),
+        (tick_color, True,  "kept tick"),
+        (tick_color, False, "trimmed tick"),
+        (tock_color, True,  "kept tock"),
+        (tock_color, False, "trimmed tock"),
     ]
-    for x, c, kept, label in legend_entries:
+    for k, (c, kept, label) in enumerate(legend_entries):
+        x_fig = 0.05 + k * 0.10
         if kept:
-            ax.scatter([x], [legend_y], marker='o', s=80,
-                       facecolor=c, edgecolor=c, linewidth=0.8, zorder=4,
-                       transform=ax.get_xaxis_transform() if False else ax.transData,
-                       clip_on=False)
+            fig.text(x_fig, 0.02, "●", color=c, fontsize=14, va="center")
         else:
-            ax.scatter([x], [legend_y], marker='o', s=80,
-                       facecolor='none', edgecolor=c, linewidth=1.2, zorder=4,
-                       clip_on=False)
-        ax.text(x + 0.12, legend_y, label, fontsize=9, va="center", clip_on=False)
+            fig.text(x_fig, 0.02, "○", color=c, fontsize=14, va="center")
+        fig.text(x_fig + 0.012, 0.02, label, fontsize=9, va="center")
 
     # Annotations.
     be = data["beatErrorMs"]
