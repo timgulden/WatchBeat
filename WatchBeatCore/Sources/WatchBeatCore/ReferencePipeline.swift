@@ -667,8 +667,52 @@ extension MeasurementPipeline {
             let rejector = OutlierRejector(beatPositions: beatPositions)
             let evenIdxs = confirmedBeatIndices.filter { $0 % 2 == 0 }
             let oddIdxs = confirmedBeatIndices.filter { $0 % 2 != 0 }
-            let cleanedConfirmed = (rejector.clean(evenIdxs) + rejector.clean(oddIdxs)).sorted()
+            var cleanedConfirmed = (rejector.clean(evenIdxs) + rejector.clean(oddIdxs)).sorted()
             guard cleanedConfirmed.count >= 6 else { return nil }
+
+            // Matched-filter refinement: build an averaged tick template
+            // from the cleaned picks (each tick's 20 ms envelope window,
+            // aligned to its current position), then cross-correlate each
+            // tick's envelope against the template to refine its position
+            // to sub-sample precision. The template captures the watch's
+            // characteristic tick shape — beat-to-beat picker noise
+            // cancels out in the average; the consistent shape survives.
+            // Each tick then snaps to wherever the template best aligns,
+            // not wherever the local smoothed-argmax happened to land.
+            //
+            // Sister-trims its own outliers via 3σ class-wise filtering
+            // on the refined positions. The result: tighter per-tick
+            // residuals than any single-beat pick can produce on watches
+            // with a consistent tick shape.
+            //
+            // Set WATCHBEAT_NO_MATCHED_FILTER=1 to disable.
+            if ProcessInfo.processInfo.environment["WATCHBEAT_NO_MATCHED_FILTER"] == nil {
+                let tickPositions = cleanedConfirmed.map { beatPositions[$0] }
+                let refined = MatchedFilterRefinement.refinePositions(
+                    squared: squared,
+                    sampleRate: sampleRate,
+                    tickPositions: tickPositions,
+                    beatIndices: cleanedConfirmed
+                )
+                // Apply refined positions to beatPositions; collect survivor indices.
+                var survivors: [Int] = []
+                survivors.reserveCapacity(cleanedConfirmed.count)
+                for (k, idx) in cleanedConfirmed.enumerated() {
+                    if let r = refined[k] {
+                        beatPositions[idx] = r
+                        survivors.append(idx)
+                    }
+                }
+                // Only adopt the refined set if it leaves a usable number
+                // of beats. If matched filter trimmed too aggressively
+                // (rare), fall back to the pre-refinement cleaned set.
+                if survivors.count >= 6 {
+                    cleanedConfirmed = survivors
+                }
+                if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_MATCHED_FILTER"] != nil {
+                    FileHandle.standardError.write("[matched-filter] rate=\(snappedRate.rawValue) input=\(tickPositions.count) survivors=\(survivors.count) kept=\(cleanedConfirmed.count)\n".data(using: .utf8)!)
+                }
+            }
 
             // Linear regression on the cleaned set. Use the original beat
             // index `i` (not a re-numbering) so the regression's slope is
