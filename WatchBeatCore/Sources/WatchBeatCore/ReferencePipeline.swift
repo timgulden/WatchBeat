@@ -517,12 +517,30 @@ extension MeasurementPipeline {
                         let madTight = 0.0002
                         let asymmetricFlip = minMADSec < madTight && maxMADSec >= 2.0 * minMADSec
                         if asymmetricFlip {
+                            // Two safeguards prevent overoptimistic picks:
+                            //   (a) Loose-class-only: re-pick only the
+                            //       class showing the flip signature. The
+                            //       tight class is already at picker
+                            //       precision — touching it can only do
+                            //       harm.
+                            //   (b) Amplitude floor: only replace a pick
+                            //       if the new position's smoothed
+                            //       amplitude is at least 50% of the
+                            //       current pick's amplitude. Prevents
+                            //       grabbing a tiny noise peak near the
+                            //       consensus window while ignoring a
+                            //       clearly stronger signal just outside.
+                            let looseIsEven = (evMAD > odMAD)
+                            let looseMedian = looseIsEven ? evenMedian : oddMedian
                             let lockHalf = max(1, Int(0.0005 * sampleRate))
+                            let amplitudeRatio: Float = 0.5
                             var lockCount = 0
+                            var rejectAmp = 0
                             for w in 0..<m {
+                                let isEvenBeat = (w % 2 == 0)
+                                if isEvenBeat != looseIsEven { continue }  // tight class untouched
                                 let pred = slope3 * Double(w) + intercept3
-                                let classMedian = w % 2 == 0 ? evenMedian : oddMedian
-                                let expected = pred + classMedian
+                                let expected = pred + looseMedian
                                 let expSample = Int(round(expected * sampleRate))
                                 let lo = max(0, expSample - lockHalf)
                                 let hi = min(n - 1, expSample + lockHalf)
@@ -532,6 +550,12 @@ extension MeasurementPipeline {
                                 for i in lo...hi {
                                     if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
                                 }
+                                let curIdx = Int(round(beatPositions[w] * sampleRate))
+                                let curVal: Float = (curIdx >= 0 && curIdx < n) ? smoothed[curIdx] : 0
+                                guard curVal > 0, bestVal >= amplitudeRatio * curVal else {
+                                    rejectAmp += 1
+                                    continue
+                                }
                                 let newT = Double(bestIdx) / sampleRate
                                 if abs(newT - beatPositions[w]) > 1e-9 {
                                     beatPositions[w] = newT
@@ -539,7 +563,7 @@ extension MeasurementPipeline {
                                 }
                             }
                             if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
-                                FileHandle.standardError.write("[class-lockin] evMAD=\(String(format: "%.2f", evMAD * 1000))ms odMAD=\(String(format: "%.2f", odMAD * 1000))ms re-picked=\(lockCount)/\(m)\n".data(using: .utf8)!)
+                                FileHandle.standardError.write("[class-lockin] evMAD=\(String(format: "%.2f", evMAD * 1000))ms odMAD=\(String(format: "%.2f", odMAD * 1000))ms looseClass=\(looseIsEven ? "EVEN" : "ODD") re-picked=\(lockCount) ampReject=\(rejectAmp)\n".data(using: .utf8)!)
                             }
                         } else if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
                             FileHandle.standardError.write("[class-lockin] no asymmetry: evMAD=\(String(format: "%.2f", evMAD * 1000))ms odMAD=\(String(format: "%.2f", odMAD * 1000))ms (skipped)\n".data(using: .utf8)!)
