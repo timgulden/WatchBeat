@@ -473,6 +473,78 @@ extension MeasurementPipeline {
                     if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
                         FileHandle.standardError.write("[rescue] rate=\(snappedRate.rawValue) evenMed=\(String(format: "%+.2f", evenMedian * 1000))ms oddMed=\(String(format: "%+.2f", oddMedian * 1000))ms rescued=\(rescueCount)/\(m)\n".data(using: .utf8)!)
                     }
+
+                    // Sub-event-flipping fix: per-class lock-in, gated on
+                    // asymmetric MAD. The signature of sub-event flipping
+                    // on well-regulated watches is one class with very
+                    // tight picks (showing the picker's intrinsic sub-ms
+                    // precision) and the other class visibly looser —
+                    // typically because two competing acoustic sub-events
+                    // are close to equal amplitude on one parity, so the
+                    // picker oscillates between them beat-to-beat.
+                    //
+                    // When MAD is asymmetric, the tight class proves the
+                    // class median is trustworthy, and the loose class's
+                    // picks can safely be pulled toward (regression +
+                    // class_median) ±0.5 ms. When both MADs are moderate
+                    // (weak signal, no consensus) or both tight (picker
+                    // already happy), the gate stays silent — preserving
+                    // the rest of the pipeline's behavior.
+                    //
+                    // Set WATCHBEAT_NO_LOCKIN=1 to disable.
+                    if ProcessInfo.processInfo.environment["WATCHBEAT_NO_LOCKIN"] == nil {
+                        var ev: [Double] = []
+                        var od: [Double] = []
+                        for i in 0..<m {
+                            let pred = slope3 * Double(i) + intercept3
+                            let r = beatPositions[i] - pred
+                            if i % 2 == 0 { ev.append(r) } else { od.append(r) }
+                        }
+                        func mad(_ a: [Double]) -> Double {
+                            guard !a.isEmpty else { return 0 }
+                            let sorted = a.sorted()
+                            let med = sorted[sorted.count / 2]
+                            let absDevs = sorted.map { abs($0 - med) }.sorted()
+                            return absDevs[absDevs.count / 2]
+                        }
+                        let evMAD = mad(ev)
+                        let odMAD = mad(od)
+                        let minMADSec = min(evMAD, odMAD)
+                        let maxMADSec = max(evMAD, odMAD)
+                        // Fire when one class has MAD < 0.2 ms (confirmed
+                        // sub-ms picker precision) AND the other is at
+                        // least 2× looser (sub-event flipping signature).
+                        let madTight = 0.0002
+                        let asymmetricFlip = minMADSec < madTight && maxMADSec >= 2.0 * minMADSec
+                        if asymmetricFlip {
+                            let lockHalf = max(1, Int(0.0005 * sampleRate))
+                            var lockCount = 0
+                            for w in 0..<m {
+                                let pred = slope3 * Double(w) + intercept3
+                                let classMedian = w % 2 == 0 ? evenMedian : oddMedian
+                                let expected = pred + classMedian
+                                let expSample = Int(round(expected * sampleRate))
+                                let lo = max(0, expSample - lockHalf)
+                                let hi = min(n - 1, expSample + lockHalf)
+                                guard lo < hi else { continue }
+                                var bestIdx = lo
+                                var bestVal: Float = -.infinity
+                                for i in lo...hi {
+                                    if smoothed[i] > bestVal { bestVal = smoothed[i]; bestIdx = i }
+                                }
+                                let newT = Double(bestIdx) / sampleRate
+                                if abs(newT - beatPositions[w]) > 1e-9 {
+                                    beatPositions[w] = newT
+                                    lockCount += 1
+                                }
+                            }
+                            if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
+                                FileHandle.standardError.write("[class-lockin] evMAD=\(String(format: "%.2f", evMAD * 1000))ms odMAD=\(String(format: "%.2f", odMAD * 1000))ms re-picked=\(lockCount)/\(m)\n".data(using: .utf8)!)
+                            }
+                        } else if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_RESCUE"] != nil {
+                            FileHandle.standardError.write("[class-lockin] no asymmetry: evMAD=\(String(format: "%.2f", evMAD * 1000))ms odMAD=\(String(format: "%.2f", odMAD * 1000))ms (skipped)\n".data(using: .utf8)!)
+                        }
+                    }
                 }
             }
 
