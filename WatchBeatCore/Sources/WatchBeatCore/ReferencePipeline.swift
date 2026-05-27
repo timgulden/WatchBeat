@@ -868,17 +868,35 @@ extension MeasurementPipeline {
         // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
-        // High-σ gate: route to LowAnalyticalConfidence whenever per-class
-        // residual scatter exceeds 8 ms. A watch whose individual tick
-        // positions scatter by 8+ ms is too erratic for a useful per-tick
-        // display — even the dedicated timegrapher cannot make sense of
-        // these recordings (Tim's Timex3Mess: σ ≈ 10, regression slope
-        // still hits the right rate but most picks land on noise events
-        // near each beat). The user gets a clear "watch is too erratic
-        // to analyze" page instead of a misleading rate-with-snowstorm.
+        // Low-confidence routing — two independent gates:
         //
-        // Threshold lives in MeasurementPipeline.lowConfidenceMaxClassSigmaMs.
+        // (a) High-σ gate: route to LowAnalyticalConfidence whenever
+        //     the AVERAGE per-class residual scatter exceeds the
+        //     threshold (currently 10 ms). Catches uniformly-erratic
+        //     recordings (Timex3Mess: σ ≈ 10) where the regression
+        //     slope still hits the right rate but most picks land on
+        //     noise events near each beat.
+        //
+        // (b) Asymmetric per-class σ gate: when one class shows clean
+        //     tight picks but the other is hopelessly scattered, the
+        //     reported BE (computed from cross-class pairing) is
+        //     unreliable even though average σ may look fine. Caught
+        //     on the 2026-05-26 Timex "terrible_ticks_good_rocks"
+        //     recording (even σ=2.97, odd σ=0.35; ratio 8.5×). The
+        //     rate is plausible but the displayed BE of 8 ms is a
+        //     fiction of the scattered class. Better to route to
+        //     try-again than to display the misleading number.
+        //
+        // Fires when: max(class σ) / min(class σ) ≥ 5  AND
+        //             max(class σ) ≥ 1 ms (rules out cases where both
+        //             classes are sub-ms and the ratio is just noise).
+        let evenStd = winner.evenStd
+        let oddStd = winner.oddStd
+        let maxClassStd = max(evenStd, oddStd)
+        let minClassStd = max(min(evenStd, oddStd), 1e-9)  // avoid div by zero
+        let asymmetricClassFailure = maxClassStd / minClassStd >= 5.0 && maxClassStd >= 1.0
         let isLowConfidence = avgClassStd > Self.lowConfidenceMaxClassSigmaMs
+                            || asymmetricClassFailure
 
         let beatErrorReported: Double? = beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
