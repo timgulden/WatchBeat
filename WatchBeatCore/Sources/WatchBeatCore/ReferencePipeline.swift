@@ -823,17 +823,213 @@ extension MeasurementPipeline {
         }
 
         // Unpack the winning candidate into the locals that the rest of the
-        // function used to compute directly.
+        // function used to compute directly. Some are var so the cross-class
+        // rescue below can rewrite them in place.
         let snappedRate = winner.snappedRate
-        let beatPositions = winner.beatPositions
+        var beatPositions = winner.beatPositions
         let m = beatPositions.count
-        let slope = winner.slope
-        let intercept = winner.intercept
-        let residualsMs = winner.residualsMs
-        let avgClassStd = winner.avgClassStd
-        let beAsymmetryMs = winner.beAsymmetryMs
+        var slope = winner.slope
+        var intercept = winner.intercept
+        var residualsMs = winner.residualsMs
+        var avgClassStd = winner.avgClassStd
+        var beAsymmetryMs = winner.beAsymmetryMs
+        var evenStd = winner.evenStd
+        var oddStd = winner.oddStd
         let snr = winner.snr
         let confirmedFraction = winner.confirmedFraction
+
+        // Cross-class sub-event correspondence rescue. Runs ONLY on the
+        // winning candidate so wrong-rate candidates can't be artificially
+        // improved by it (which would corrupt candidate scoring).
+        //
+        // Detects the "mirrored sub-event" failure pattern: each class is
+        // internally tight, but their average residuals are large with
+        // opposite signs — meaning the picker locked onto different
+        // acoustic sub-events in tick vs tock windows. Caught on the
+        // 2026-06-26 NH35 recording (even μ=+4.20ms, odd μ=-3.81ms,
+        // BE 8 ms reported; same watch consistently reads BE 1 ms ~50% of
+        // recordings).
+        //
+        // Algorithm:
+        //   1. Detect mirror pattern (|even+odd| < 2 ms AND |even-odd| > 4 ms).
+        //   2. Build per-class average envelope templates from picks.
+        //   3. Find prominent peaks (≥ 50% of class dominant) in each.
+        //   4. Score all (tick peak, tock peak) combinations on:
+        //      - smaller |Δoffset| (smaller BE — only better-than-current accepted)
+        //      - bonus for same position-in-sequence (corresponding mechanical
+        //        events appear at the same rank in each class's peak sequence)
+        //      - combined amplitude (avoids switching to noise floor)
+        //   5. If a meaningfully better configuration exists, re-pick all
+        //      beats with argmax in narrow window around the new offset.
+        //
+        // Set WATCHBEAT_NO_CROSS_CLASS=1 to disable for diagnostic A/B.
+        if ProcessInfo.processInfo.environment["WATCHBEAT_NO_CROSS_CLASS"] == nil {
+            let kept = winner.cleanedConfirmed
+            var preEvenSum = 0.0, preOddSum = 0.0
+            var preEvenN = 0, preOddN = 0
+            for idx in kept {
+                let res = beatPositions[idx] - (slope * Double(idx) + intercept)
+                if idx % 2 == 0 { preEvenSum += res; preEvenN += 1 }
+                else { preOddSum += res; preOddN += 1 }
+            }
+            let preEvenMs = preEvenN > 0 ? (preEvenSum / Double(preEvenN)) * 1000.0 : 0
+            let preOddMs = preOddN > 0 ? (preOddSum / Double(preOddN)) * 1000.0 : 0
+            let symMagnitude = abs(preEvenMs + preOddMs)
+            let totalSpread = abs(preEvenMs - preOddMs)
+            let mirroredPattern = symMagnitude < 2.0 && totalSpread > 4.0
+
+            if mirroredPattern {
+                // Build per-class average envelope template (peak-normalized).
+                let templateHalfMs: Double = 10.0
+                let templatePoints = 401
+                let msPerPoint = (2.0 * templateHalfMs) / Double(templatePoints - 1)
+                func buildTemplate(forEven: Bool) -> [Float] {
+                    var template = [Double](repeating: 0, count: templatePoints)
+                    var contribs = 0
+                    for idx in kept where (idx % 2 == 0) == forEven {
+                        let predicted = slope * Double(idx) + intercept
+                        let centerSamp = Int(round(predicted * sampleRate))
+                        var localT = [Double](repeating: 0, count: templatePoints)
+                        var localMax: Float = 0
+                        for k in 0..<templatePoints {
+                            let msOff = -templateHalfMs + Double(k) * msPerPoint
+                            let absIdx = centerSamp + Int(round(msOff / 1000.0 * sampleRate))
+                            if absIdx >= 0 && absIdx < n {
+                                let v = smoothed[absIdx]
+                                localT[k] = Double(v)
+                                if v > localMax { localMax = v }
+                            }
+                        }
+                        if localMax > 0 {
+                            let inv = 1.0 / Double(localMax)
+                            for k in 0..<templatePoints { template[k] += localT[k] * inv }
+                            contribs += 1
+                        }
+                    }
+                    if contribs > 0 {
+                        for k in 0..<templatePoints { template[k] /= Double(contribs) }
+                    }
+                    return template.map { Float($0) }
+                }
+                let evenTemplate = buildTemplate(forEven: true)
+                let oddTemplate = buildTemplate(forEven: false)
+
+                // Peak finder: local maxima ≥ 50% of class dominant, min 1 ms separation.
+                func findPeaks(_ t: [Float]) -> [(offsetMs: Double, amplitude: Double)] {
+                    let maxAmp = t.max() ?? 0
+                    guard maxAmp > 0 else { return [] }
+                    let threshold = 0.5 * maxAmp
+                    var peaks: [(offsetMs: Double, amplitude: Double)] = []
+                    for i in 1..<(t.count - 1) {
+                        if t[i] >= threshold && t[i] > t[i - 1] && t[i] >= t[i + 1] {
+                            let offsetMs = -templateHalfMs + Double(i) * msPerPoint
+                            let amp = Double(t[i]) / Double(maxAmp)
+                            if let last = peaks.last, offsetMs - last.offsetMs < 1.0 {
+                                if amp > last.amplitude {
+                                    peaks[peaks.count - 1] = (offsetMs, amp)
+                                }
+                            } else {
+                                peaks.append((offsetMs, amp))
+                            }
+                        }
+                    }
+                    return peaks
+                }
+                let evenPeaks = findPeaks(evenTemplate)
+                let oddPeaks = findPeaks(oddTemplate)
+
+                if !evenPeaks.isEmpty && !oddPeaks.isEmpty {
+                    // HARD REQUIREMENT: posMatch must be true. The position-
+                    // in-sequence match is the principled test that the two
+                    // chosen peaks correspond to the same physical mechanical
+                    // event in tick and tock — preventing wrong-event
+                    // substitution that produces misleadingly-small BE on
+                    // watches with genuinely large beat error (e.g.,
+                    // Timex1_Strays has real BE ≈ 5 ms; without this gate,
+                    // cross-class would suppress it to 1 ms).
+                    let currentBE = totalSpread
+                    var bestScore: Double = -.infinity
+                    var bestPair: (Int, Int)? = nil
+                    for (ei, evP) in evenPeaks.enumerated() {
+                        for (oi, oP) in oddPeaks.enumerated() {
+                            guard ei == oi else { continue }   // hard posMatch requirement
+                            let candidateBE = abs(evP.offsetMs - oP.offsetMs)
+                            if candidateBE >= currentBE - 1.0 { continue }
+                            let score = evP.amplitude + oP.amplitude
+                            if score > bestScore {
+                                bestScore = score
+                                bestPair = (ei, oi)
+                            }
+                        }
+                    }
+
+                    if let (ei, oi) = bestPair {
+                        let newEvenSec = evenPeaks[ei].offsetMs / 1000.0
+                        let newOddSec = oddPeaks[oi].offsetMs / 1000.0
+                        let rescueHalfSamp = max(1, Int(0.0015 * sampleRate))
+                        var moveCount = 0
+                        for idx in kept {
+                            let predicted = slope * Double(idx) + intercept
+                            let classOffset = (idx % 2 == 0) ? newEvenSec : newOddSec
+                            let targetSamp = Int(round((predicted + classOffset) * sampleRate))
+                            let lo = max(0, targetSamp - rescueHalfSamp)
+                            let hi = min(n - 1, targetSamp + rescueHalfSamp)
+                            guard lo < hi else { continue }
+                            var bIdx = lo
+                            var bVal: Float = -.infinity
+                            for j in lo...hi {
+                                if smoothed[j] > bVal { bVal = smoothed[j]; bIdx = j }
+                            }
+                            let newT = Double(bIdx) / sampleRate
+                            if abs(newT - beatPositions[idx]) > 1e-9 {
+                                beatPositions[idx] = newT
+                                moveCount += 1
+                            }
+                        }
+
+                        // Refit regression + residuals + per-class stats + BE.
+                        var sI = 0.0, sT = 0.0, sII = 0.0, sIT = 0.0
+                        for idx in kept {
+                            let di = Double(idx)
+                            sI += di; sT += beatPositions[idx]
+                            sII += di * di; sIT += di * beatPositions[idx]
+                        }
+                        let c = Double(kept.count)
+                        let denom = c * sII - sI * sI
+                        if abs(denom) > 1e-20 {
+                            slope = (c * sIT - sI * sT) / denom
+                            intercept = (sT - slope * sI) / c
+                        }
+                        residualsMs = [Double](repeating: 0, count: m)
+                        for i in 0..<m {
+                            residualsMs[i] = (beatPositions[i] - (slope * Double(i) + intercept)) * 1000.0
+                        }
+                        var eS = 0.0, oS = 0.0, eSq = 0.0, oSq = 0.0, eN = 0, oN = 0
+                        for idx in kept {
+                            let r = residualsMs[idx]
+                            if idx % 2 == 0 { eS += r; eSq += r * r; eN += 1 }
+                            else { oS += r; oSq += r * r; oN += 1 }
+                        }
+                        let eMean = eN > 0 ? eS / Double(eN) : 0
+                        let oMean = oN > 0 ? oS / Double(oN) : 0
+                        evenStd = eN > 0 ? sqrt(max(0, eSq / Double(eN) - eMean * eMean)) : 0
+                        oddStd = oN > 0 ? sqrt(max(0, oSq / Double(oN) - oMean * oMean)) : 0
+                        avgClassStd = (evenStd + oddStd) / 2.0
+                        var resByBeat: [Int: Double] = [:]
+                        for idx in kept { resByBeat[idx] = residualsMs[idx] / 1000.0 }
+                        beAsymmetryMs = (BeatError.meanPairedAbsDifference(residualsByBeat: resByBeat) ?? 0) * 1000.0
+
+                        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CROSS_CLASS"] != nil {
+                            FileHandle.standardError.write("[cross-class] WINNER rate=\(snappedRate.rawValue) wasBE=\(String(format: "%.2f", currentBE))ms newBE=\(String(format: "%.2f", abs(newEvenSec - newOddSec) * 1000))ms posMatch=\(ei == oi) moved=\(moveCount)/\(kept.count)\n".data(using: .utf8)!)
+                        }
+                    } else if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CROSS_CLASS"] != nil {
+                        FileHandle.standardError.write("[cross-class] mirror but no better config: even=\(String(format: "%+.2f", preEvenMs))ms odd=\(String(format: "%+.2f", preOddMs))ms\n".data(using: .utf8)!)
+                    }
+                }
+            } else if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CROSS_CLASS"] != nil {
+                FileHandle.standardError.write("[cross-class] no mirror: even=\(String(format: "%+.2f", preEvenMs))ms odd=\(String(format: "%+.2f", preOddMs))ms (skipped)\n".data(using: .utf8)!)
+            }
+        }
 
         // Rate reporting: use the regression slope from cleaned-confirmed
         // picks. The slope is the average tick spacing in samples /
@@ -890,8 +1086,8 @@ extension MeasurementPipeline {
         // Fires when: max(class σ) / min(class σ) ≥ 5  AND
         //             max(class σ) ≥ 1 ms (rules out cases where both
         //             classes are sub-ms and the ratio is just noise).
-        let evenStd = winner.evenStd
-        let oddStd = winner.oddStd
+        // evenStd / oddStd were unpacked from the winner above and may have
+        // been updated by the cross-class rescue. Use those values here.
         let maxClassStd = max(evenStd, oddStd)
         let minClassStd = max(min(evenStd, oddStd), 1e-9)  // avoid div by zero
         let asymmetricClassFailure = maxClassStd / minClassStd >= 5.0 && maxClassStd >= 1.0
