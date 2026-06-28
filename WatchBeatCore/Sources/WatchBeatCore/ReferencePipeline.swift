@@ -937,22 +937,54 @@ extension MeasurementPipeline {
                 }
                 let evenPeaks = findPeaks(evenTemplate)
                 let oddPeaks = findPeaks(oddTemplate)
+                if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_CROSS_CLASS"] != nil {
+                    let evDesc = evenPeaks.map { String(format: "%+.1f@%.2f", $0.offsetMs, $0.amplitude) }.joined(separator: ", ")
+                    let odDesc = oddPeaks.map { String(format: "%+.1f@%.2f", $0.offsetMs, $0.amplitude) }.joined(separator: ", ")
+                    FileHandle.standardError.write("[cross-class] peaks even=[\(evDesc)] odd=[\(odDesc)]\n".data(using: .utf8)!)
+                }
 
                 if !evenPeaks.isEmpty && !oddPeaks.isEmpty {
-                    // HARD REQUIREMENT: posMatch must be true. The position-
-                    // in-sequence match is the principled test that the two
-                    // chosen peaks correspond to the same physical mechanical
-                    // event in tick and tock — preventing wrong-event
-                    // substitution that produces misleadingly-small BE on
-                    // watches with genuinely large beat error (e.g.,
-                    // Timex1_Strays has real BE ≈ 5 ms; without this gate,
-                    // cross-class would suppress it to 1 ms).
+                    // Position-in-sequence requirement.
+                    //
+                    // When BOTH classes have multiple prominent peaks,
+                    // posMatch (chosen peaks at the same rank in each
+                    // class's sequence) is the principled "corresponding
+                    // mechanical events" test. It prevents wrong-event
+                    // substitution.
+                    //
+                    // When ONE class is "simple" (single prominent peak)
+                    // and the other is multi-peak, posMatch is undefined —
+                    // there's no rank to match against. In that case the
+                    // single peak IS the simple class's mechanical event,
+                    // and the multi-peak class's "right" choice is the
+                    // peak that, paired with the simple peak, gives the
+                    // smallest BE. Caught on the NH35: tick template has
+                    // two equally-strong peaks, tock template has one;
+                    // picker landed on the mirrored tick peak (BE ~8 ms);
+                    // the cross-class consensus is the other tick peak
+                    // (BE ~1 ms, validated by the user's external
+                    // observation across many recordings).
+                    //
+                    // Note: this can also affect Timex1_Strays-style
+                    // recordings (Strays 5.16 → 1.08 ms). We don't have
+                    // ground truth for those, but the same algorithmic
+                    // principle applies — corresponding mechanical events
+                    // should be paired, not mirror events. If a user
+                    // reports a watch that should show a larger BE
+                    // appearing as a small one, that's data for refining
+                    // this gate.
+                    let bothMultiPeak = evenPeaks.count >= 2 && oddPeaks.count >= 2
+                    let oneSimpleOneMulti = (evenPeaks.count == 1 && oddPeaks.count >= 2)
+                                          || (oddPeaks.count == 1 && evenPeaks.count >= 2)
+                    let canRelaxPosMatch = oneSimpleOneMulti  // strictly enforced when both multi
+
                     let currentBE = totalSpread
                     var bestScore: Double = -.infinity
                     var bestPair: (Int, Int)? = nil
                     for (ei, evP) in evenPeaks.enumerated() {
                         for (oi, oP) in oddPeaks.enumerated() {
-                            guard ei == oi else { continue }   // hard posMatch requirement
+                            let posMatch = (ei == oi)
+                            if !posMatch && !canRelaxPosMatch { continue }
                             let candidateBE = abs(evP.offsetMs - oP.offsetMs)
                             if candidateBE >= currentBE - 1.0 { continue }
                             let score = evP.amplitude + oP.amplitude
