@@ -52,6 +52,31 @@ struct ListeningCaption: View {
     }
 }
 
+// MARK: - Simple Tips Block
+
+/// Compact instructional bullets used by the lower (flexible) square of
+/// the Listen screen. Square-ish via .aspectRatio(1) so it rotates
+/// cleanly with the rest of the layout during position studies.
+struct SimpleTipsBlock: View {
+    let title: String
+    let tips: [(icon: String, text: String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+            ForEach(0..<tips.count, id: \.self) { i in
+                tipRow(icon: tips[i].icon, text: tips[i].text)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .aspectRatio(1, contentMode: .fit)
+    }
+}
+
 // MARK: - Bottom Row
 
 /// Bottom-row strip with a centered Cancel button (on Listening/Measuring)

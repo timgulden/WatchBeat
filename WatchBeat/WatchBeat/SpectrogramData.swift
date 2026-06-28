@@ -1,130 +1,130 @@
 import Foundation
 import Combine
+import WatchBeatCore
 
-/// Rolling spectrogram state for the Monitoring/Recording UI.
+/// Live data backing the Listen screen's two visualizations:
 ///
-/// Holds the most-recent 15-second window of STFT magnitude data as a
-/// fixed-length circular column buffer. Each column is one short-time
-/// FFT magnitude vector covering the 4-22 kHz band, normalized for
-/// display.
+/// 1. **Band-energy trace** — a rolling 15-second time series of acoustic
+///    energy at the algorithm's current best-band frequency (or broadband
+///    if no band has been confidently selected yet). Renders as an
+///    EKG-style line plot. Each tick of the watch shows up as a visible
+///    spike.
 ///
-/// Also tracks the best-band frequency the algorithm is currently
-/// locked onto (for the red line overlay).
+/// 2. **Standard-rate bars** — Goertzel magnitudes at each of the six
+///    standard mechanical beat rates (5, 5.5, 6, 7, 8, 10 Hz), computed
+///    from the trace. The bar at the actual beat rate stands out;
+///    diffuse bars mean no rhythm has been detected.
 ///
-/// Updates are pushed from `SpectrogramMonitor` on a background queue
-/// and consumed on the main thread by `SpectrogramView`. Marked
-/// `@unchecked Sendable` because mutation is serialized through the
-/// monitor's analysis queue; reads on the main thread tolerate a
-/// momentarily-stale snapshot (worst case: one frame).
+/// Both visualizations share the same source — the trace samples — so
+/// the user sees consistent information. When the algorithm finds a
+/// confident best band, the trace narrows to that band and the bars
+/// sharpen.
 final class SpectrogramData: ObservableObject, @unchecked Sendable {
-    /// Number of columns in the visible 15 s window. 300 × 50 ms = 15 s.
-    static let columnCount = 300
+    /// Number of trace samples in the visible 15 s window. 300 × 50 ms.
+    static let traceSampleCount = 300
 
-    /// Number of frequency bins per column. 150 bins across 4-22 kHz
-    /// gives ~120 Hz per bin — plenty of detail for visual identification
-    /// of tick energy. SpectrogramView's bitmap renderer scales the
-    /// 300 × 150 pixel grid to the display size with interpolation, so
-    /// the visible output is smooth.
-    static let binCount = 150
+    /// Seconds per trace sample.
+    static let traceDtSec: Double = 15.0 / Double(traceSampleCount)
 
-    /// Y-axis range shown on the display (Hz).
-    static let minFreqHz: Double = 4000
-    static let maxFreqHz: Double = 22000
+    /// Rolling 15-second buffer of best-band energy. Circular.
+    @Published private(set) var trace: [Float]
 
-    /// Time per column (seconds) — chosen so columnCount × columnDt = 15 s.
-    static let columnDtSec: Double = 15.0 / Double(columnCount)
+    /// Next index to write in the circular trace buffer.
+    @Published private(set) var traceWriteIndex: Int = 0
 
-    /// Circular buffer of magnitude columns. `columns[writeIndex]` is the
-    /// oldest column (about to be overwritten); columns wrap around.
-    /// Each column is `binCount` log-magnitude values, scaled to [0, 1]
-    /// for display (0 = silent black, 1 = full-energy white).
-    @Published private(set) var columns: [[Float]]
-    @Published private(set) var writeIndex: Int = 0
+    /// Monotonic counter — total trace samples ever written. The UI
+    /// uses this both to decide "how much of the window has been
+    /// populated" and to drive the analysis-window fraction (when
+    /// recording is active).
+    @Published private(set) var totalTraceWritten: Int = 0
 
-    /// Best-band frequency in Hz; nil while analysis hasn't yet locked
-    /// on. UI renders a red horizontal line at this frequency.
+    /// Magnitude at each standard beat rate, normalized to [0, 1] within
+    /// the current snapshot (the strongest rate is always at 1.0). Drives
+    /// the bar heights. Empty until we have ≥ 2 s of trace data.
+    @Published var rateMagnitudes: [StandardBeatRate: Float] = [:]
+
+    /// Best-band center frequency in Hz; nil until band selection
+    /// produces a confident pick. Shown as a small label under the bars.
     @Published var bestBandHz: Double? = nil
 
-    /// Number of distinct columns ever written. Used by the UI to know
-    /// how much of the 15 s window has actually been populated (the
-    /// rest stays blank).
-    @Published private(set) var totalColumnsWritten: Int = 0
-
-    /// Absolute column index at which the current recording's analysis
-    /// window began. Nil while not recording. The UI uses this to render
-    /// the yellow analysis-window tint attached to specific columns —
-    /// every column with absoluteIndex ≥ this value is "in the analysis
-    /// window" and gets tinted. As the spectrogram scrolls left, the
-    /// tint scrolls with it (same discrete-jump rate), so the visual
-    /// representation of "this audio is being analyzed" stays bound to
-    /// the actual audio.
-    @Published var recordingStartColumnIndex: Int? = nil
-
-    /// Fraction (0..1) of the visible 15 s window currently covered by
-    /// the recording's analysis tint. Derived from
-    /// `recordingStartColumnIndex` and `totalColumnsWritten` so the tint
-    /// advances in exact lockstep with the spectrogram itself — one
-    /// 1/columnCount step every time a new column is appended.
-    var analysisWindowFraction: Double {
-        guard let start = recordingStartColumnIndex else { return 0 }
-        let elapsedColumns = max(0, totalColumnsWritten - start)
-        return min(1.0, Double(elapsedColumns) / Double(Self.columnCount))
-    }
+    /// Absolute trace-sample index at which the current recording's
+    /// analysis window began. Currently unused by the visible UI (we
+    /// dropped the yellow tint), but kept for future use if we need to
+    /// visualize which audio is being analyzed.
+    @Published var recordingStartIndex: Int? = nil
 
     init() {
-        columns = Array(repeating: [Float](repeating: 0, count: Self.binCount),
-                        count: Self.columnCount)
+        trace = [Float](repeating: 0, count: Self.traceSampleCount)
     }
 
-    /// Append a new column on the right edge. Called from the analysis
-    /// queue at the monitor's column-emit rate; dispatches publishing
-    /// to the main actor.
-    ///
-    /// All state mutation happens INSIDE the @MainActor Task — the
-    /// previous implementation read writeIndex / totalColumnsWritten off
-    /// the analysis thread before dispatching, which raced with other
-    /// pending Tasks: multiple emits would read the same stale state
-    /// and overwrite each other, losing both column data AND counter
-    /// increments. The visible result was the column counter advancing
-    /// slower than the actual emit rate (e.g., 9 Hz instead of 13 Hz),
-    /// which made the column-tied analysis tint reach the left edge
-    /// well after the 15-second wall-clock mark.
-    func appendColumn(_ column: [Float]) {
-        // Capture `column` immutably; let MainActor own all the state.
+    /// Append one trace sample on the right edge. Called from the analysis
+    /// queue at ~20 Hz. All state mutation happens inside the @MainActor
+    /// Task body to avoid the data race that previously dropped updates
+    /// (analysis thread reading stale @Published state, multiple tasks
+    /// overwriting each other).
+    func appendTraceSample(_ sample: Float) {
         Task { @MainActor in
-            guard column.count == Self.binCount else { return }
-            self.columns[self.writeIndex] = column
-            self.writeIndex = (self.writeIndex + 1) % Self.columnCount
-            self.totalColumnsWritten += 1
+            self.trace[self.traceWriteIndex] = sample
+            self.traceWriteIndex = (self.traceWriteIndex + 1) % Self.traceSampleCount
+            self.totalTraceWritten += 1
         }
     }
 
-    /// Reset all data. Called when entering a fresh listening session
-    /// (e.g., the user lands on the Monitoring screen).
+    /// Publish a new snapshot of rate-bar magnitudes. Caller (monitor)
+    /// supplies a dict of magnitudes that are already normalized to
+    /// [0, 1] with the strongest at 1.0.
+    func publishRateMagnitudes(_ mags: [StandardBeatRate: Float]) {
+        Task { @MainActor in
+            self.rateMagnitudes = mags
+        }
+    }
+
+    /// Reset all data. Called when entering a fresh Listen session.
     func reset() {
-        let cleared = Array(repeating: [Float](repeating: 0, count: Self.binCount),
-                            count: Self.columnCount)
+        let cleared = [Float](repeating: 0, count: Self.traceSampleCount)
         Task { @MainActor in
-            self.columns = cleared
-            self.writeIndex = 0
+            self.trace = cleared
+            self.traceWriteIndex = 0
+            self.totalTraceWritten = 0
+            self.rateMagnitudes = [:]
             self.bestBandHz = nil
-            self.totalColumnsWritten = 0
-            self.recordingStartColumnIndex = nil
+            self.recordingStartIndex = nil
         }
     }
 
-    /// Mark the moment recording analysis begins. The next column to be
-    /// written becomes the first "in-analysis-window" column; the tint
-    /// will grow as further columns are added.
+    /// Mark the moment the picker's analysis window begins (kept for
+    /// future use; current UI doesn't visualize it).
     @MainActor
     func markRecordingStart() {
-        recordingStartColumnIndex = totalColumnsWritten
+        recordingStartIndex = totalTraceWritten
     }
 
-    /// Clear the recording marker. Called when leaving the recording
-    /// state so the tint disappears.
     @MainActor
     func markRecordingEnd() {
-        recordingStartColumnIndex = nil
+        recordingStartIndex = nil
+    }
+
+    /// Visible-trace samples in order (oldest to newest), padded with
+    /// zeros on the left if fewer than traceSampleCount samples have
+    /// been written. Used by the UI for rendering.
+    func visibleTrace() -> [Float] {
+        let total = totalTraceWritten
+        let count = Self.traceSampleCount
+        if total >= count {
+            // Buffer wrapped — start at writeIndex.
+            var out = [Float](repeating: 0, count: count)
+            for i in 0..<count {
+                out[i] = trace[(traceWriteIndex + i) % count]
+            }
+            return out
+        } else {
+            // Partial fill — pad left with zeros so newest is at right edge.
+            var out = [Float](repeating: 0, count: count)
+            let pad = count - total
+            for i in 0..<total {
+                out[pad + i] = trace[i]
+            }
+            return out
+        }
     }
 }

@@ -1,51 +1,64 @@
 import SwiftUI
 
+/// The single combined "listen + measure" screen.
+///
+/// Replaces the previous two-screen flow (Monitoring + Recording). When
+/// the user taps Listen on the Idle screen, audio capture + the picker
+/// analysis loop both start immediately and the user sees this one
+/// screen until either:
+///   - Auto-stop fires (a 15-s rolling window passed the quality gates)
+///     and a result is computed; or
+///   - The 60-s budget runs out and the failure routing ladder fires; or
+///   - The user taps Cancel.
+///
+/// Upper square: EKG-style band-energy trace at top, standard-rate bars
+/// below, current best-band frequency label under the bars. Lower square:
+/// short instructional tips. Bottom row: Cancel only — no Measure
+/// button.
 struct RecordingScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
     var body: some View {
-        TimelineView(.animation) { _ in
-            let elapsed = elapsedTime()
-            let phase = currentPhase(elapsed: elapsed)
-            SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
-                SimpleTipsBlock(title: "While measuring…", tips: [
-                    ("hand.raised", "Hold steady."),
-                    ("ear", "Stay quiet."),
-                    ("clock", "Most readings finish in 15 seconds."),
-                ])
-            } bigSquare: {
-                SpectrogramSquare(
-                    data: coordinator.spectrogramData,
-                    status: phase.label,
-                    tintColor: phase.tintColor
-                )
-            } controls: {
-                VStack(spacing: 10) {
-                    BottomRow(cancelAction: { coordinator.cancelMeasurement() })
-                }
+        SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
+            SimpleTipsBlock(title: "While listening…", tips: [
+                ("hand.raised", "Hold steady."),
+                ("ear", "Stay quiet."),
+                ("clock", "Usually finishes in 15 seconds."),
+            ])
+        } bigSquare: {
+            ListenPanel(data: coordinator.spectrogramData)
+        } controls: {
+            VStack(spacing: 10) {
+                BottomRow(cancelAction: { coordinator.cancelMeasurement() })
             }
         }
     }
+}
 
-    private struct Phase {
-        let label: String
-        let tintColor: Color
-    }
+/// Composite of the trace + bars + band-Hz label, fills the upper
+/// (big) square of the Listen screen.
+struct ListenPanel: View {
+    @ObservedObject var data: SpectrogramData
 
-    /// Status caption + tint color:
-    /// - 0–15 s: "Measuring…" — pale yellow tint
-    /// - 15+ s with no auto-stop yet: "Searching for signal…" — orange
-    /// (When the session ends, MeasurementCoordinator transitions to
-    /// AnalyzingScreen for the "Success" pause, then to a result page.)
-    private func currentPhase(elapsed: Double) -> Phase {
-        if elapsed < MeasurementConstants.analysisWindow {
-            return Phase(label: "Measuring…", tintColor: Color.yellow.opacity(0.30))
+    var body: some View {
+        VStack(spacing: 6) {
+            BandTraceView(data: data)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            BeatRateBarsView(data: data)
+                .frame(height: 100)
+            Text(bandLabel)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(height: 14)
         }
-        return Phase(label: "Searching for signal…", tintColor: Color.orange.opacity(0.30))
+        .padding(8)
     }
 
-    private func elapsedTime() -> Double {
-        guard let start = coordinator.recordingStartTime else { return 0 }
-        return min((ContinuousClock.now - start).asSeconds, coordinator.maxRecordingTime)
+    private var bandLabel: String {
+        if let hz = data.bestBandHz {
+            return String(format: "Listening at %.1f kHz", hz / 1000.0)
+        }
+        return "Scanning…"
     }
 }

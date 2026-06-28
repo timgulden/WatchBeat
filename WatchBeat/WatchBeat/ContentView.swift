@@ -13,12 +13,15 @@ struct ContentView: View {
             switch coordinator.state {
             case .idle:
                 IdleScreen(coordinator: coordinator)
-            case .monitoring:
-                MonitoringScreen(coordinator: coordinator)
-            case .recording:
+            case .monitoring, .recording:
+                // .monitoring is no longer entered (Idle → directly to
+                // .recording via startMonitoring → startMeasurement);
+                // map both cases to RecordingScreen as safety.
                 RecordingScreen(coordinator: coordinator)
             case .analyzing:
-                AnalyzingScreen(coordinator: coordinator)
+                // .analyzing is no longer entered either (success
+                // pause was dropped). Brief placeholder if ever reached.
+                Color.white
             case .result(let data):
                 ResultScreen(data: data, coordinator: coordinator)
             case .needsService(let data):

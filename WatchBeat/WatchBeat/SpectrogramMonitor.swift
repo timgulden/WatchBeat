@@ -2,52 +2,59 @@ import AVFoundation
 import Accelerate
 import WatchBeatCore
 
-/// Real-time spectrogram producer for the Monitoring/Recording UI.
+/// Real-time producer of the Listen-screen visualizations.
 ///
-/// Mirrors the lifecycle of FrequencyMonitor (start/stop, internal
-/// AVAudioEngine for monitoring, external sample feed for recording),
-/// but produces STFT columns rather than per-rate FFT magnitudes.
+/// Computes a short-time FFT every ~50 ms over the most recent ~21 ms of
+/// audio, then derives:
+///   - One trace sample per STFT slice = total energy in the algorithm's
+///     current best band (or broadband if no band has been selected yet).
+///     Published into SpectrogramData.trace.
+///   - Once per ~1 s: a fresh best-band selection (max-rhythmicity scan
+///     over all 4–22 kHz bins).
+///   - Once per ~250 ms: Goertzel magnitudes at each standard beat rate
+///     against the recent trace data → rate bars.
 ///
-/// Each column is one short-time FFT over the most recent ~21 ms of
-/// audio. Columns are emitted every 50 ms so the visible 15-second
-/// window contains exactly 300 columns. Each column's magnitudes are
-/// log-scaled and normalized to [0, 1] for display.
-///
-/// Also performs band-selection (echoing what MultibandSelector does in
-/// the picker pipeline) so the UI can show the algorithm's current
-/// best-band guess as a red horizontal line — visualizing the same
-/// rhythmic-band detection the picker uses.
+/// Audio capture mirrors FrequencyMonitor's lifecycle (own AVAudioEngine
+/// during Listen, external sample feed during Recording — same data,
+/// same monitor, different transport).
 final class SpectrogramMonitor: @unchecked Sendable {
 
-    /// The data source the UI binds to.
     let data: SpectrogramData
 
     private var engine: AVAudioEngine?
     private(set) var configInfo: String = ""
 
-    // FFT setup
+    // STFT setup
     private let fftWindowSize = 1024
     private let log2n: vDSP_Length
     private let hannWindow: [Float]
     private let fftSetup: FFTSetup?
     private var sampleRate: Double = 48000
 
-    // Rolling raw audio buffer — keeps the most recent ~25 s so that
-    // we always have enough samples for a 1024-pt FFT plus headroom
-    // for band-scoring.
+    // Rolling raw audio buffer.
     private let rollingBufferDuration: Double = 16.0
     private var rollingBuffer: [Float] = []
     private var rollingBufferSize: Int = 0
     private var samplesAccumulated: Int = 0
 
-    // Column emit cadence
+    // Trace-emit cadence (matches one STFT hop).
     private var samplesSinceLastColumn: Int = 0
-    private var samplesPerColumn: Int = 2400  // 50 ms at 48 kHz
+    private var samplesPerColumn: Int = 2400
 
-    // Band-selection cadence (slower than column cadence — band changes
-    // slowly relative to display refresh)
+    // Band-selection cadence (slower than trace cadence).
     private var samplesSinceLastBandSelect: Int = 0
-    private var samplesPerBandSelect: Int = 48000  // 1 s at 48 kHz
+    private var samplesPerBandSelect: Int = 48000  // 1 s
+
+    // Bar-update cadence (faster than band select so bars feel responsive).
+    private var samplesSinceLastBarUpdate: Int = 0
+    private var samplesPerBarUpdate: Int = 12000  // 0.25 s
+
+    // Currently-active source for the trace and bars. Stored here (not in
+    // SpectrogramData) so we can mutate from the analysis queue without
+    // round-tripping through MainActor. Mirror is published to SpectrogramData
+    // via `bestBandHz` for the UI label.
+    private var currentBandLowBin: Int = -1   // -1 = broadband
+    private var currentBandHighBin: Int = -1
 
     private let analysisQueue = DispatchQueue(label: "SpectrogramMonitor.analysis")
 
@@ -97,9 +104,6 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
-    /// Switch to external-feed mode (used during recording, when audio
-    /// is captured by AudioCaptureService and fed in here). Resets all
-    /// state so previous columns don't bleed into the new session.
     func initializeForExternalFeed(sampleRate: Double) {
         analysisQueue.sync { resetState(sampleRate: sampleRate) }
         engine?.stop()
@@ -108,7 +112,6 @@ final class SpectrogramMonitor: @unchecked Sendable {
         data.reset()
     }
 
-    /// Feed externally-captured samples (called by the recording loop).
     func feedSamples(_ samples: [Float]) {
         analysisQueue.async {
             self.appendAndAnalyze(samples)
@@ -124,8 +127,12 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.samplesAccumulated = 0
         self.samplesSinceLastColumn = 0
         self.samplesSinceLastBandSelect = 0
-        self.samplesPerColumn = Int(sampleRate * SpectrogramData.columnDtSec)
+        self.samplesSinceLastBarUpdate = 0
+        self.samplesPerColumn = Int(sampleRate * SpectrogramData.traceDtSec)
         self.samplesPerBandSelect = Int(sampleRate * 1.0)
+        self.samplesPerBarUpdate = Int(sampleRate * 0.25)
+        self.currentBandLowBin = -1
+        self.currentBandHighBin = -1
     }
 
     private func appendAndAnalyze(_ newSamples: [Float]) {
@@ -143,28 +150,31 @@ final class SpectrogramMonitor: @unchecked Sendable {
         samplesAccumulated += newCount
         samplesSinceLastColumn += newCount
         samplesSinceLastBandSelect += newCount
+        samplesSinceLastBarUpdate += newCount
 
-        // Emit a column whenever enough samples have arrived. Loop so
-        // a large incoming buffer can emit multiple columns to keep up.
+        // Emit trace samples whenever enough audio has accumulated.
         while samplesSinceLastColumn >= samplesPerColumn {
             samplesSinceLastColumn -= samplesPerColumn
             if samplesAccumulated >= fftWindowSize {
-                emitColumn()
+                emitTraceSample()
             }
         }
 
-        // Periodic band-selection updates.
         if samplesSinceLastBandSelect >= samplesPerBandSelect {
             samplesSinceLastBandSelect = 0
             updateBestBand()
         }
+        if samplesSinceLastBarUpdate >= samplesPerBarUpdate {
+            samplesSinceLastBarUpdate = 0
+            updateBars()
+        }
     }
 
-    /// Compute one STFT column from the most-recent fftWindowSize samples
-    /// and append it to the rolling spectrogram. Magnitudes are mapped
-    /// into the 4-22 kHz display range and log-scaled so dim peaks are
-    /// visible alongside loud ones.
-    private func emitColumn() {
+    /// Compute one STFT slice and emit a trace sample = total energy in
+    /// the current band (broadband if no band has been confidently
+    /// selected yet). Each tick of the watch shows up here as a brief
+    /// energy spike.
+    private func emitTraceSample() {
         guard let setup = fftSetup else { return }
         let n = fftWindowSize
         var seg = [Float](repeating: 0, count: n)
@@ -190,99 +200,105 @@ final class SpectrogramMonitor: @unchecked Sendable {
         var count32 = Int32(n / 2)
         vvsqrtf(&sqrtMag, magnitudes, &count32)
 
-        // Map into the display freq range. Bin k corresponds to k*sr/n Hz.
-        let binsPerHz = Double(n) / sampleRate
-        let firstBin = max(1, Int(SpectrogramData.minFreqHz * binsPerHz))
-        let lastBin = min(n / 2 - 1, Int(SpectrogramData.maxFreqHz * binsPerHz))
-        let outBins = SpectrogramData.binCount
-        var column = [Float](repeating: 0, count: outBins)
-        // For each output bin, find the corresponding FFT bin range and
-        // take the max — preserves narrowband features even when display
-        // resolution is lower than FFT resolution.
-        for k in 0..<outBins {
-            let frac0 = Double(k) / Double(outBins)
-            let frac1 = Double(k + 1) / Double(outBins)
-            let b0 = firstBin + Int(frac0 * Double(lastBin - firstBin))
-            let b1 = firstBin + Int(frac1 * Double(lastBin - firstBin))
-            let lo = max(0, b0)
-            let hi = min(n / 2 - 1, max(b0, b1 - 1))
-            var m: Float = 0
-            for bi in lo...hi { if sqrtMag[bi] > m { m = sqrtMag[bi] } }
-            column[k] = m
+        // Sum energy in current band (or broadband: 4-22 kHz).
+        let lo: Int
+        let hi: Int
+        if currentBandLowBin >= 0 {
+            lo = max(0, currentBandLowBin)
+            hi = min(n / 2 - 1, currentBandHighBin)
+        } else {
+            let binsPerHz = Double(n) / sampleRate
+            lo = max(1, Int(4000.0 * binsPerHz))
+            hi = min(n / 2 - 1, Int(22000.0 * binsPerHz))
         }
-
-        // Log-scale and normalize against a slowly-tracked headroom so
-        // dim recordings look bright enough to see and loud ones don't
-        // saturate. Empirical floor/ceiling: -90 dB to 0 dB.
-        var maxMag: Float = 0
-        for v in column { if v > maxMag { maxMag = v } }
-        let floor: Float = -60
-        let displayCeiling: Float = 20 * log10f(max(maxMag, 1e-6))
-        let range = max(20, displayCeiling - floor)
-        for k in 0..<outBins {
-            let db = 20 * log10f(max(column[k], 1e-6))
-            let v = max(0, min(1, (db - floor) / range))
-            column[k] = v
+        var sum: Float = 0
+        if lo <= hi {
+            for k in lo...hi { sum += sqrtMag[k] }
         }
-        data.appendColumn(column)
+        data.appendTraceSample(sum)
     }
 
-    /// Score each frequency bin's rhythmicity and pick the best — same
-    /// scoring as MultibandSelector but uses our STFT columns so we
-    /// don't need a separate analysis pass. Updates the red line on
-    /// the UI; doesn't influence picker behavior.
+    /// Look for a narrow frequency band whose energy time-series shows
+    /// the strongest rhythmic modulation at a standard mechanical beat
+    /// rate. If one beats broadband by a margin, switch the trace
+    /// source to it.
     private func updateBestBand() {
-        // Need at least ~3 seconds of columns for meaningful rhythm
-        // FFT (3 s × 20 Hz column rate = 60 columns).
-        let minColumnsForBandSelect = 60
-        let totalCols = data.totalColumnsWritten
-        guard totalCols >= minColumnsForBandSelect else { return }
+        // Need enough audio history. With ~20 trace samples/sec, 60
+        // samples = 3 s — enough for Goertzel to distinguish 5/5.5/6 Hz.
+        let totalCols = data.totalTraceWritten
+        guard totalCols >= 60 else { return }
 
-        // Get the most recent N columns directly (snapshot the data's
-        // current state). We read on main, so dispatch to compute.
-        let snapshotColumns = data.columns
-        let writeIdx = data.writeIndex
-        let nColumns = SpectrogramData.columnCount
+        // We need column-by-column STFT slices to score per-bin
+        // rhythmicity. Compute them from the rolling raw buffer.
+        // For efficiency, only re-do this once per second (we're inside
+        // that gate already).
+        let analyzeWindowSeconds = min(15.0, Double(totalCols) * SpectrogramData.traceDtSec)
+        let analyzeSampleCount = Int(analyzeWindowSeconds * sampleRate)
+        guard rollingBuffer.count >= analyzeSampleCount else { return }
+        let start = rollingBuffer.count - analyzeSampleCount
+        let snapshot = Array(rollingBuffer[start..<rollingBuffer.count])
 
-        // Build per-bin time series for the visible window. The buffer
-        // is circular — start at writeIdx (oldest column) and read
-        // forward.
-        let nBins = SpectrogramData.binCount
-        let frameRate = 1.0 / SpectrogramData.columnDtSec  // 20 Hz
+        // Build per-bin time series via STFT (50 ms hop, 1024-pt window).
+        let nBins = fftWindowSize / 2
+        let hop = samplesPerColumn
+        let nFrames = max(1, (analyzeSampleCount - fftWindowSize) / hop + 1)
 
-        // Mechanical beat rates
+        var perBin = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nBins)
+        guard let setup = fftSetup else { return }
+        var seg = [Float](repeating: 0, count: fftWindowSize)
+        var realPart = [Float](repeating: 0, count: nBins)
+        var imagPart = [Float](repeating: 0, count: nBins)
+
+        for t in 0..<nFrames {
+            let startIdx = t * hop
+            for i in 0..<fftWindowSize {
+                seg[i] = snapshot[startIdx + i] * hannWindow[i]
+            }
+            for i in 0..<nBins {
+                realPart[i] = seg[2 * i]
+                imagPart[i] = seg[2 * i + 1]
+            }
+            realPart.withUnsafeMutableBufferPointer { rp in
+                imagPart.withUnsafeMutableBufferPointer { ip in
+                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                    vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                }
+            }
+            for k in 0..<nBins {
+                let re = realPart[k]
+                let im = imagPart[k]
+                perBin[k][t] = sqrt(re * re + im * im)
+            }
+        }
+
+        // Score each bin in 4-22 kHz.
         let beatHz: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
-        let availCols = min(totalCols, nColumns)
-        let startCol = totalCols < nColumns ? 0 : writeIdx
+        let frameRate = sampleRate / Double(hop)
+        let binsPerHz = Double(fftWindowSize) / sampleRate
+        let firstBin = max(1, Int(4000.0 * binsPerHz))
+        let lastBin = min(nBins - 1, Int(22000.0 * binsPerHz))
 
         var bestBin = -1
         var bestScore: Double = 0
-        for k in 0..<nBins {
-            // Extract this bin's time series.
-            var series = [Float](repeating: 0, count: availCols)
-            for t in 0..<availCols {
-                let col = (startCol + t) % nColumns
-                series[t] = snapshotColumns[col][k]
-            }
-            // Subtract mean (DC removal).
+        for k in firstBin...lastBin {
+            var series = perBin[k]
+            // Detrend.
             var mean: Float = 0
-            vDSP_meanv(series, 1, &mean, vDSP_Length(availCols))
+            vDSP_meanv(series, 1, &mean, vDSP_Length(nFrames))
             var negMean = -mean
-            vDSP_vsadd(series, 1, &negMean, &series, 1, vDSP_Length(availCols))
+            vDSP_vsadd(series, 1, &negMean, &series, 1, vDSP_Length(nFrames))
 
-            // Goertzel at each standard beat rate; take the peak.
             var peak: Double = 0
             for r in beatHz {
                 let mag = goertzelMagnitude(series: series, frameRate: frameRate, targetHz: r)
                 if mag > peak { peak = mag }
             }
-            // Off-rate baseline — median magnitude at non-mechanical freqs.
             var bgMags: [Double] = []
             var f = 3.0
             while f <= 12.0 {
-                var nearStandard = false
-                for r in beatHz where abs(f - r) < 0.5 { nearStandard = true; break }
-                if !nearStandard {
+                var near = false
+                for r in beatHz where abs(f - r) < 0.5 { near = true; break }
+                if !near {
                     bgMags.append(goertzelMagnitude(series: series, frameRate: frameRate, targetHz: f))
                 }
                 f += 0.25
@@ -297,16 +313,60 @@ final class SpectrogramMonitor: @unchecked Sendable {
             }
         }
 
-        guard bestBin >= 0, bestScore >= 3.0 else {
-            // Don't display a "best band" unless there's something
-            // meaningfully better than the floor.
-            return
-        }
-        let freqRange = SpectrogramData.maxFreqHz - SpectrogramData.minFreqHz
-        let bestHz = SpectrogramData.minFreqHz + (Double(bestBin) + 0.5) / Double(nBins) * freqRange
+        // Require the best narrow band to clearly beat the noise floor
+        // before switching from broadband. 3.0 chosen to match
+        // MultibandSelector's gate, which works well on the picker side.
+        guard bestBin >= 0, bestScore >= 3.0 else { return }
+
+        let bandHalfBins = max(2, Int(500.0 * binsPerHz))
+        currentBandLowBin = max(firstBin, bestBin - bandHalfBins)
+        currentBandHighBin = min(lastBin, bestBin + bandHalfBins)
+        let bestHz = (Double(bestBin) + 0.5) * sampleRate / Double(fftWindowSize)
         Task { @MainActor in
             self.data.bestBandHz = bestHz
         }
+    }
+
+    /// Compute Goertzel magnitudes at each standard beat rate against the
+    /// most-recent trace samples. Normalize so the strongest rate is 1.0
+    /// and publish for the bar display.
+    private func updateBars() {
+        let visible = data.visibleTrace()
+        let totalWritten = data.totalTraceWritten
+        // Need at least 2 s of trace to distinguish 5/5.5 Hz reliably.
+        guard totalWritten >= 40 else {
+            Task { @MainActor in self.data.rateMagnitudes = [:] }
+            return
+        }
+
+        // Use only the populated suffix of the trace (in case we haven't
+        // filled the window yet).
+        let n = min(totalWritten, SpectrogramData.traceSampleCount)
+        let start = SpectrogramData.traceSampleCount - n
+        var series = Array(visible[start..<visible.count])
+
+        // Detrend.
+        var mean: Float = 0
+        vDSP_meanv(series, 1, &mean, vDSP_Length(n))
+        var negMean = -mean
+        vDSP_vsadd(series, 1, &negMean, &series, 1, vDSP_Length(n))
+
+        let frameRate = 1.0 / SpectrogramData.traceDtSec
+        var raw: [StandardBeatRate: Float] = [:]
+        var maxMag: Float = 0
+        for rate in StandardBeatRate.allCases {
+            let mag = Float(goertzelMagnitude(series: series, frameRate: frameRate, targetHz: rate.hz))
+            raw[rate] = mag
+            if mag > maxMag { maxMag = mag }
+        }
+        // Normalize to [0, 1]; strongest rate = 1.
+        var normalized: [StandardBeatRate: Float] = [:]
+        if maxMag > 0 {
+            for (k, v) in raw { normalized[k] = v / maxMag }
+        } else {
+            normalized = raw
+        }
+        data.publishRateMagnitudes(normalized)
     }
 
     private func goertzelMagnitude(series: [Float], frameRate: Double, targetHz: Double) -> Double {

@@ -317,15 +317,16 @@ final class MeasurementCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Monitoring
+    // MARK: - Listening (combined monitor + record)
 
-    /// Start listening. AudioCaptureService owns the mic and feeds the
-    /// FrequencyMonitor via its external-feed path, so there is a single
-    /// audio engine across listening + measuring — buffer carries over.
+    /// Start the combined Listen session: bring up audio capture and
+    /// immediately begin the picker analysis loop. Replaces the previous
+    /// "monitor → user taps Measure → record" two-step. The single
+    /// RecordingScreen displays the trace + bars from the moment audio
+    /// starts flowing, and auto-stops when a 15 s window passes the
+    /// quality gates (or after the 60 s budget).
     func startMonitoring() {
         ratePowers = [:]
-        state = .monitoring
-        monitoringStartTime = ContinuousClock.now
         orientationMonitor.start()
 
         Task { [weak self] in
@@ -335,8 +336,6 @@ final class MeasurementCoordinator: ObservableObject {
                 self.state = .micUnavailable(diagnostic: nil)
                 return
             }
-            // Fresh buffer on every entry — the previous session's tail is not
-            // part of this new listen.
             await self.captureService.resetBuffer()
             self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
             self.spectrogramMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
@@ -350,19 +349,12 @@ final class MeasurementCoordinator: ObservableObject {
                 self.state = .micUnavailable(diagnostic: "Could not start audio: \(error.localizedDescription)")
                 return
             }
-            // Re-init with the real sample rate now that the engine is up.
             self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
             self.spectrogramMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
 
-            self.monitorTask?.cancel()
-            self.monitorTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(100))
-                    guard let self else { break }
-                    self.ratePowers = self.frequencyMonitor.ratePowers
-                    self.rawPeak = self.frequencyMonitor.rawPeak
-                }
-            }
+            // Kick off the recording loop directly — no waiting for a
+            // Measure tap.
+            self.startMeasurement()
         }
     }
 
@@ -378,10 +370,9 @@ final class MeasurementCoordinator: ObservableObject {
 
     // MARK: - Recording
 
-    /// User pressed Measure. Capture is already running from the listening
-    /// phase — just transition state and begin the analysis loop. The buffer
-    /// already holds the pre-Measure listening audio so the first 15 s window
-    /// becomes available roughly 10 s after this call.
+    /// Begin the picker analysis loop. Called internally by
+    /// startMonitoring as soon as audio is flowing — the user no longer
+    /// has a Measure button.
     func startMeasurement() {
         recordingTask?.cancel()
         recordingTask = Task { await performContinuousMeasurement() }
@@ -541,13 +532,10 @@ final class MeasurementCoordinator: ObservableObject {
             guard let result = bestResult,
                   let diagnostics = bestDiagnostics,
                   let audioBuffer = bestBuffer else { return }
-            // Brief "Success" pause showing the frozen spectrogram and
-            // a confirmation message. Gives the user closure between
-            // measuring and the result page, and lets them see what
-            // the picker locked onto.
-            state = .analyzing
-            try? await Task.sleep(for: .milliseconds(1200))
-            guard !Task.isCancelled else { return }
+            // No "Success" pause — transition straight to the result so
+            // the user gets the answer immediately. If the transition
+            // ever feels jarring on device we can add a short pause
+            // back in here.
             await displayResult(result: result,
                                 diagnostics: diagnostics,
                                 audioBuffer: audioBuffer,
