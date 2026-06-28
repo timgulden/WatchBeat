@@ -127,4 +127,30 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
             return out
         }
     }
+
+    /// Replace the entire trace buffer with a fresh interpretation of
+    /// the same audio (typically because the best-band selector has
+    /// switched to a different frequency band, and the existing trace
+    /// — which mixes old-band and new-band samples — would otherwise
+    /// look discontinuous). Caller supplies the newSamples in order
+    /// (oldest at index 0, newest at the end); the buffer is laid out
+    /// so the newest sample sits at the right edge of the visible
+    /// window.
+    @MainActor
+    func replaceTrace(with newSamples: [Float]) {
+        let n = Self.traceSampleCount
+        let k = min(newSamples.count, n)
+        let startInNew = newSamples.count - k
+        // Linear layout: trace[0] = oldest visible, trace[n-1] = newest.
+        // Pad with zeros on the left if we have less than a full window.
+        for i in 0..<(n - k) { trace[i] = 0 }
+        for i in 0..<k { trace[n - k + i] = newSamples[startInNew + i] }
+        // Reset writeIndex to 0 (next emit overwrites the oldest slot).
+        traceWriteIndex = 0
+        // Ensure visibleTrace uses the wrapped path so it returns the
+        // buffer in [oldest..newest] order starting at writeIndex.
+        if totalTraceWritten < n {
+            totalTraceWritten = n
+        }
+    }
 }

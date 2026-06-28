@@ -55,6 +55,13 @@ final class SpectrogramMonitor: @unchecked Sendable {
     // via `bestBandHz` for the UI label.
     private var currentBandLowBin: Int = -1   // -1 = broadband
     private var currentBandHighBin: Int = -1
+    /// Rhythmicity score of the current band at the last band-selection
+    /// scan. Used for hysteresis: only switch to a new candidate band
+    /// when its score is meaningfully better (≥ 10 %) than what we have.
+    private var currentBandScore: Double = 0
+    /// Hysteresis margin — new band must score this multiple of the
+    /// current band's score before we switch. 1.10 = 10 % better.
+    private let bandSwitchMargin: Double = 1.10
 
     private let analysisQueue = DispatchQueue(label: "SpectrogramMonitor.analysis")
 
@@ -133,6 +140,7 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.samplesPerBarUpdate = Int(sampleRate * 0.25)
         self.currentBandLowBin = -1
         self.currentBandHighBin = -1
+        self.currentBandScore = 0
     }
 
     private func appendAndAnalyze(_ newSamples: [Float]) {
@@ -271,7 +279,10 @@ final class SpectrogramMonitor: @unchecked Sendable {
             }
         }
 
-        // Score each bin in 4-22 kHz.
+        // Score each bin in 4-22 kHz. Track the overall winner AND the
+        // best score within the currently-selected band so we can compare
+        // them like-for-like for hysteresis (otherwise we'd compare a
+        // fresh score against a stale one).
         let beatHz: [Double] = [5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
         let frameRate = sampleRate / Double(hop)
         let binsPerHz = Double(fftWindowSize) / sampleRate
@@ -280,9 +291,9 @@ final class SpectrogramMonitor: @unchecked Sendable {
 
         var bestBin = -1
         var bestScore: Double = 0
+        var currentBandBestScore: Double = 0
         for k in firstBin...lastBin {
             var series = perBin[k]
-            // Detrend.
             var mean: Float = 0
             vDSP_meanv(series, 1, &mean, vDSP_Length(nFrames))
             var negMean = -mean
@@ -311,19 +322,62 @@ final class SpectrogramMonitor: @unchecked Sendable {
                 bestScore = score
                 bestBin = k
             }
+            // Track current-band's best for the hysteresis comparison.
+            if currentBandLowBin >= 0 && k >= currentBandLowBin && k <= currentBandHighBin {
+                if score > currentBandBestScore { currentBandBestScore = score }
+            }
         }
 
         // Require the best narrow band to clearly beat the noise floor
-        // before switching from broadband. 3.0 chosen to match
-        // MultibandSelector's gate, which works well on the picker side.
+        // before adopting it.
         guard bestBin >= 0, bestScore >= 3.0 else { return }
 
+        // Hysteresis: when we already have a band, only switch to a
+        // different one if it scores at least `bandSwitchMargin` × the
+        // current band's best score on THIS scan. Prevents jittering
+        // between near-equal alternatives. If bestBin lands inside the
+        // current band, the comparison is essentially against itself and
+        // we naturally stay put.
         let bandHalfBins = max(2, Int(500.0 * binsPerHz))
-        currentBandLowBin = max(firstBin, bestBin - bandHalfBins)
-        currentBandHighBin = min(lastBin, bestBin + bandHalfBins)
+        let candidateLow = max(firstBin, bestBin - bandHalfBins)
+        let candidateHigh = min(lastBin, bestBin + bandHalfBins)
+        if currentBandLowBin >= 0 {
+            // If best is inside (or right at the edge of) the current band,
+            // refresh score but keep the band where it is.
+            let withinCurrent = (bestBin >= currentBandLowBin && bestBin <= currentBandHighBin)
+            if withinCurrent {
+                currentBandScore = currentBandBestScore
+                return
+            }
+            // Outside current band — switch only if meaningfully better.
+            if bestScore < currentBandBestScore * bandSwitchMargin {
+                currentBandScore = currentBandBestScore  // refresh decay
+                return
+            }
+        }
+
+        // Switching (or first lock). Update band + score.
+        currentBandLowBin = candidateLow
+        currentBandHighBin = candidateHigh
+        currentBandScore = bestScore
+
+        // Rebuild the visible trace from the per-bin history at the new
+        // band. The existing trace buffer holds samples computed under
+        // the OLD band; without this rebuild the user would see a
+        // discontinuity midway through the trace. With it, the entire
+        // visible trace updates to a consistent re-interpretation of the
+        // last 15 s of audio through the newly chosen band.
+        var newTrace = [Float](repeating: 0, count: nFrames)
+        for t in 0..<nFrames {
+            var sum: Float = 0
+            for k in candidateLow...candidateHigh { sum += perBin[k][t] }
+            newTrace[t] = sum
+        }
+
         let bestHz = (Double(bestBin) + 0.5) * sampleRate / Double(fftWindowSize)
         Task { @MainActor in
             self.data.bestBandHz = bestHz
+            self.data.replaceTrace(with: newTrace)
         }
     }
 
