@@ -42,10 +42,11 @@ struct ListenPanel: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            // Trace and bars share the upper-square space roughly equally.
             BandTraceView(data: data)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             BeatRateBarsView(data: data)
-                .frame(height: 100)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Text(bandLabel)
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)

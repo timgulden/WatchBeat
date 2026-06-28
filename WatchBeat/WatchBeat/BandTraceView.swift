@@ -33,33 +33,43 @@ struct BandTraceView: View {
         }
     }
 
-    /// Render the trace as a single Path. Log-scaled vertically. Pads
-    /// with zero on the left if the buffer isn't full yet.
+    /// Render the trace as a single Path. Log-scaled vertically.
+    ///
+    /// Fill behavior: trace grows from LEFT to right as samples
+    /// accumulate during the first 15 seconds. Once the buffer is
+    /// full (totalTraceWritten ≥ traceSampleCount), the trace spans
+    /// the full width and scrolls left as new samples arrive.
     private func drawTrace(ctx: GraphicsContext, size: CGSize) {
-        let samples = data.visibleTrace()
-        let n = samples.count
-        guard n >= 2 else { return }
+        let allSamples = data.visibleTrace()        // 300 entries, padded left with zeros
+        let total = data.totalTraceWritten
+        let count = SpectrogramData.traceSampleCount
+        let realCount = min(total, count)
+        guard realCount >= 2 else { return }
 
-        // Log-scale: y = log10(1 + sample) normalized to the visible
-        // window's max. Stable when energy is zero (log(1) = 0).
+        // Slice out just the real (non-padded) samples.
+        let realSamples = Array(allSamples[(count - realCount)..<count])
+
+        // Log-scale, normalized to the visible window's max.
         var maxLog: Float = 0
-        for v in samples {
+        for v in realSamples {
             let lv = log10f(1 + max(0, v))
             if lv > maxLog { maxLog = lv }
         }
-        // If everything's silent, draw a flat baseline at the bottom.
         let scale: Float = maxLog > 0 ? maxLog : 1
 
         let padding: CGFloat = 4
         let plotW = size.width - 2 * padding
         let plotH = size.height - 2 * padding
 
+        // X mapping: sample index i ∈ [0, count) maps linearly across
+        // plotW. Partial-fill samples land in the left portion; once
+        // full, they span the whole width (and older samples scroll
+        // off as new ones arrive via the circular buffer).
         var path = Path()
-        for i in 0..<n {
-            let x = padding + plotW * CGFloat(i) / CGFloat(n - 1)
-            let lv = log10f(1 + max(0, samples[i]))
+        for i in 0..<realCount {
+            let x = padding + plotW * CGFloat(i) / CGFloat(count - 1)
+            let lv = log10f(1 + max(0, realSamples[i]))
             let frac = Double(lv / scale)
-            // Invert Y: high values draw near top.
             let y = padding + plotH * (1.0 - CGFloat(frac))
             if i == 0 {
                 path.move(to: CGPoint(x: x, y: y))

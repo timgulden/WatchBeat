@@ -53,7 +53,7 @@ final class SpectrogramMonitor: @unchecked Sendable {
     // SpectrogramData) so we can mutate from the analysis queue without
     // round-tripping through MainActor. Mirror is published to SpectrogramData
     // via `bestBandHz` for the UI label.
-    private var currentBandLowBin: Int = -1   // -1 = broadband
+    private var currentBandLowBin: Int = -1
     private var currentBandHighBin: Int = -1
     /// Rhythmicity score of the current band at the last band-selection
     /// scan. Used for hysteresis: only switch to a new candidate band
@@ -62,6 +62,18 @@ final class SpectrogramMonitor: @unchecked Sendable {
     /// Hysteresis margin — new band must score this multiple of the
     /// current band's score before we switch. 1.10 = 10 % better.
     private let bandSwitchMargin: Double = 1.10
+    /// True once the first real band-selection scan has run. Until then
+    /// the band is the "best guess" set in resetState (around 6 kHz) and
+    /// the first scan switches without hysteresis. Prevents the initial
+    /// cosmetic guess from "sticking" if it happens to score reasonably
+    /// well against a slightly-better real band.
+    private var hasFirstScanRun: Bool = false
+    /// Center frequency of the initial "best guess" band. Most mechanical
+    /// watches have some tick energy here; the visual the user sees in
+    /// the first ~3 s will look qualitatively similar to whatever real
+    /// band the algorithm picks once it has enough data.
+    private let initialBandCenterHz: Double = 6000.0
+    private let bandHalfWidthHz: Double = 500.0
 
     private let analysisQueue = DispatchQueue(label: "SpectrogramMonitor.analysis")
 
@@ -138,9 +150,27 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.samplesPerColumn = Int(sampleRate * SpectrogramData.traceDtSec)
         self.samplesPerBandSelect = Int(sampleRate * 1.0)
         self.samplesPerBarUpdate = Int(sampleRate * 0.25)
-        self.currentBandLowBin = -1
-        self.currentBandHighBin = -1
+
+        // Seed with a "best guess" narrow band around 6 kHz so the trace
+        // looks qualitatively like a real-watch trace from the start —
+        // rather than the busy broadband-sum we'd otherwise show until
+        // the first band-selection scan runs (~3 s in). The first scan
+        // bypasses hysteresis (hasFirstScanRun = false) and switches to
+        // whatever band actually scores highest.
+        let binsPerHz = Double(fftWindowSize) / sampleRate
+        let bandHalfBins = max(2, Int(bandHalfWidthHz * binsPerHz))
+        let centerBin = Int(initialBandCenterHz * binsPerHz)
+        self.currentBandLowBin = max(1, centerBin - bandHalfBins)
+        self.currentBandHighBin = min(fftWindowSize / 2 - 1, centerBin + bandHalfBins)
         self.currentBandScore = 0
+        self.hasFirstScanRun = false
+
+        // Publish the seed band to the UI so the band-Hz label shows
+        // immediately rather than "Scanning…".
+        let bestHz = (Double(centerBin) + 0.5) * sampleRate / Double(fftWindowSize)
+        Task { @MainActor in
+            self.data.bestBandHz = bestHz
+        }
     }
 
     private func appendAndAnalyze(_ newSamples: [Float]) {
@@ -332,29 +362,27 @@ final class SpectrogramMonitor: @unchecked Sendable {
         // before adopting it.
         guard bestBin >= 0, bestScore >= 3.0 else { return }
 
-        // Hysteresis: when we already have a band, only switch to a
-        // different one if it scores at least `bandSwitchMargin` × the
-        // current band's best score on THIS scan. Prevents jittering
-        // between near-equal alternatives. If bestBin lands inside the
-        // current band, the comparison is essentially against itself and
-        // we naturally stay put.
-        let bandHalfBins = max(2, Int(500.0 * binsPerHz))
+        // Hysteresis applies once we've completed at least one real
+        // scan. The very first scan after a fresh resetState ignores
+        // hysteresis so the cosmetic "best guess" seed band (~6 kHz)
+        // doesn't stick if a meaningfully better band exists. After
+        // that, switching requires bandSwitchMargin (10%) improvement
+        // over the current band's score on this scan.
+        let bandHalfBins = max(2, Int(bandHalfWidthHz * binsPerHz))
         let candidateLow = max(firstBin, bestBin - bandHalfBins)
         let candidateHigh = min(lastBin, bestBin + bandHalfBins)
-        if currentBandLowBin >= 0 {
-            // If best is inside (or right at the edge of) the current band,
-            // refresh score but keep the band where it is.
+        if hasFirstScanRun && currentBandLowBin >= 0 {
             let withinCurrent = (bestBin >= currentBandLowBin && bestBin <= currentBandHighBin)
             if withinCurrent {
                 currentBandScore = currentBandBestScore
                 return
             }
-            // Outside current band — switch only if meaningfully better.
             if bestScore < currentBandBestScore * bandSwitchMargin {
-                currentBandScore = currentBandBestScore  // refresh decay
+                currentBandScore = currentBandBestScore
                 return
             }
         }
+        hasFirstScanRun = true
 
         // Switching (or first lock). Update band + score.
         currentBandLowBin = candidateLow
