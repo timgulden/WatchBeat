@@ -17,19 +17,14 @@ import Combine
 /// monitor's analysis queue; reads on the main thread tolerate a
 /// momentarily-stale snapshot (worst case: one frame).
 final class SpectrogramData: ObservableObject, @unchecked Sendable {
-    /// Number of columns in the visible 15 s window. 200 × 75 ms = 15 s.
-    ///
-    /// Originally targeted 300 × 50 ms but SwiftUI Canvas rendering of
-    /// 300 × 380 = 114 000 fill calls per frame couldn't sustain 20 Hz
-    /// updates, so the data updated faster than the UI rendered and the
-    /// visible 15 s of audio drifted to taking ~22 s on screen. 200 ×
-    /// 150 = 30 000 fills, which the Canvas can keep up with at 13 Hz.
-    static let columnCount = 200
+    /// Number of columns in the visible 15 s window. 300 × 50 ms = 15 s.
+    static let columnCount = 300
 
-    /// Number of frequency bins per column. Originally 380 (one per FFT
-    /// bin in the 4-22 kHz range); reduced to 150 to lower the Canvas
-    /// rendering cost. Still gives ~120 Hz per bin — plenty of detail
-    /// for visual identification of tick energy.
+    /// Number of frequency bins per column. 150 bins across 4-22 kHz
+    /// gives ~120 Hz per bin — plenty of detail for visual identification
+    /// of tick energy. SpectrogramView's bitmap renderer scales the
+    /// 300 × 150 pixel grid to the display size with interpolation, so
+    /// the visible output is smooth.
     static let binCount = 150
 
     /// Y-axis range shown on the display (Hz).
@@ -84,18 +79,23 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
     /// Append a new column on the right edge. Called from the analysis
     /// queue at the monitor's column-emit rate; dispatches publishing
     /// to the main actor.
+    ///
+    /// All state mutation happens INSIDE the @MainActor Task — the
+    /// previous implementation read writeIndex / totalColumnsWritten off
+    /// the analysis thread before dispatching, which raced with other
+    /// pending Tasks: multiple emits would read the same stale state
+    /// and overwrite each other, losing both column data AND counter
+    /// increments. The visible result was the column counter advancing
+    /// slower than the actual emit rate (e.g., 9 Hz instead of 13 Hz),
+    /// which made the column-tied analysis tint reach the left edge
+    /// well after the 15-second wall-clock mark.
     func appendColumn(_ column: [Float]) {
-        let idx = writeIndex
-        var newColumns = columns
-        if column.count == Self.binCount {
-            newColumns[idx] = column
-        }
-        let newIdx = (idx + 1) % Self.columnCount
-        let newTotal = totalColumnsWritten + 1
+        // Capture `column` immutably; let MainActor own all the state.
         Task { @MainActor in
-            self.columns = newColumns
-            self.writeIndex = newIdx
-            self.totalColumnsWritten = newTotal
+            guard column.count == Self.binCount else { return }
+            self.columns[self.writeIndex] = column
+            self.writeIndex = (self.writeIndex + 1) % Self.columnCount
+            self.totalColumnsWritten += 1
         }
     }
 

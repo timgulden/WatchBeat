@@ -34,6 +34,20 @@ enum MeasurementConstants {
     /// Set generously to accommodate badly-worn movements that still run.
     static let maxPlausibleRateError: Double = 2000.0
 
+    /// Minimum quality before we'll report a Needs-Service verdict. When
+    /// the picker finds a coherent rate but |rate error| > 2000 s/day,
+    /// either the watch is genuinely in very poor shape (real Needs
+    /// Service case) or the recording captured noise that happened to
+    /// look like a watch (a distant ticking clock, a fan, the user's
+    /// other wrist watch reaching the phone through the air). The
+    /// discriminator: a real watch in contact with the phone produces
+    /// a very clean signal — typically q > 0.7. Ambient pickup of a
+    /// distant tick source rarely exceeds q = 0.5. Below the threshold,
+    /// "we found something but can't confidently say it's your watch on
+    /// the phone" — route to Weak Signal so the user retries instead of
+    /// being told their (possibly-fine) watch needs service.
+    static let needsServiceMinQuality: Double = 0.50
+
     // MARK: - Routing & scoring thresholds
     //
     // All gates the recording loop and routing ladder evaluate, in one

@@ -1,24 +1,26 @@
 import SwiftUI
+import CoreGraphics
 
 /// Bird-call-analyzer-style spectrogram view used on the Monitoring and
 /// Recording screens.
 ///
-/// Black-and-white grayscale rendering with darker = silent, white = high
-/// energy. Time scrolls right-to-left: the rightmost column is the
-/// most-recent audio, the leftmost is from 15 s ago.
+/// Bitmap-rendered for speed: each body re-eval builds a small
+/// (columnCount × binCount) grayscale CGImage from the spectrogram data
+/// and displays it scaled to the view size. Far faster than the previous
+/// Canvas-based renderer that drew one filled rect per (column × bin)
+/// cell — Canvas could not sustain even the 13 Hz update rate, so the
+/// column-tied analysis tint lagged behind wall-clock time.
 ///
-/// Overlays:
-///   - Red horizontal line at the algorithm's current best-band guess
-///     (jittery during settle, calms as the recording lengthens).
-///   - Pale yellow tint over the "analysis window" — the region whose
-///     audio is currently being fed to the picker. During Recording,
-///     this tint enters from the right and scrolls left with the
-///     spectrogram, marking the audio under analysis.
-///   - Orange variant of the tint when the algorithm has indicated it
-///     needs additional listening time.
+/// Time scrolls right-to-left: the rightmost pixel column is the most-
+/// recent audio, the leftmost is from 15 s ago. Dark ink on white
+/// background.
 ///
-/// The view doesn't compute anything itself — it just reads from a
-/// `SpectrogramData` and re-renders when the data publishes changes.
+/// Overlays drawn on top of the bitmap:
+///   - Red horizontal line at the algorithm's current best-band guess.
+///   - Pale yellow / orange / green tint over the analysis window;
+///     width comes from `data.analysisWindowFraction` so the tint
+///     advances exactly one step when a new spectrogram column is
+///     appended, keeping it in lockstep with the spectrogram itself.
 struct SpectrogramView: View {
     @ObservedObject var data: SpectrogramData
 
@@ -41,15 +43,21 @@ struct SpectrogramView: View {
                 // White background — bird-call-analyzer aesthetic.
                 Color.white
 
-                // Spectrogram itself: dark grayscale ticks on white.
-                Canvas { ctx, size in
-                    drawSpectrogram(ctx: ctx, size: size)
+                // Spectrogram bitmap. Built from the data each render
+                // (cheap: ~30 000 pixel writes), wrapped in a CGImage
+                // and displayed via Image — the heavy lifting goes to
+                // the GPU.
+                if let image = makeSpectrogramImage() {
+                    Image(decorative: image, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .interpolation(.medium)
+                        .frame(width: w, height: h)
+                        .allowsHitTesting(false)
                 }
 
                 // Analysis-window tint. Width comes from the column-tied
                 // fraction so it advances one step exactly when a new
-                // spectrogram column appears — same discrete-jump rate as
-                // the columns themselves.
+                // spectrogram column appears.
                 if tintFraction > 0 {
                     let tintWidth = w * CGFloat(tintFraction)
                     Rectangle()
@@ -73,7 +81,7 @@ struct SpectrogramView: View {
                 }
 
                 // Subtle frequency-axis labels on the right edge for
-                // "scientific instrument" feel (4, 10, 16, 22 kHz).
+                // "scientific instrument" feel.
                 VStack(alignment: .trailing, spacing: 0) {
                     freqLabel(22)
                     Spacer()
@@ -96,47 +104,74 @@ struct SpectrogramView: View {
         }
     }
 
-    /// Render the spectrogram columns as fine vertical bars. The
-    /// circular buffer is read starting from `writeIndex` (oldest
-    /// column) so columns flow visually right-to-left over time.
-    private func drawSpectrogram(ctx: GraphicsContext, size: CGSize) {
-        let nCols = SpectrogramData.columnCount
-        let nBins = SpectrogramData.binCount
-        let colWidth = size.width / CGFloat(nCols)
-        let binHeight = size.height / CGFloat(nBins)
+    /// Build the spectrogram as a small RGBA bitmap. Each pixel = one
+    /// (column, bin) cell. Brightness inverted so 0 (silent) is white
+    /// and 1 (full energy) is black.
+    private func makeSpectrogramImage() -> CGImage? {
+        let width = SpectrogramData.columnCount
+        let height = SpectrogramData.binCount
+        let bytesPerRow = width * 4
+        let totalBytes = bytesPerRow * height
 
-        let writeIdx = data.writeIndex
-        let totalCols = data.totalColumnsWritten
-        // If totalColumnsWritten < nCols, only the right-side portion of
-        // the canvas should show data; rest stays black.
-        let visibleCount = min(totalCols, nCols)
+        // Allocate the pixel buffer (filled with white = 0xFF). Direct
+        // pointer writes inside withUnsafeMutableBytes — fast enough
+        // that we can afford to rebuild every render.
+        var pixels = [UInt8](repeating: 0xFF, count: totalBytes)
+        pixels.withUnsafeMutableBufferPointer { buf in
+            guard let p = buf.baseAddress else { return }
 
-        for visCol in 0..<visibleCount {
-            // visCol = 0 is the oldest column shown (leftmost),
-            // visCol = visibleCount-1 is the newest (rightmost).
-            let bufIndex: Int
-            if totalCols < nCols {
-                // Buffer not yet wrapped; columns are at indices 0..<totalCols.
-                bufIndex = visCol
-            } else {
-                bufIndex = (writeIdx + visCol) % nCols
-            }
-            // Position on screen: rightmost = newest. Leave any unfilled
-            // left portion white.
-            let xRight = size.width - CGFloat(visibleCount - 1 - visCol) * colWidth
-            let xLeft = xRight - colWidth
-            let column = data.columns[bufIndex]
-            for k in 0..<nBins {
-                let amp = column[k]
-                guard amp > 0.02 else { continue }
-                // y inverted: low frequency at bottom, high at top.
-                let y = size.height - CGFloat(k + 1) * binHeight
-                let rect = CGRect(x: xLeft, y: y, width: colWidth + 0.5, height: binHeight + 0.5)
-                let intensity = Double(amp)
-                // Dark ink on white background — bird-call-analyzer look.
-                ctx.fill(Path(rect), with: .color(.black.opacity(intensity)))
+            let totalCols = data.totalColumnsWritten
+            let writeIdx = data.writeIndex
+            let visibleCount = min(totalCols, width)
+
+            for visCol in 0..<visibleCount {
+                let bufIndex: Int
+                if totalCols < width {
+                    bufIndex = visCol
+                } else {
+                    bufIndex = (writeIdx + visCol) % width
+                }
+                // visCol=0 is the OLDEST visible column. We want it on
+                // the LEFT, so the rightmost pixel column corresponds
+                // to the newest. The offset from the left edge is:
+                // (visCol + width - visibleCount) gives pixel column.
+                let pixelCol = (width - visibleCount) + visCol
+                let column = data.columns[bufIndex]
+                for k in 0..<height {
+                    let amp = column[k]
+                    guard amp > 0.01 else { continue }
+                    let intensity = max(0, min(255, Int(amp * 255)))
+                    let pixelValue = UInt8(255 - intensity)
+                    // Flip vertical: high freq at top, low at bottom.
+                    let y = height - 1 - k
+                    let offset = (y * width + pixelCol) * 4
+                    p[offset + 0] = pixelValue  // R
+                    p[offset + 1] = pixelValue  // G
+                    p[offset + 2] = pixelValue  // B
+                    // alpha stays 0xFF (initialized).
+                }
             }
         }
+
+        // Wrap the pixel buffer in a CGImage. The Data copy is cheap
+        // (small buffer); CGDataProvider takes ownership.
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
+            return nil
+        }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
     }
 
     /// Compute the vertical fraction (0 = bottom, 1 = top) for a
@@ -153,4 +188,3 @@ struct SpectrogramView: View {
             .foregroundStyle(.black.opacity(0.55))
     }
 }
-

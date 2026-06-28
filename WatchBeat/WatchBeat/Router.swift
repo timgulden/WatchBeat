@@ -98,7 +98,26 @@ enum Router {
 
         // Gate 4: Needs Service. Picker is solid, rate is real, watch is
         // just far outside the normal ±120 s/day band.
+        //
+        // Additional quality check: an extreme rate (|err| > 2000 s/day)
+        // with moderate-or-low quality usually means the picker latched
+        // onto something OTHER than a watch in contact with the phone —
+        // ambient pickup of a distant ticking watch / clock through the
+        // air, a fan harmonic, etc. Real Needs-Service watches typically
+        // produce very clean signal (q > 0.7). Below the quality
+        // threshold, fall through to Weak Signal so the user retries
+        // rather than being told their watch (which may not even be
+        // present!) needs service.
         if abs(result.rateErrorSecondsPerDay) > maxPlausibleRateError {
+            if result.qualityScore < MeasurementConstants.needsServiceMinQuality {
+                if isQuartz(audioBuffer) { return .quartzDetected }
+                let q = Int(result.qualityScore * 100)
+                let cf = Int(result.confirmedFraction * 100)
+                let peak = String(format: "%.3f", diagnostics.rawPeakAmplitude)
+                let rate = Int(result.rateErrorSecondsPerDay)
+                let diag = "rate=\(rate)s/d q=\(q)% confirmed=\(cf)% sr=\(weakSignalContext.sampleRate)Hz peak=\(peak) mic=\(weakSignalContext.micConfig)"
+                return .weakSignal(diagnostic: diag)
+            }
             return .needsService(MeasurementCoordinator.NeedsServiceData(
                 rateBPH: result.snappedRate.rawValue,
                 rateErrorSecondsPerDay: result.rateErrorSecondsPerDay
