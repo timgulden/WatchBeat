@@ -381,21 +381,30 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
+    /// Window length (seconds) of trace data used for the bar FFT.
+    /// Shorter than the 15-s visible window so the bars reflect "what's
+    /// happening now" rather than the integrated whole. 5 s gives 0.2 Hz
+    /// Goertzel resolution — comfortable margin over the 0.5 Hz spacing
+    /// between adjacent standard rates (5 / 5.5 Hz).
+    private let barAnalysisWindowSec: Double = 5.0
+
     /// Compute Goertzel magnitudes at each standard beat rate against the
-    /// most-recent trace samples. Normalize so the strongest rate is 1.0
-    /// and publish for the bar display.
+    /// MOST RECENT `barAnalysisWindowSec` of trace data. Normalize so the
+    /// strongest rate is 1.0 and publish for the bar display.
     private func updateBars() {
-        let visible = data.visibleTrace()
         let totalWritten = data.totalTraceWritten
         // Need at least 2 s of trace to distinguish 5/5.5 Hz reliably.
         guard totalWritten >= 40 else {
             Task { @MainActor in self.data.rateMagnitudes = [:] }
             return
         }
+        let visible = data.visibleTrace()
 
-        // Use only the populated suffix of the trace (in case we haven't
-        // filled the window yet).
-        let n = min(totalWritten, SpectrogramData.traceSampleCount)
+        // Slice the most-recent `barAnalysisWindowSec` (or however much
+        // we have, if it's still less than that).
+        let windowSamples = Int(barAnalysisWindowSec / SpectrogramData.traceDtSec)
+        let availSamples = min(totalWritten, SpectrogramData.traceSampleCount)
+        let n = min(windowSamples, availSamples)
         let start = SpectrogramData.traceSampleCount - n
         var series = Array(visible[start..<visible.count])
 
