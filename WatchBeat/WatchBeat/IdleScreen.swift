@@ -2,6 +2,7 @@ import SwiftUI
 
 struct IdleScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
+    @AppStorage("positionStudyEnabled") private var positionStudyEnabled: Bool = false
 
     var body: some View {
         SquareScreenLayout {
@@ -12,10 +13,10 @@ struct IdleScreen: View {
             // be. Tips focus on what genuinely helps (steady contact,
             // quiet room) rather than fussy positioning advice.
             VStack(alignment: .leading, spacing: 14) {
-                tipRow(icon: "waveform", text: "Hold the bottom of the phone against your watch.")
+                tipRow(icon: "waveform", text: "Hold the mic on the bottom of the phone against your watch.")
                 tipRow(icon: "applewatch", text: "On-wrist works as well as on a bench.")
                 tipRow(icon: "hand.raised", text: "Hold steady once you press Listen.")
-                tipRow(icon: "ear", text: "Quieter rooms read faster.")
+                tipRow(icon: "ear", text: "A quieter environment is best.")
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -25,7 +26,24 @@ struct IdleScreen: View {
                 ActionButton(title: "Listen") {
                     coordinator.startMonitoring()
                 }
-                BottomRow()
+                BottomRow {
+                    Button {
+                        positionStudyEnabled.toggle()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: positionStudyEnabled
+                                  ? "checkmark.square.fill"
+                                  : "square")
+                                .font(.footnote)
+                            Text("POSITION STUDY")
+                                .font(.footnote.weight(.bold))
+                        }
+                        .foregroundStyle(positionStudyEnabled ? Color.accentColor : Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Position Study mode")
+                    .accessibilityValue(positionStudyEnabled ? "on" : "off")
+                }
             }
         }
     }

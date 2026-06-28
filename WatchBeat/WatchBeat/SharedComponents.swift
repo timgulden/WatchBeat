@@ -54,19 +54,24 @@ struct ListeningCaption: View {
 
 // MARK: - Bottom Row
 
-/// Persistent grip reminder pinned to the bottom-left of the controls
-/// area, and (on Listening/Measuring) a centered Cancel button overlaid on
-/// the same row. Fixed height so the primary action button above it lands
-/// in the same vertical position on Idle, Listening, and Measuring.
-struct BottomRow: View {
+/// Bottom-row strip with a centered Cancel button (on Listening/Measuring)
+/// and an optional leading view. By default the leading view shows the
+/// "← CROWN LEFT" orientation reminder only when Position Study mode is
+/// enabled — outside of study mode the orientation cue isn't meaningful
+/// since we're not running per-position analysis. Callers can also supply
+/// a custom leading view (used by the Idle screen for the Position Study
+/// toggle button).
+///
+/// Fixed height so the primary action button above lands in the same
+/// vertical position across all screens.
+struct BottomRow<Leading: View>: View {
     var cancelAction: (() -> Void)? = nil
+    @ViewBuilder var leading: () -> Leading
 
     var body: some View {
         ZStack {
             HStack {
-                Text("← CROWN LEFT")
-                    .font(.footnote.weight(.bold))
-                    .foregroundStyle(.primary)
+                leading()
                 Spacer()
             }
             if let cancel = cancelAction {
@@ -75,6 +80,30 @@ struct BottomRow: View {
             }
         }
         .frame(height: 30)
+    }
+}
+
+extension BottomRow where Leading == CrownLeftTipOrNothing {
+    /// Default initializer: shows the "← CROWN LEFT" tip if and only if
+    /// Position Study mode is enabled.
+    init(cancelAction: (() -> Void)? = nil) {
+        self.cancelAction = cancelAction
+        self.leading = { CrownLeftTipOrNothing() }
+    }
+}
+
+/// Renders "← CROWN LEFT" when Position Study mode is on, nothing
+/// otherwise. Used as the default leading content for BottomRow on every
+/// screen except Idle.
+struct CrownLeftTipOrNothing: View {
+    @AppStorage("positionStudyEnabled") private var positionStudyEnabled: Bool = false
+
+    var body: some View {
+        if positionStudyEnabled {
+            Text("← CROWN LEFT")
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(.primary)
+        }
     }
 }
 
