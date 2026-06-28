@@ -1096,35 +1096,68 @@ extension MeasurementPipeline {
         // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
-        // Low-confidence routing — two independent gates:
+        // Low-confidence routing — three independent gates:
         //
         // (a) High-σ gate: route to LowAnalyticalConfidence whenever
         //     the AVERAGE per-class residual scatter exceeds the
         //     threshold (currently 10 ms). Catches uniformly-erratic
-        //     recordings (Timex3Mess: σ ≈ 10) where the regression
-        //     slope still hits the right rate but most picks land on
-        //     noise events near each beat.
+        //     recordings.
         //
-        // (b) Asymmetric per-class σ gate: when one class shows clean
-        //     tight picks but the other is hopelessly scattered, the
-        //     reported BE (computed from cross-class pairing) is
-        //     unreliable even though average σ may look fine. Caught
-        //     on the 2026-05-26 Timex "terrible_ticks_good_rocks"
-        //     recording (even σ=2.97, odd σ=0.35; ratio 8.5×). The
-        //     rate is plausible but the displayed BE of 8 ms is a
-        //     fiction of the scattered class. Better to route to
-        //     try-again than to display the misleading number.
+        // (b) Asymmetric per-class σ gate: one class clean, the other
+        //     hopelessly scattered (max/min ≥ 5×, max ≥ 1 ms). Caught on
+        //     "terrible_ticks_good_rocks" — rate plausible but BE is a
+        //     fiction of the scattered class.
         //
-        // Fires when: max(class σ) / min(class σ) ≥ 5  AND
-        //             max(class σ) ≥ 1 ms (rules out cases where both
-        //             classes are sub-ms and the ratio is just noise).
+        // (c) Pair-abs σ/MAD gate: most beat pairs sit tightly around
+        //     a true BE, but a subset of beats picks the wrong sub-event
+        //     and their pair-abs values are wildly different from the
+        //     median. σ/MAD ratio captures this directly: clean Gaussian
+        //     scatter gives σ/MAD ≈ 1.5, while outlier-driven distributions
+        //     push it past 5. Caught on the 2026-06-28 NH35 recording
+        //     (real BE ≈ 1.3 ms but ~25 % of pairs flipped, producing
+        //     reported rate of -32 s/day instead of the real ~+4 s/day).
+        //     The OLS regression in those cases compromises the slope
+        //     to fit the outliers, distorting the reported rate.
+        //
         // evenStd / oddStd were unpacked from the winner above and may have
         // been updated by the cross-class rescue. Use those values here.
         let maxClassStd = max(evenStd, oddStd)
-        let minClassStd = max(min(evenStd, oddStd), 1e-9)  // avoid div by zero
+        let minClassStd = max(min(evenStd, oddStd), 1e-9)
         let asymmetricClassFailure = maxClassStd / minClassStd >= 5.0 && maxClassStd >= 1.0
+
+        // Compute pair-abs σ and MAD from the final per-beat residuals
+        // (post any cross-class adjustments). Pair = (even beat, even+1
+        // odd beat) within the cleaned set.
+        var pairAbs: [Double] = []
+        let confirmedSet = Set(winner.cleanedConfirmed)
+        for idx in winner.cleanedConfirmed where idx % 2 == 0 {
+            if confirmedSet.contains(idx + 1) {
+                pairAbs.append(abs(residualsMs[idx] - residualsMs[idx + 1]))
+            }
+        }
+        var pairAbsFlippingFailure = false
+        if pairAbs.count >= 10 {
+            pairAbs.sort()
+            let pairMedian = pairAbs[pairAbs.count / 2]
+            var devs = pairAbs.map { abs($0 - pairMedian) }
+            devs.sort()
+            // MAD scaled by 1.4826 so it's directly comparable to σ on
+            // a Gaussian distribution (σ_robust = 1.4826 · MAD).
+            let pairMAD = devs[devs.count / 2] * 1.4826
+            let pairMean = pairAbs.reduce(0, +) / Double(pairAbs.count)
+            let pairVar = pairAbs.reduce(0) { $0 + ($1 - pairMean) * ($1 - pairMean) } / Double(pairAbs.count - 1)
+            let pairSD = sqrt(pairVar)
+            let sdOverMad = pairSD / max(pairMAD, 0.05)
+            // Fires when distribution is clearly outlier-driven AND the
+            // absolute σ is meaningfully large (rules out the case where
+            // both σ and MAD are tiny and the ratio is just floating-
+            // point noise).
+            pairAbsFlippingFailure = sdOverMad >= 5.0 && pairSD >= 1.0
+        }
+
         let isLowConfidence = avgClassStd > Self.lowConfidenceMaxClassSigmaMs
                             || asymmetricClassFailure
+                            || pairAbsFlippingFailure
 
         let beatErrorReported: Double? = beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
