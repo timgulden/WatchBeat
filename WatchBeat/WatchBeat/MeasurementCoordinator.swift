@@ -512,6 +512,13 @@ final class MeasurementCoordinator: ObservableObject {
             guard let result = bestResult,
                   let diagnostics = bestDiagnostics,
                   let audioBuffer = bestBuffer else { return }
+            // Brief "Success" pause showing the frozen spectrogram and
+            // a confirmation message. Gives the user closure between
+            // measuring and the result page, and lets them see what
+            // the picker locked onto.
+            state = .analyzing
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled else { return }
             await displayResult(result: result,
                                 diagnostics: diagnostics,
                                 audioBuffer: audioBuffer,

@@ -14,16 +14,19 @@ struct LowAnalyticalConfidenceScreen: View {
                     Image(systemName: "questionmark.circle")
                         .font(.title2)
                         .foregroundStyle(.orange)
-                    Text("Low analytical confidence")
+                    Text("Reading wasn't conclusive")
                         .font(.title3.bold())
                 }
                 .padding(.top, 12)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    tipRow(icon: "rotate.3d", text: "Try a different watch position — some positions are easier to read than others.")
-                    tipRow(icon: "iphone.gen3", text: "Press the phone firmly against the caseback for solid acoustic contact.")
-                    tipRow(icon: "ear", text: "Move to a quieter room — background noise can mask quieter ticks.")
-                    tipRow(icon: "wrench.and.screwdriver", text: "If this happens in every position, your watch may be running on insufficient amplitude — consider service.")
+                    Text("The signal was clear in one direction but not the other. Often a second try is enough:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 2)
+                    tipRow(icon: "arrow.clockwise", text: "Try again — sometimes a fresh recording reads cleanly.")
+                    tipRow(icon: "rotate.3d", text: "If it keeps happening, try a different watch position.")
+                    tipRow(icon: "wrench.and.screwdriver", text: "Persistent in every position can indicate low amplitude or a worn movement.")
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)

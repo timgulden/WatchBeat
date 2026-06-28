@@ -18,7 +18,7 @@ struct ContentView: View {
             case .recording:
                 RecordingScreen(coordinator: coordinator)
             case .analyzing:
-                AnalyzingScreen()
+                AnalyzingScreen(coordinator: coordinator)
             case .result(let data):
                 ResultScreen(data: data, coordinator: coordinator)
             case .needsService(let data):

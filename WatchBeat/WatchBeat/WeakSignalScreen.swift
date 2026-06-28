@@ -14,26 +14,23 @@ struct WeakSignalScreen: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle")
+                    Image(systemName: "waveform.slash")
                         .font(.title2)
                         .foregroundStyle(.orange)
-                    Text("Signal too weak")
+                    Text("Couldn't find a clear signal")
                         .font(.title3.bold())
                 }
                 .padding(.top, 12)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    tipRow(icon: "ear", text: "Move to a quieter room. Fans, HVAC, and conversation can mask the ticks.")
-                    tipRow(icon: "iphone.slash", text: "Try removing a thick phone case for better acoustic contact.")
-                    tipRow(icon: "arrow.down", text: "Press the watch firmly against your iPhone (see diagram).")
-                    tipRow(icon: "arrow.left.and.right", text: "Slide the watch left or right to peak the bar for your watch's beat rate.")
-                    tipRow(icon: "earpods", text: "For very quiet watches, try wired earbuds with mic — orientation detection won't work.")
-
-                    Image("WatchPositioningDiagram")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                        .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
+                    Text("The watch was likely too faint over the background noise. A few things often help:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 2)
+                    tipRow(icon: "ear", text: "Move to a quieter room.")
+                    tipRow(icon: "hand.tap", text: "Hold the phone firmly against the watch.")
+                    tipRow(icon: "iphone.slash", text: "Remove a thick phone case if you have one.")
+                    Spacer().frame(maxHeight: .infinity)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)

@@ -7,22 +7,19 @@ struct IdleScreen: View {
         SquareScreenLayout {
             WatchLogo()
         } bigSquare: {
-            // Bullets at the top, diagram anchored to the bottom near the
-            // Listen button. The square's size is fixed by SquareScreenLayout
-            // so contents here never shift the wheel above.
-            VStack(alignment: .leading, spacing: 10) {
-                tipRow(icon: "waveform", text: "Place the iPhone mic close to your watch.")
-                tipRow(icon: "arrow.right.to.line.compact", text: "Direct contact is not required but can help.")
-                tipRow(icon: "applewatch", text: "On-wrist readings are fine for general use.")
-                tipRow(icon: "arrow.down", text: "For automatic orientation detection, hold the watch against your iPhone as shown.")
-                Image("WatchPositioningDiagram")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .accessibilityLabel("Diagram: watch caseback pressed against the bottom edge of an iPhone, crown pointing left.")
+            // Updated post-multiband / post-template-matching: placement
+            // is much more forgiving than the old algorithm needed it to
+            // be. Tips focus on what genuinely helps (steady contact,
+            // quiet room) rather than fussy positioning advice.
+            VStack(alignment: .leading, spacing: 14) {
+                tipRow(icon: "waveform", text: "Hold the bottom of the phone against your watch.")
+                tipRow(icon: "applewatch", text: "On-wrist works as well as on a bench.")
+                tipRow(icon: "hand.raised", text: "Hold steady once you press Listen.")
+                tipRow(icon: "ear", text: "Quieter rooms read faster.")
+                Spacer()
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 14)
         } controls: {
             VStack(spacing: 10) {
                 ActionButton(title: "Listen") {
