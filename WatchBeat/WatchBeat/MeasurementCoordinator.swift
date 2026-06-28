@@ -66,7 +66,17 @@ enum MeasurementConstants {
 
     /// Weak Signal gate: minimum confirmedFraction. Below this we treat
     /// the recording as "too few real ticks to measure" regardless of SNR.
-    static let weakSignalMinConfirmedFraction: Double = 0.5
+    ///
+    /// Raised from 0.5 to 0.65 after the 2026-06-28 "None" recording: a
+    /// watch held far from the phone produced q = 64 %, conf = 50.3 %,
+    /// a wildly wrong rate (-1821 s/day, picker chose 36000 bph for a
+    /// 21600 bph watch), and routed to Result instead of Weak Signal
+    /// because conf was just barely above the old 0.50 floor. Across
+    /// the 40-recording corpus, every successful real-watch reading
+    /// has conf ≥ 68 % (most are 100 %); the only readings at 50-52 %
+    /// conf are ambient-pickup cases that should have been Weak
+    /// Signal. The 0.65 threshold cleanly separates those populations.
+    static let weakSignalMinConfirmedFraction: Double = 0.65
 
     /// Weak Signal gate: minimum tickTimings count after outlier rejection.
     /// 3 is the absolute floor where the timegraph is even drawable; below
