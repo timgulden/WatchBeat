@@ -231,6 +231,10 @@ final class MeasurementCoordinator: ObservableObject {
 
     private let captureService = AudioCaptureService()
     private let frequencyMonitor = FrequencyMonitor()
+    /// Live STFT data for the spectrogram view (replaces the old
+    /// per-rate FFT bars). Public so the SwiftUI views can bind to it.
+    let spectrogramData = SpectrogramData()
+    private lazy var spectrogramMonitor = SpectrogramMonitor(data: spectrogramData)
     /// Pipeline injected via init for testability — production passes
     /// MeasurementPipeline (default), tests can pass a mock that returns
     /// canned results.
@@ -311,8 +315,10 @@ final class MeasurementCoordinator: ObservableObject {
             // part of this new listen.
             await self.captureService.resetBuffer()
             self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+            self.spectrogramMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
             self.captureService.onSamples = { [weak self] samples in
                 self?.frequencyMonitor.feedSamples(samples)
+                self?.spectrogramMonitor.feedSamples(samples)
             }
             do {
                 try self.captureService.startRecording()
@@ -322,6 +328,7 @@ final class MeasurementCoordinator: ObservableObject {
             }
             // Re-init with the real sample rate now that the engine is up.
             self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+            self.spectrogramMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
 
             self.monitorTask?.cancel()
             self.monitorTask = Task { [weak self] in

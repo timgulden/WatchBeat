@@ -8,17 +8,26 @@ struct MonitoringScreen: View {
             let elapsed = sweepElapsed()
             let ready = elapsed >= MeasurementConstants.listenSweepDuration
             SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
-                WatchLogo(showHand: true,
-                          angle: 0,
-                          showDialBackdrop: true)
+                // The wheel previously lived here; intentionally empty so the
+                // spectrogram has more vertical room. Could become a brand
+                // mark or signal-strength glyph later.
+                Color.clear
             } bigSquare: {
-                VStack(spacing: 8) {
-                    ListeningCaption(subtitle: "Look for the peak at your watch's beat rate",
-                                     position: coordinator.currentPosition)
-                    FrequencyBarsView(ratePowers: coordinator.ratePowers, selectedRate: nil)
+                VStack(spacing: 6) {
+                    SpectrogramView(data: coordinator.spectrogramData,
+                                    analysisWindowFraction: 0)
                         .frame(maxHeight: .infinity)
+                    Text("Listening…")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    Text("Hold the bottom of the phone against your watch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 8)
                 }
-                .padding(12)
+                .padding(8)
             } controls: {
                 VStack(spacing: 10) {
                     ActionButton(title: "Measure") {
