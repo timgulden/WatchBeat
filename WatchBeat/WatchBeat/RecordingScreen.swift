@@ -7,23 +7,18 @@ struct RecordingScreen: View {
         TimelineView(.animation) { _ in
             let elapsed = elapsedTime()
             let phase = currentPhase(elapsed: elapsed)
-            SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
+            SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
+                SimpleTipsBlock(title: "While measuring…", tips: [
+                    ("hand.raised", "Hold steady."),
+                    ("ear", "Stay quiet."),
+                    ("clock", "Most readings finish in 15 seconds."),
+                ])
+            } bigSquare: {
                 SpectrogramSquare(
                     data: coordinator.spectrogramData,
                     status: phase.label,
                     tintColor: phase.tintColor
                 )
-            } bigSquare: {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("While measuring…")
-                        .font(.headline)
-                        .padding(.bottom, 4)
-                    tipRow(icon: "hand.raised", text: "Hold steady.")
-                    tipRow(icon: "ear", text: "Stay quiet.")
-                    tipRow(icon: "clock", text: "Most readings finish in 15 seconds.")
-                    Spacer()
-                }
-                .padding(16)
             } controls: {
                 VStack(spacing: 10) {
                     BottomRow(cancelAction: { coordinator.cancelMeasurement() })

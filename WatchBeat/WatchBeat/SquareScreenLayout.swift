@@ -10,6 +10,15 @@ import SwiftUI
 /// rotation. The title and bottom controls never rotate.
 struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>: View {
     var rotation: Double = 0
+    /// When false (default), the small (flexible) square is on top and the
+    /// big (fixed) square is on the bottom — used by the Idle screen so
+    /// the wheel is near the title and tips are anchored above the
+    /// button. When true, the order flips: the big square is on top and
+    /// the small square is on the bottom — used by Monitoring / Recording /
+    /// Analyzing so the spectrogram (complex visualization) gets the
+    /// fixed footprint and the short instructional bullets get the
+    /// flexible-space slot at the bottom.
+    var bigOnTop: Bool = false
     @ViewBuilder var smallSquare: SmallContent
     @ViewBuilder var bigSquare: BigContent
     @ViewBuilder var controls: Controls
@@ -25,19 +34,13 @@ struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>:
                     .font(.largeTitle.bold())
                     .padding(.top, 12)
 
-                // Small square area — fills remaining vertical space between
-                // title and big square, with the square content centered.
-                smallSquare
-                    .rotationEffect(.degrees(rotation))
-                    .animation(.easeInOut(duration: 0.28), value: rotation)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                // Big square — fixed square footprint, centered horizontally.
-                bigSquare
-                    .frame(width: bigSide, height: bigSide)
-                    .rotationEffect(.degrees(rotation))
-                    .animation(.easeInOut(duration: 0.28), value: rotation)
-                    .frame(maxWidth: .infinity)
+                if bigOnTop {
+                    bigSquareView(bigSide: bigSide)
+                    smallSquareView
+                } else {
+                    smallSquareView
+                    bigSquareView(bigSide: bigSide)
+                }
 
                 // Bottom controls — fixed height, never rotates.
                 controls
@@ -47,5 +50,24 @@ struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>:
                     .frame(height: 110)
             }
         }
+    }
+
+    /// Flexible-space slot. Caller's content is expected to be square-
+    /// shaped (e.g., via .aspectRatio(1, contentMode: .fit)) so the
+    /// rotation effect is invariant under 90°.
+    private var smallSquareView: some View {
+        smallSquare
+            .rotationEffect(.degrees(rotation))
+            .animation(.easeInOut(duration: 0.28), value: rotation)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Fixed-size square slot. Caller's content fills the square.
+    private func bigSquareView(bigSide: CGFloat) -> some View {
+        bigSquare
+            .frame(width: bigSide, height: bigSide)
+            .rotationEffect(.degrees(rotation))
+            .animation(.easeInOut(duration: 0.28), value: rotation)
+            .frame(maxWidth: .infinity)
     }
 }

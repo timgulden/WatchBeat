@@ -9,25 +9,25 @@ struct AnalyzingScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
     var body: some View {
-        SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
+        SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
+            // Lower (small) square: success confirmation.
+            VStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.green)
+                Text("Reading captured")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 16)
+            .aspectRatio(1, contentMode: .fit)
+        } bigSquare: {
             SpectrogramSquare(
                 data: coordinator.spectrogramData,
                 status: "Success",
                 tintColor: Color.green.opacity(0.25)
             )
-        } bigSquare: {
-            VStack(spacing: 12) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.green)
-                Text("Reading captured")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.top, 40)
         } controls: {
             VStack(spacing: 10) {
                 BottomRow()
