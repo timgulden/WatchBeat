@@ -48,6 +48,27 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
     /// rest stays blank).
     @Published private(set) var totalColumnsWritten: Int = 0
 
+    /// Absolute column index at which the current recording's analysis
+    /// window began. Nil while not recording. The UI uses this to render
+    /// the yellow analysis-window tint attached to specific columns —
+    /// every column with absoluteIndex ≥ this value is "in the analysis
+    /// window" and gets tinted. As the spectrogram scrolls left, the
+    /// tint scrolls with it (same discrete-jump rate), so the visual
+    /// representation of "this audio is being analyzed" stays bound to
+    /// the actual audio.
+    @Published var recordingStartColumnIndex: Int? = nil
+
+    /// Fraction (0..1) of the visible 15 s window currently covered by
+    /// the recording's analysis tint. Derived from
+    /// `recordingStartColumnIndex` and `totalColumnsWritten` so the tint
+    /// advances in exact lockstep with the spectrogram itself — one
+    /// 1/columnCount step every time a new column is appended.
+    var analysisWindowFraction: Double {
+        guard let start = recordingStartColumnIndex else { return 0 }
+        let elapsedColumns = max(0, totalColumnsWritten - start)
+        return min(1.0, Double(elapsedColumns) / Double(Self.columnCount))
+    }
+
     init() {
         columns = Array(repeating: [Float](repeating: 0, count: Self.binCount),
                         count: Self.columnCount)
@@ -81,6 +102,22 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
             self.writeIndex = 0
             self.bestBandHz = nil
             self.totalColumnsWritten = 0
+            self.recordingStartColumnIndex = nil
         }
+    }
+
+    /// Mark the moment recording analysis begins. The next column to be
+    /// written becomes the first "in-analysis-window" column; the tint
+    /// will grow as further columns are added.
+    @MainActor
+    func markRecordingStart() {
+        recordingStartColumnIndex = totalColumnsWritten
+    }
+
+    /// Clear the recording marker. Called when leaving the recording
+    /// state so the tint disappears.
+    @MainActor
+    func markRecordingEnd() {
+        recordingStartColumnIndex = nil
     }
 }

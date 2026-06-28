@@ -22,36 +22,41 @@ import SwiftUI
 struct SpectrogramView: View {
     @ObservedObject var data: SpectrogramData
 
-    /// 0..1 — fraction of the visible window covered by the analysis
-    /// tint, growing from the right edge. 0 = no tint (Monitoring
-    /// phase), 1 = full window tinted (15 s of audio under analysis).
-    var analysisWindowFraction: Double = 0
-
-    /// Tint color (yellow → orange transition handled by caller).
-    var analysisTintColor: Color = Color.yellow.opacity(0.20)
+    /// Tint color over the analysis window. The width of the tint comes
+    /// from `data.analysisWindowFraction` (column-tied — moves in
+    /// lockstep with the spectrogram). Caller controls only the color
+    /// so different screens can use different hues (yellow during
+    /// recording, green for the "Success" pause, orange when extra
+    /// listening is needed, etc.).
+    var analysisTintColor: Color = Color.yellow.opacity(0.25)
 
     var body: some View {
+        let tintFraction = data.analysisWindowFraction
+
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
 
             ZStack(alignment: .topLeading) {
-                // Black background (silent regions).
-                Color.black
+                // White background — bird-call-analyzer aesthetic.
+                Color.white
 
-                // Spectrogram itself.
+                // Spectrogram itself: dark grayscale ticks on white.
                 Canvas { ctx, size in
                     drawSpectrogram(ctx: ctx, size: size)
                 }
 
-                // Analysis-window tint.
-                if analysisWindowFraction > 0 {
-                    let tintWidth = w * analysisWindowFraction
+                // Analysis-window tint. Width comes from the column-tied
+                // fraction so it advances one step exactly when a new
+                // spectrogram column appears — same discrete-jump rate as
+                // the columns themselves.
+                if tintFraction > 0 {
+                    let tintWidth = w * CGFloat(tintFraction)
                     Rectangle()
                         .fill(analysisTintColor)
                         .frame(width: tintWidth, height: h)
                         .position(x: w - tintWidth / 2, y: h / 2)
-                        .blendMode(.screen)
+                        .blendMode(.multiply)
                         .allowsHitTesting(false)
                 }
 
@@ -84,6 +89,10 @@ struct SpectrogramView: View {
                 .allowsHitTesting(false)
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
+            )
         }
     }
 
@@ -113,7 +122,7 @@ struct SpectrogramView: View {
                 bufIndex = (writeIdx + visCol) % nCols
             }
             // Position on screen: rightmost = newest. Leave any unfilled
-            // left portion black.
+            // left portion white.
             let xRight = size.width - CGFloat(visibleCount - 1 - visCol) * colWidth
             let xLeft = xRight - colWidth
             let column = data.columns[bufIndex]
@@ -124,7 +133,8 @@ struct SpectrogramView: View {
                 let y = size.height - CGFloat(k + 1) * binHeight
                 let rect = CGRect(x: xLeft, y: y, width: colWidth + 0.5, height: binHeight + 0.5)
                 let intensity = Double(amp)
-                ctx.fill(Path(rect), with: .color(.white.opacity(intensity)))
+                // Dark ink on white background — bird-call-analyzer look.
+                ctx.fill(Path(rect), with: .color(.black.opacity(intensity)))
             }
         }
     }
@@ -140,28 +150,7 @@ struct SpectrogramView: View {
     private func freqLabel(_ kHz: Int) -> some View {
         Text("\(kHz)k")
             .font(.system(size: 9, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(.black.opacity(0.55))
     }
 }
 
-#Preview {
-    let data = SpectrogramData()
-    // Fill with a fake pattern so the preview looks like something.
-    for col in 0..<SpectrogramData.columnCount {
-        var c = [Float](repeating: 0, count: SpectrogramData.binCount)
-        for k in 0..<SpectrogramData.binCount {
-            // Horizontal stripes at common watch tick freq ranges.
-            let inBand1 = abs(k - 200) < 10
-            let inBand2 = abs(k - 280) < 5
-            let base = inBand1 ? 0.5 : (inBand2 ? 0.7 : 0.05)
-            let modulation = sin(Double(col) * 0.5 + Double(k) * 0.02) * 0.2
-            c[k] = Float(max(0, base + modulation))
-        }
-        data.appendColumn(c)
-    }
-    data.bestBandHz = 14000
-    return SpectrogramView(data: data, analysisWindowFraction: 0.6)
-        .frame(width: 360, height: 280)
-        .background(Color.gray)
-        .padding()
-}

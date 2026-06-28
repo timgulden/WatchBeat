@@ -386,6 +386,11 @@ final class MeasurementCoordinator: ObservableObject {
         currentQuality = 0
         isRecording = true
 
+        // Stamp the spectrogram so the analysis-window tint starts
+        // tracking from this moment, in lockstep with the spectrogram
+        // columns.
+        spectrogramData.markRecordingStart()
+
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError

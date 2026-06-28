@@ -6,30 +6,24 @@ struct RecordingScreen: View {
     var body: some View {
         TimelineView(.animation) { _ in
             let elapsed = elapsedTime()
-            let analysisFraction = min(elapsed / MeasurementConstants.analysisWindow, 1.0)
             let phase = currentPhase(elapsed: elapsed)
-
             SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
-                Color.clear  // wheel removed
+                SpectrogramSquare(
+                    data: coordinator.spectrogramData,
+                    status: phase.label,
+                    tintColor: phase.tintColor
+                )
             } bigSquare: {
-                VStack(spacing: 6) {
-                    SpectrogramView(
-                        data: coordinator.spectrogramData,
-                        analysisWindowFraction: analysisFraction,
-                        analysisTintColor: phase.tintColor
-                    )
-                    .frame(maxHeight: .infinity)
-                    Text(phase.label)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    Text("Hold steady — measurement in progress")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 8)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("While measuring…")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                    tipRow(icon: "hand.raised", text: "Hold steady.")
+                    tipRow(icon: "ear", text: "Stay quiet.")
+                    tipRow(icon: "clock", text: "Most readings finish in 15 seconds.")
+                    Spacer()
                 }
-                .padding(8)
+                .padding(16)
             } controls: {
                 VStack(spacing: 10) {
                     BottomRow(cancelAction: { coordinator.cancelMeasurement() })
@@ -43,18 +37,16 @@ struct RecordingScreen: View {
         let tintColor: Color
     }
 
-    /// Three phases:
-    /// - 0–15 s: "Measuring…" — pale yellow tint growing right→left
-    /// - 15+ s with not yet auto-stopped: "Searching for signal…" —
-    ///   orange tint (algorithm needs more time)
-    /// - When session ends successfully we transition to a result screen,
-    ///   so "Success" is shown by the coordinator's state transition, not
-    ///   here.
+    /// Status caption + tint color:
+    /// - 0–15 s: "Measuring…" — pale yellow tint
+    /// - 15+ s with no auto-stop yet: "Searching for signal…" — orange
+    /// (When the session ends, MeasurementCoordinator transitions to
+    /// AnalyzingScreen for the "Success" pause, then to a result page.)
     private func currentPhase(elapsed: Double) -> Phase {
         if elapsed < MeasurementConstants.analysisWindow {
-            return Phase(label: "Measuring…", tintColor: Color.yellow.opacity(0.18))
+            return Phase(label: "Measuring…", tintColor: Color.yellow.opacity(0.30))
         }
-        return Phase(label: "Searching for signal…", tintColor: Color.orange.opacity(0.22))
+        return Phase(label: "Searching for signal…", tintColor: Color.orange.opacity(0.30))
     }
 
     private func elapsedTime() -> Double {

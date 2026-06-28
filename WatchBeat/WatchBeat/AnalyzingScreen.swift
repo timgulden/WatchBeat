@@ -1,36 +1,33 @@
 import SwiftUI
 
-/// Brief "Success" pause shown after a successful recording, before
-/// transitioning to the result screen. The spectrogram from the
-/// recording session stays visible (frozen — the SpectrogramMonitor
-/// has stopped feeding it) so the user has continuity between what
-/// they saw during measurement and the result.
-///
-/// If a failure is being processed (Weak Signal, Low Confidence, etc.)
-/// the spinner variant is shown instead — those cases are routed by
-/// the coordinator and don't display through this screen, but the
-/// generic "Analyzing…" fallback handles edge cases.
+/// Brief "Success" pause after a successful recording, before the
+/// result page appears. The spectrogram from the recording session
+/// stays visible (the SpectrogramMonitor has stopped feeding it so
+/// the columns are frozen) with a green analysis-window tint so the
+/// user has visual continuity between measurement and result.
 struct AnalyzingScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
     var body: some View {
         SquareScreenLayout(rotation: coordinator.latchedUIRotation) {
-            Color.clear
+            SpectrogramSquare(
+                data: coordinator.spectrogramData,
+                status: "Success",
+                tintColor: Color.green.opacity(0.25)
+            )
         } bigSquare: {
-            VStack(spacing: 6) {
-                SpectrogramView(data: coordinator.spectrogramData,
-                                analysisWindowFraction: 1.0,
-                                analysisTintColor: Color.green.opacity(0.20))
-                    .frame(maxHeight: .infinity)
-                Text("Success")
-                    .font(.title3.weight(.semibold))
+            VStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
                     .foregroundStyle(.green)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                Text(" ")  // reserves the same vertical space as the recording tip
-                    .font(.caption)
+                Text("Reading captured")
+                    .font(.headline)
                     .foregroundStyle(.secondary)
+                Spacer()
             }
-            .padding(8)
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 40)
         } controls: {
             VStack(spacing: 10) {
                 BottomRow()
