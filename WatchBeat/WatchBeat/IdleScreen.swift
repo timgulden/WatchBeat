@@ -17,6 +17,7 @@ struct IdleScreen: View {
                 tipRow(icon: "applewatch", text: "On-wrist works as well as on a bench.")
                 tipRow(icon: "hand.raised", text: "Hold steady once you press Listen.")
                 tipRow(icon: "ear", text: "A quieter environment is best.")
+                tipRow(icon: "rotate.3d", text: "Turn on POSITION STUDY for a full positional analysis.")
                 Spacer()
             }
             .padding(.horizontal, 12)
