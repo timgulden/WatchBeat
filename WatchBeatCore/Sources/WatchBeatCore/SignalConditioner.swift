@@ -66,6 +66,55 @@ public struct SignalConditioner {
         applyBiquadCascade(samples, coefficients: butterworthHighpass(cutoff: cutoff, sampleRate: sampleRate))
     }
 
+    /// Band-energy envelope at a target sample rate.
+    ///
+    /// Bandpass-filters the input at [centerHz − halfWidthHz, centerHz + halfWidthHz],
+    /// squares (energy), and decimates by averaging consecutive blocks of
+    /// `sampleRate / targetRateHz` input samples. Each output sample is the
+    /// mean energy over its block.
+    ///
+    /// Used by the Listen-screen visualizations:
+    ///   - Trace: targetRateHz = 20 Hz (one envelope sample per 50 ms display column)
+    ///   - Bars:  targetRateHz = 100 Hz (Goertzel input, well above 2× max beat rate)
+    ///
+    /// Replaces the prior STFT-per-frame approach for both, eliminating the
+    /// coverage-gap artifact where ticks falling between STFT analysis windows
+    /// disappeared from the trace (~80 % of ticks were being missed at 50 ms
+    /// hop / 21 ms FFT window).
+    public func bandpassEnergyEnvelope(
+        samples: [Float],
+        sampleRate: Double,
+        centerHz: Double,
+        halfWidthHz: Double,
+        targetRateHz: Double
+    ) -> [Float] {
+        guard !samples.isEmpty, targetRateHz > 0, sampleRate > 0 else { return [] }
+        let lowCutoff = max(1.0, centerHz - halfWidthHz)
+        let highCutoff = min(sampleRate / 2.0 - 100.0, centerHz + halfWidthHz)
+        guard highCutoff > lowCutoff else { return [] }
+
+        let filtered = bandpassFilter(samples, sampleRate: sampleRate,
+                                      lowCutoff: lowCutoff, highCutoff: highCutoff)
+        let n = filtered.count
+        var squared = [Float](repeating: 0, count: n)
+        vDSP_vsq(filtered, 1, &squared, 1, vDSP_Length(n))
+
+        let blockSize = max(1, Int(sampleRate / targetRateHz))
+        let outputCount = n / blockSize
+        guard outputCount > 0 else { return [] }
+
+        var output = [Float](repeating: 0, count: outputCount)
+        squared.withUnsafeBufferPointer { sq in
+            for i in 0..<outputCount {
+                var mean: Float = 0
+                vDSP_meanv(sq.baseAddress! + i * blockSize, 1,
+                           &mean, vDSP_Length(blockSize))
+                output[i] = mean
+            }
+        }
+        return output
+    }
+
     // MARK: - Envelope extraction
 
     func fullWaveRectify(_ samples: [Float]) -> [Float] {

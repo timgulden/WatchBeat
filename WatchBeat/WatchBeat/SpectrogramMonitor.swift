@@ -62,8 +62,17 @@ final class SpectrogramMonitor: @unchecked Sendable {
     // SpectrogramData) so we can mutate from the analysis queue without
     // round-tripping through MainActor. Mirror is published to SpectrogramData
     // via `bestBandHz` for the UI label.
+    //
+    // Bins are kept for the band-selection scoring path (which iterates
+    // over FFT bins). The center frequency in Hz is kept for the trace
+    // and bar paths (which use a time-domain bandpass, not the FFT).
     private var currentBandLowBin: Int = -1
     private var currentBandHighBin: Int = -1
+    private var currentBandCenterHz: Double = 18000.0
+
+    /// Shared signal conditioner used by the bandpass-based trace and bar
+    /// envelopes. Stateless struct; cheap to keep.
+    private let conditioner = SignalConditioner()
     /// Rhythmicity score of the current band at the last band-selection
     /// scan. Used for hysteresis: only switch to a new candidate band
     /// when its score is meaningfully better (≥ 10 %) than what we have.
@@ -172,15 +181,15 @@ final class SpectrogramMonitor: @unchecked Sendable {
         let centerBin = Int(initialBandCenterHz * binsPerHz)
         self.currentBandLowBin = max(1, centerBin - bandHalfBins)
         self.currentBandHighBin = min(fftWindowSize / 2 - 1, centerBin + bandHalfBins)
+        self.currentBandCenterHz = initialBandCenterHz
         self.currentBandScore = 0
         self.hasFirstScanRun = false
         self.traceFullTimestamp = nil
 
         // Publish the seed band to the UI so the band-Hz label shows
         // immediately rather than "Scanning…".
-        let bestHz = (Double(centerBin) + 0.5) * sampleRate / Double(fftWindowSize)
         Task { @MainActor in
-            self.data.bestBandHz = bestHz
+            self.data.bestBandHz = self.initialBandCenterHz
         }
     }
 
@@ -232,52 +241,33 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
-    /// Compute one STFT slice and emit a trace sample = total energy in
-    /// the current band (broadband if no band has been confidently
-    /// selected yet). Each tick of the watch shows up here as a brief
-    /// energy spike.
+    /// Emit one trace sample = mean band energy over the most recent
+    /// `traceDtSec` of audio (50 ms). Uses a time-domain bandpass at the
+    /// currently-selected band — no FFT, no coverage gap. Each tick of
+    /// the watch shows up as a brief energy spike.
+    ///
+    /// We process more than one block at a time (`lookbackSec`) so the
+    /// IIR filter's startup transient (~1 ms for a 1 kHz-wide passband)
+    /// is in the discarded prefix, and the returned last sample is fully
+    /// settled.
     private func emitTraceSample() {
-        guard let setup = fftSetup else { return }
-        let n = fftWindowSize
-        var seg = [Float](repeating: 0, count: n)
-        let tail = rollingBuffer.suffix(n)
-        for (i, v) in tail.enumerated() { seg[i] = v }
-        vDSP_vmul(seg, 1, hannWindow, 1, &seg, 1, vDSP_Length(n))
+        let targetRateHz = 1.0 / SpectrogramData.traceDtSec   // 20 Hz
+        let lookbackSec = 0.2   // 200 ms → 4 output blocks; last is settled
+        let lookbackSamples = min(rollingBuffer.count,
+                                  Int(lookbackSec * sampleRate))
+        guard lookbackSamples >= Int(sampleRate / targetRateHz) else { return }
+        let start = rollingBuffer.count - lookbackSamples
+        let block = Array(rollingBuffer[start..<rollingBuffer.count])
 
-        var realPart = [Float](repeating: 0, count: n / 2)
-        var imagPart = [Float](repeating: 0, count: n / 2)
-        for i in 0..<(n / 2) {
-            realPart[i] = seg[2 * i]
-            imagPart[i] = seg[2 * i + 1]
-        }
-        var magnitudes = [Float](repeating: 0, count: n / 2)
-        realPart.withUnsafeMutableBufferPointer { rp in
-            imagPart.withUnsafeMutableBufferPointer { ip in
-                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-                vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(n / 2))
-            }
-        }
-        var sqrtMag = [Float](repeating: 0, count: n / 2)
-        var count32 = Int32(n / 2)
-        vvsqrtf(&sqrtMag, magnitudes, &count32)
-
-        // Sum energy in current band (or broadband: 4-22 kHz).
-        let lo: Int
-        let hi: Int
-        if currentBandLowBin >= 0 {
-            lo = max(0, currentBandLowBin)
-            hi = min(n / 2 - 1, currentBandHighBin)
-        } else {
-            let binsPerHz = Double(n) / sampleRate
-            lo = max(1, Int(4000.0 * binsPerHz))
-            hi = min(n / 2 - 1, Int(22000.0 * binsPerHz))
-        }
-        var sum: Float = 0
-        if lo <= hi {
-            for k in lo...hi { sum += sqrtMag[k] }
-        }
-        data.appendTraceSample(sum)
+        let env = conditioner.bandpassEnergyEnvelope(
+            samples: block,
+            sampleRate: sampleRate,
+            centerHz: currentBandCenterHz,
+            halfWidthHz: bandHalfWidthHz,
+            targetRateHz: targetRateHz
+        )
+        guard let sample = env.last else { return }
+        data.appendTraceSample(sample)
     }
 
     /// Look for a narrow frequency band whose energy time-series shows
@@ -412,21 +402,25 @@ final class SpectrogramMonitor: @unchecked Sendable {
         currentBandLowBin = candidateLow
         currentBandHighBin = candidateHigh
         currentBandScore = bestScore
-
-        // Rebuild the visible trace from the per-bin history at the new
-        // band. The existing trace buffer holds samples computed under
-        // the OLD band; without this rebuild the user would see a
-        // discontinuity midway through the trace. With it, the entire
-        // visible trace updates to a consistent re-interpretation of the
-        // last 15 s of audio through the newly chosen band.
-        var newTrace = [Float](repeating: 0, count: nFrames)
-        for t in 0..<nFrames {
-            var sum: Float = 0
-            for k in candidateLow...candidateHigh { sum += perBin[k][t] }
-            newTrace[t] = sum
-        }
-
         let bestHz = (Double(bestBin) + 0.5) * sampleRate / Double(fftWindowSize)
+        currentBandCenterHz = bestHz
+
+        // Rebuild the visible trace by re-running the new band's bandpass
+        // energy envelope over the same audio snapshot. The existing trace
+        // buffer holds samples computed under the OLD band; without this
+        // rebuild the user would see a discontinuity midway through the
+        // trace. With it, the entire visible trace updates to a consistent
+        // re-interpretation of the last 15 s of audio through the newly
+        // chosen band.
+        let traceRate = 1.0 / SpectrogramData.traceDtSec
+        let newTrace = conditioner.bandpassEnergyEnvelope(
+            samples: snapshot,
+            sampleRate: sampleRate,
+            centerHz: bestHz,
+            halfWidthHz: bandHalfWidthHz,
+            targetRateHz: traceRate
+        )
+
         Task { @MainActor in
             self.data.bestBandHz = bestHz
             self.data.replaceTrace(with: newTrace)
@@ -438,86 +432,52 @@ final class SpectrogramMonitor: @unchecked Sendable {
     /// the 0.5 Hz spacing between adjacent standard rates (5 / 5.5 Hz).
     private let barAnalysisWindowSec: Double = 5.0
 
-    /// Hop size (seconds) for the bar envelope. 10 ms = 100 Hz sampling,
-    /// Nyquist 50 Hz. This is deliberately MUCH higher than the 50-ms
-    /// display trace hop (20 Hz, Nyquist 10 Hz). At 20 Hz the harmonics
-    /// of any standard beat rate fold onto neighbouring standard bars
-    /// (e.g. a 6 Hz tick's 12 Hz second harmonic aliases to 8 Hz,
-    /// inflating the 28800 bph bar to nearly the height of the real
-    /// 21600 bph bar on NH35 recordings). At 100 Hz the first several
-    /// harmonics stay below Nyquist and no aliasing reaches the
-    /// standard-rate bins.
-    private let barEnvelopeHopSec: Double = 0.010
+    /// Sample rate (Hz) of the envelope fed into the bar Goertzel.
+    /// 100 Hz gives Nyquist 50 Hz — clears the first several harmonics
+    /// of every standard beat rate so they don't fold onto neighbouring
+    /// standard bars. (At the 20 Hz trace rate, a 6 Hz tick's 12 Hz
+    /// second harmonic aliases to 8 Hz, inflating the 28800 bph bar to
+    /// nearly the height of the real 21600 bph bar on NH35 recordings —
+    /// the original aliasing bug that motivated this separate channel.)
+    private let barEnvelopeRateHz: Double = 100.0
 
     /// Compute Goertzel magnitudes at each standard beat rate against a
     /// freshly-built 100 Hz band-energy envelope over the most recent
     /// `barAnalysisWindowSec` of audio. Normalize so the strongest rate
     /// is 1.0 and publish for the bar display.
+    ///
+    /// Shares `SignalConditioner.bandpassEnergyEnvelope` with the trace
+    /// (which uses a 20 Hz target rate). Same bandpass, same rectifier,
+    /// same band-center — only the time resolution differs.
     private func updateBars() {
         // Need at least 2 s of audio to distinguish 5 / 5.5 Hz reliably.
         // Use the full 5-s window once we have it; ramp up gracefully
         // during the first few seconds.
         let minBarWindowSec = 2.0
-        let minSamples = Int(minBarWindowSec * sampleRate) + fftWindowSize
+        let minSamples = Int(minBarWindowSec * sampleRate)
         guard samplesAccumulated >= minSamples,
-              rollingBuffer.count >= minSamples,
-              let setup = fftSetup else {
+              rollingBuffer.count >= minSamples else {
             Task { @MainActor in self.data.rateMagnitudes = [:] }
             return
         }
         let targetWindowSamples = Int(barAnalysisWindowSec * sampleRate)
         let envWindowSamples = min(targetWindowSamples,
-                                   min(samplesAccumulated, rollingBuffer.count) - fftWindowSize)
-
-        let barHop = max(1, Int(sampleRate * barEnvelopeHopSec))
-        let barFrameRate = sampleRate / Double(barHop)
-        let n = max(1, (envWindowSamples - fftWindowSize) / barHop + 1)
-
-        // STFT over the last 5 s, hopped by `barHop`. Sum magnitudes in
-        // the currently-selected band per frame → 100 Hz band-energy
-        // envelope.
+                                   min(samplesAccumulated, rollingBuffer.count))
         let start = rollingBuffer.count - envWindowSamples
-        var seg = [Float](repeating: 0, count: fftWindowSize)
-        let nBins = fftWindowSize / 2
-        var realPart = [Float](repeating: 0, count: nBins)
-        var imagPart = [Float](repeating: 0, count: nBins)
-        var envelope = [Float](repeating: 0, count: n)
+        let block = Array(rollingBuffer[start..<rollingBuffer.count])
 
-        let lo: Int
-        let hi: Int
-        if currentBandLowBin >= 0 {
-            lo = max(0, currentBandLowBin)
-            hi = min(nBins - 1, currentBandHighBin)
-        } else {
-            let binsPerHz = Double(fftWindowSize) / sampleRate
-            lo = max(1, Int(4000.0 * binsPerHz))
-            hi = min(nBins - 1, Int(22000.0 * binsPerHz))
-        }
-
-        for t in 0..<n {
-            let off = start + t * barHop
-            for i in 0..<fftWindowSize {
-                seg[i] = rollingBuffer[off + i] * hannWindow[i]
-            }
-            for i in 0..<nBins {
-                realPart[i] = seg[2 * i]
-                imagPart[i] = seg[2 * i + 1]
-            }
-            realPart.withUnsafeMutableBufferPointer { rp in
-                imagPart.withUnsafeMutableBufferPointer { ip in
-                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                    vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-                }
-            }
-            var s: Float = 0
-            if lo <= hi {
-                for k in lo...hi {
-                    let re = realPart[k]
-                    let im = imagPart[k]
-                    s += sqrt(re * re + im * im)
-                }
-            }
-            envelope[t] = s
+        var envelope = conditioner.bandpassEnergyEnvelope(
+            samples: block,
+            sampleRate: sampleRate,
+            centerHz: currentBandCenterHz,
+            halfWidthHz: bandHalfWidthHz,
+            targetRateHz: barEnvelopeRateHz
+        )
+        let barFrameRate = barEnvelopeRateHz
+        let n = envelope.count
+        guard n >= 2 else {
+            Task { @MainActor in self.data.rateMagnitudes = [:] }
+            return
         }
 
         // Detrend.

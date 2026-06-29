@@ -1,19 +1,13 @@
 // BarsTrace — diagnostic that replays the iOS app's SpectrogramMonitor
 // pipeline against a WAV file and dumps the RAW (un-normalized) Goertzel
-// magnitudes at each standard beat rate, comparing the legacy 20 Hz
-// (50 ms hop) bar envelope against the new 100 Hz (10 ms hop) envelope.
-//
-// Built to verify that the post-fix 100 Hz envelope collapses the
-// aliasing-driven 8 Hz / 10 Hz bumps that appear in the 20 Hz envelope
-// for sharp-tick NH35 recordings.
+// magnitudes at each standard beat rate.
 //
 // Pipeline (mirrors SpectrogramMonitor.swift):
-//   1. STFT, 1024-pt Hann window, 10 ms hop, full file.
-//   2. Pick the best 4–22 kHz bin by peak/median rhythmicity (same
-//      scorer the monitor uses); band = best ± 500 Hz.
-//   3. Build TWO band-energy envelopes from the same per-bin STFTs:
-//        (a) 100 Hz envelope (every 10-ms frame, anti-aliased)
-//        (b) 20 Hz envelope (every 5th frame, legacy / aliasing-prone)
+//   1. STFT, 1024-pt Hann window, 10 ms hop — for BAND SELECTION only.
+//   2. Pick the best 4–22 kHz bin by peak/median rhythmicity.
+//   3. Build 100 Hz band-energy envelope via SignalConditioner.bandpassEnergyEnvelope
+//      (time-domain bandpass + square + decimate), matching the shared
+//      helper used in SpectrogramMonitor.
 //   4. Detrend, Goertzel at each standard beat rate, report raw mags.
 
 import Foundation
@@ -112,7 +106,6 @@ func processFile(_ path: String) {
     let binsPerHz = Double(fftWindowSize) / sampleRate
     let firstBin = max(1, Int(4000.0 * binsPerHz))
     let lastBin = min(nBins - 1, Int(22000.0 * binsPerHz))
-    let bandHalfBins = max(2, Int(500.0 * binsPerHz))
 
     var bestBin = -1
     var bestScore: Double = 0
@@ -147,90 +140,61 @@ func processFile(_ path: String) {
         }
     }
     guard bestBin >= 0 else { print("  no rhythmic band found"); return }
-    let bandLow = max(firstBin, bestBin - bandHalfBins)
-    let bandHigh = min(lastBin, bestBin + bandHalfBins)
     let bestHz = (Double(bestBin) + 0.5) * sampleRate / Double(fftWindowSize)
     print(String(format: "  best band: bin=%d (%.0f Hz), score=%.2f, ±500 Hz",
                  bestBin, bestHz, bestScore))
 
-    // 100 Hz band-energy envelope.
-    var env100 = [Float](repeating: 0, count: nFrames)
-    for t in 0..<nFrames {
-        var s: Float = 0
-        for k in bandLow...bandHigh { s += perBin[k][t] }
-        env100[t] = s
-    }
-
-    // 20 Hz envelope = every 5th frame of env100 (matches the legacy
-    // trace-derived bar input).
-    var env20: [Float] = []
-    env20.reserveCapacity(nFrames / 5 + 1)
-    var t = 0
-    while t < nFrames {
-        env20.append(env100[t])
-        t += 5
-    }
+    // Build the 100 Hz band-energy envelope via the shared helper that
+    // the iOS app's SpectrogramMonitor now uses (time-domain bandpass +
+    // square + decimate). Matches the production path exactly.
+    let conditioner = SignalConditioner()
+    let envelope = conditioner.bandpassEnergyEnvelope(
+        samples: samples,
+        sampleRate: sampleRate,
+        centerHz: bestHz,
+        halfWidthHz: 500.0,
+        targetRateHz: 100.0
+    )
+    let envelopeRate = 100.0
 
     let barWindowSec = 5.0
-    let n100 = Int(barWindowSec / hopSec)             // 500 frames
-    let n20  = Int(barWindowSec / (hopSec * 5))       // 100 frames
-    guard env100.count >= n100, env20.count >= n20 else {
+    let nWindow = Int(barWindowSec * envelopeRate)
+    guard envelope.count >= nWindow else {
         print("  too short for 5-s bar window"); return
     }
 
-    // Sliding 1-s steps; for each, run Goertzel at every standard rate
-    // against both envelopes and compare.
-    let stepSec = 1.0
-    let stepFrames100 = Int(stepSec / hopSec)
-    let stepFrames20  = Int(stepSec / (hopSec * 5))
-
-    print("  Goertzel comparison — 20 Hz (legacy) vs 100 Hz (anti-aliased):")
+    print("  Raw Goertzel magnitudes (sliding 1-s steps, 5-s window):")
     let labelLine = StandardBeatRate.allCases.map { String(format: "%6d", $0.rawValue) }.joined(separator: " ")
-    print("    t(s)  src  | \(labelLine)  | 6:8")
+    print("    t(s)  | \(labelLine)  | 6:8")
 
-    var endLo = n20
-    var endHi = n100
-    var means20: [Double] = Array(repeating: 0, count: StandardBeatRate.allCases.count)
-    var means100: [Double] = Array(repeating: 0, count: StandardBeatRate.allCases.count)
+    let stepFrames = Int(envelopeRate)  // 1-s step
+    var end = nWindow
+    var means: [Double] = Array(repeating: 0, count: StandardBeatRate.allCases.count)
     var rowCount = 0
-    while endLo <= env20.count && endHi <= env100.count {
-        let slice20  = Array(env20[(endLo - n20)..<endLo])
-        let slice100 = Array(env100[(endHi - n100)..<endHi])
-        var row20: [Double] = []
-        var row100: [Double] = []
+    while end <= envelope.count {
+        let slice = Array(envelope[(end - nWindow)..<end])
+        var row: [Double] = []
         for rate in StandardBeatRate.allCases {
-            row20.append(goertzelOnDetrended(slice20, frameRate: frameRate20, target: rate.hz))
-            row100.append(goertzelOnDetrended(slice100, frameRate: frameRate100, target: rate.hz))
+            row.append(goertzelOnDetrended(slice, frameRate: envelopeRate, target: rate.hz))
         }
-        for j in 0..<row20.count { means20[j] += row20[j]; means100[j] += row100[j] }
+        for j in 0..<row.count { means[j] += row[j] }
         rowCount += 1
 
-        let t = Double(endHi) / frameRate100
-        let row20Fmt  = row20.map  { String(format: "%6.2f", $0) }.joined(separator: " ")
-        let row100Fmt = row100.map { String(format: "%6.2f", $0) }.joined(separator: " ")
-        let r6_20  = row20[2],  r8_20  = row20[4]
-        let r6_100 = row100[2], r8_100 = row100[4]
-        let ratio20  = r8_20  > 0 ? r6_20  / r8_20  : .infinity
-        let ratio100 = r8_100 > 0 ? r6_100 / r8_100 : .infinity
-        print(String(format: "    %4.1f  20Hz | %@  | %5.2f", t, row20Fmt, ratio20))
-        print(String(format: "          100Hz| %@  | %5.2f", row100Fmt, ratio100))
-
-        endLo += stepFrames20
-        endHi += stepFrames100
+        let t = Double(end) / envelopeRate
+        let rowFmt = row.map { String(format: "%6.2f", $0) }.joined(separator: " ")
+        let r6 = row[2], r8 = row[4]
+        let ratio = r8 > 0 ? r6 / r8 : .infinity
+        print(String(format: "    %4.1f  | %@  | %5.2f", t, rowFmt, ratio))
+        end += stepFrames
     }
 
     if rowCount > 0 {
-        for j in 0..<means20.count {
-            means20[j]  /= Double(rowCount)
-            means100[j] /= Double(rowCount)
-        }
+        for j in 0..<means.count { means[j] /= Double(rowCount) }
         let labels = StandardBeatRate.allCases.map { "\($0.rawValue)" }
         print("  --- mean raw magnitudes ---")
-        print("    20 Hz : " + zip(labels, means20).map  { String(format: "%@:%.2f", $0.0, $0.1) }.joined(separator: "  "))
-        print("    100 Hz: " + zip(labels, means100).map { String(format: "%@:%.2f", $0.0, $0.1) }.joined(separator: "  "))
-        let ratio20  = means20[4]  > 0 ? means20[2]  / means20[4]  : .infinity
-        let ratio100 = means100[4] > 0 ? means100[2] / means100[4] : .infinity
-        print(String(format: "    ⇒ 21600/28800 ratio: 20 Hz = %.2fx, 100 Hz = %.2fx", ratio20, ratio100))
+        print("    " + zip(labels, means).map { String(format: "%@:%.2f", $0.0, $0.1) }.joined(separator: "  "))
+        let ratio = means[4] > 0 ? means[2] / means[4] : .infinity
+        print(String(format: "    ⇒ 21600/28800 mean raw ratio: %.2fx", ratio))
     }
 }
 
