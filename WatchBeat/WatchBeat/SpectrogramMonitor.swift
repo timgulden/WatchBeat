@@ -77,11 +77,12 @@ final class SpectrogramMonitor: @unchecked Sendable {
     /// cosmetic guess from "sticking" if it happens to score reasonably
     /// well against a slightly-better real band.
     private var hasFirstScanRun: Bool = false
-    /// Center frequency of the initial "best guess" band. Most mechanical
-    /// watches have some tick energy here; the visual the user sees in
-    /// the first ~3 s will look qualitatively similar to whatever real
-    /// band the algorithm picks once it has enough data.
-    private let initialBandCenterHz: Double = 6000.0
+    /// Center frequency of the initial "best guess" band. Empirically
+    /// the picker most often lands in the 14–18 kHz range across the
+    /// test corpus (NH35, Omega, Timex), so 18 kHz is a better seed
+    /// than the original 6 kHz — the initial visual matches the real
+    /// pick more often, and band-switch transitions are less jarring.
+    private let initialBandCenterHz: Double = 18000.0
     private let bandHalfWidthHz: Double = 500.0
 
     private let analysisQueue = DispatchQueue(label: "SpectrogramMonitor.analysis")
