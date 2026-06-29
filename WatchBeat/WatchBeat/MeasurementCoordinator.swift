@@ -57,7 +57,13 @@ enum MeasurementConstants {
     /// Auto-stop also requires confirmedFraction at or above this — high
     /// SNR alone isn't enough to declare success; we need most beat windows
     /// to have shown a real tick.
-    static let autoStopConfirmedFraction: Double = 0.80
+    ///
+    /// Raised 0.80 → 0.85 (2026-06-29) for safety margin against the
+    /// LowAnalyticalConfidence gate at 0.80. Without daylight between the
+    /// two thresholds, a window could auto-stop while sitting one rejected
+    /// beat away from being flagged as low-confidence. 0.85 ensures the
+    /// auto-stopped window is comfortably above the LAC floor.
+    static let autoStopConfirmedFraction: Double = 0.85
 
     /// Best-window selection bonus: any candidate window that confirmed
     /// at least this fraction of beats earns a trust bonus over those
