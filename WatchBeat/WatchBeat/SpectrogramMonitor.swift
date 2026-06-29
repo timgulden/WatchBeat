@@ -40,6 +40,15 @@ final class SpectrogramMonitor: @unchecked Sendable {
     // Trace-emit cadence (matches one STFT hop).
     private var samplesSinceLastColumn: Int = 0
     private var samplesPerColumn: Int = 2400
+    /// When trace buffer first hit "full" (totalTraceWritten ==
+    /// traceSampleCount). Trace emissions pause briefly here so the
+    /// trace doesn't scroll during the picker's analysis-decision time
+    /// for a successful first-window recording. Once
+    /// `traceFullPauseSeconds` have elapsed without the recording
+    /// stopping (= marginal recording, needs more time), emissions
+    /// resume so the user sees fresh data.
+    private var traceFullTimestamp: ContinuousClock.Instant? = nil
+    private let traceFullPauseSeconds: Double = 1.5
 
     // Band-selection cadence (slower than trace cadence).
     private var samplesSinceLastBandSelect: Int = 0
@@ -164,6 +173,7 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.currentBandHighBin = min(fftWindowSize / 2 - 1, centerBin + bandHalfBins)
         self.currentBandScore = 0
         self.hasFirstScanRun = false
+        self.traceFullTimestamp = nil
 
         // Publish the seed band to the UI so the band-Hz label shows
         // immediately rather than "Scanning…".
@@ -193,9 +203,22 @@ final class SpectrogramMonitor: @unchecked Sendable {
         // Emit trace samples whenever enough audio has accumulated.
         while samplesSinceLastColumn >= samplesPerColumn {
             samplesSinceLastColumn -= samplesPerColumn
-            if samplesAccumulated >= fftWindowSize {
-                emitTraceSample()
+            guard samplesAccumulated >= fftWindowSize else { continue }
+
+            // Pause emissions briefly once the trace buffer first hits
+            // full so the trace doesn't visibly scroll during the
+            // picker's analysis-decision time for a successful
+            // first-window recording. Resume after traceFullPauseSeconds
+            // if the recording is still going (marginal case — user
+            // sees fresh data again).
+            if data.totalTraceWritten >= SpectrogramData.traceSampleCount {
+                if traceFullTimestamp == nil {
+                    traceFullTimestamp = ContinuousClock.now
+                }
+                let pausedFor = (ContinuousClock.now - traceFullTimestamp!).asSeconds
+                if pausedFor < traceFullPauseSeconds { continue }
             }
+            emitTraceSample()
         }
 
         if samplesSinceLastBandSelect >= samplesPerBandSelect {

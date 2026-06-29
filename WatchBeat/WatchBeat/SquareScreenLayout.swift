@@ -28,7 +28,18 @@ struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>:
             // max(0, ...) guards the initial layout pass where outer.size is
             // still zero — without it, .frame() gets a negative side and
             // SwiftUI logs "Invalid frame dimension".
-            let bigSide = max(0, min(outer.size.width - 16, 400))
+            //
+            // bigSide is constrained by three factors:
+            //   - screen width (minus padding)
+            //   - half the available vertical space (so the two squares
+            //     can be roughly equal-sized — small uses the remaining
+            //     space and naturally matches when this is the limit)
+            //   - an absolute cap (400) for huge screens
+            // ~190 pt is reserved for title + controls + padding.
+            let availableVertical = outer.size.height - 190
+            let bigSide = max(0, min(outer.size.width - 16,
+                                     availableVertical / 2,
+                                     400))
             VStack(spacing: 0) {
                 Text("WatchBeat")
                     .font(.largeTitle.bold())
