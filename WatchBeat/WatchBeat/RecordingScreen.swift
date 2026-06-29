@@ -58,9 +58,6 @@ struct ListenPanel: View {
     }
 
     private var bandLabel: String {
-        if let hz = data.bestBandHz {
-            return String(format: "Listening at %.1f kHz", hz / 1000.0)
-        }
-        return "Scanning…"
+        String(format: "Listening at %.1f kHz", data.bestBandHz / 1000.0)
     }
 }

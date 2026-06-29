@@ -43,9 +43,12 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
     /// the bar heights. Empty until we have ≥ 2 s of trace data.
     @Published var rateMagnitudes: [StandardBeatRate: Float] = [:]
 
-    /// Best-band center frequency in Hz; nil until band selection
-    /// produces a confident pick. Shown as a small label under the bars.
-    @Published var bestBandHz: Double? = nil
+    /// Best-band center frequency in Hz. Shown as a small label under
+    /// the bars. Initial value matches the SpectrogramMonitor seed band
+    /// (18 kHz) so the label never has to fall back to "Scanning…" —
+    /// even before the first real band-selection scan runs, this is the
+    /// band the trace and bars are actually using.
+    @Published var bestBandHz: Double = 18000.0
 
     /// Absolute trace-sample index at which the current recording's
     /// analysis window began. Currently unused by the visible UI (we
@@ -80,6 +83,9 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
     }
 
     /// Reset all data. Called when entering a fresh Listen session.
+    /// `bestBandHz` is NOT cleared — SpectrogramMonitor.resetState
+    /// republishes it on every Listen start anyway, and clearing it
+    /// here would create a brief "Scanning…" flash between sessions.
     func reset() {
         let cleared = [Float](repeating: 0, count: Self.traceSampleCount)
         Task { @MainActor in
@@ -87,7 +93,6 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
             self.traceWriteIndex = 0
             self.totalTraceWritten = 0
             self.rateMagnitudes = [:]
-            self.bestBandHz = nil
             self.recordingStartIndex = nil
         }
     }
