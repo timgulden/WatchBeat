@@ -74,12 +74,24 @@ public struct AmplitudeEstimator {
     ///   - rate: The detected beat rate.
     ///   - rateErrorSecondsPerDay: Measured rate error from regression.
     ///   - tickTimings: Confirmed tick timings from the measurement pipeline.
+    ///   - selectedBandCenterHz: Center (Hz) of the narrow band the picker
+    ///     locked onto via MultibandSelector, if any. When provided, the
+    ///     initial filter is a narrow bandpass at this center — keeps tick
+    ///     energy intact while killing most non-tick noise (which lifts
+    ///     fold SNR and exposes weak unlock sub-events that were buried in
+    ///     broadband noise). nil falls back to a wide 1 kHz – ~20 kHz
+    ///     bandpass (legacy behavior; used for the production picker path
+    ///     which doesn't run MultibandSelector).
+    ///   - selectedBandHalfWidthHz: Half-width (Hz) of the narrow band.
+    ///     Must be paired with `selectedBandCenterHz`. nil iff that is nil.
     /// - Returns: Pulse width estimates for tick and tock.
     public func measurePulseWidths(
         input: AudioBuffer,
         rate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
-        tickTimings: [TickTiming]
+        tickTimings: [TickTiming],
+        selectedBandCenterHz: Double? = nil,
+        selectedBandHalfWidthHz: Double? = nil
     ) -> PulseWidthEstimate {
         let samples = input.samples
         let sampleRate = input.sampleRate
@@ -92,10 +104,24 @@ public struct AmplitudeEstimator {
             return PulseWidthEstimate(tickPulseMs: nil, tockPulseMs: nil, foldCount: 0)
         }
 
-        // Step 1: High-pass filter at 1 kHz
+        // Step 1: Bandpass filter. Prefer the narrow band the picker
+        // selected (concentrates tick energy, kills non-tick noise);
+        // fall back to a wide 1 kHz – ~20 kHz bandpass when no narrow
+        // band is available (production picker path, or rare cases where
+        // MultibandSelector found no band better than the broadband
+        // baseline).
+        let lowCutoff: Double
+        let highCutoff: Double
+        if let center = selectedBandCenterHz, let half = selectedBandHalfWidthHz {
+            lowCutoff = max(1.0, center - half)
+            highCutoff = min(sampleRate / 2 - 100, center + half)
+        } else {
+            lowCutoff = 1000
+            highCutoff = min(sampleRate / 2 - 100, 20000)
+        }
         let filtered = conditioner.bandpassFilter(
             samples, sampleRate: sampleRate,
-            lowCutoff: 1000, highCutoff: min(sampleRate / 2 - 100, 20000)
+            lowCutoff: lowCutoff, highCutoff: highCutoff
         )
 
         // Step 2: Rectify

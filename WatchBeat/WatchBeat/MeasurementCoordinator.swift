@@ -563,7 +563,9 @@ final class MeasurementCoordinator: ObservableObject {
                 input: audioBuffer,
                 rate: result.snappedRate,
                 rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
-                tickTimings: result.amplitudeTickTimings
+                tickTimings: result.amplitudeTickTimings,
+                selectedBandCenterHz: result.selectedBandCenterHz,
+                selectedBandHalfWidthHz: result.selectedBandHalfWidthHz
             )
         }.value
 

@@ -68,6 +68,19 @@ public struct MeasurementResult: Sendable {
     /// (assume all confirmed) for callers that don't compute it.
     public let confirmedFraction: Double
 
+    /// Center frequency (Hz) of the narrow band the picker locked onto
+    /// via MultibandSelector, if the multiband path was taken. nil when
+    /// the picker fell back to the broadband 5 kHz highpass (no narrow
+    /// band sufficiently beat the broadband baseline). Downstream code
+    /// (AmplitudeEstimator) reuses this to apply the same narrow band
+    /// to its own filtering — when present, the tick energy is
+    /// concentrated here and noise sits outside.
+    public let selectedBandCenterHz: Double?
+
+    /// Half-width (Hz) of the selected band. nil iff `selectedBandCenterHz`
+    /// is nil. Together they define the bandpass [center − half, center + half].
+    public let selectedBandHalfWidthHz: Double?
+
     public init(
         snappedRate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
@@ -80,7 +93,9 @@ public struct MeasurementResult: Sendable {
         isLowConfidence: Bool = false,
         measuredPeriod: Double? = nil,
         regressionIntercept: Double? = nil,
-        confirmedFraction: Double = 1.0
+        confirmedFraction: Double = 1.0,
+        selectedBandCenterHz: Double? = nil,
+        selectedBandHalfWidthHz: Double? = nil
     ) {
         self.snappedRate = snappedRate
         self.rateErrorSecondsPerDay = rateErrorSecondsPerDay
@@ -94,5 +109,7 @@ public struct MeasurementResult: Sendable {
         self.measuredPeriod = measuredPeriod
         self.regressionIntercept = regressionIntercept
         self.confirmedFraction = confirmedFraction
+        self.selectedBandCenterHz = selectedBandCenterHz
+        self.selectedBandHalfWidthHz = selectedBandHalfWidthHz
     }
 }

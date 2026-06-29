@@ -33,6 +33,11 @@ extension MeasurementPipeline {
         // the broadband path. Set WATCHBEAT_NO_MULTIBAND=1 to force the
         // broadband-only behavior for diagnostic A/B comparisons.
         var filtered: [Float]
+        // Capture the band the picker chose, if any — passed downstream
+        // via MeasurementResult so AmplitudeEstimator can use the same
+        // narrow band for its filter.
+        var pickedBandCenterHz: Double? = nil
+        var pickedBandHalfWidthHz: Double? = nil
         let multibandEnabled = ProcessInfo.processInfo.environment["WATCHBEAT_NO_MULTIBAND"] == nil
         if multibandEnabled,
            let band = MultibandSelector.selectBestBand(samples: input.samples, sampleRate: sampleRate) {
@@ -40,6 +45,8 @@ extension MeasurementPipeline {
                 input.samples, sampleRate: sampleRate,
                 lowCutoff: band.lowHz, highCutoff: band.highHz
             )
+            pickedBandCenterHz = (band.lowHz + band.highHz) / 2.0
+            pickedBandHalfWidthHz = (band.highHz - band.lowHz) / 2.0
         } else {
             filtered = conditioner.highpassFilter(input.samples, sampleRate: sampleRate, cutoff: Self.highpassCutoffHz)
         }
@@ -1214,7 +1221,9 @@ extension MeasurementPipeline {
             isLowConfidence: isLowConfidence,
             measuredPeriod: slope,
             regressionIntercept: intercept,
-            confirmedFraction: confirmedFraction
+            confirmedFraction: confirmedFraction,
+            selectedBandCenterHz: pickedBandCenterHz,
+            selectedBandHalfWidthHz: pickedBandHalfWidthHz
         )
 
         let diagnostics = PipelineDiagnostics(

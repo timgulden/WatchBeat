@@ -30,7 +30,9 @@ public protocol AmplitudeMeasuring: Sendable {
         input: AudioBuffer,
         rate: StandardBeatRate,
         rateErrorSecondsPerDay: Double,
-        tickTimings: [TickTiming]
+        tickTimings: [TickTiming],
+        selectedBandCenterHz: Double?,
+        selectedBandHalfWidthHz: Double?
     ) -> PulseWidthEstimate
 }
 

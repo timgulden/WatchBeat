@@ -52,7 +52,9 @@ let pulseWidths = amplitudeEstimator.measurePulseWidths(
     input: buffer,
     rate: result.snappedRate,
     rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
-    tickTimings: result.amplitudeTickTimings
+    tickTimings: result.amplitudeTickTimings,
+    selectedBandCenterHz: result.selectedBandCenterHz,
+    selectedBandHalfWidthHz: result.selectedBandHalfWidthHz
 )
 let amp = AmplitudeEstimator.combinedAmplitude(
     pulseWidths: pulseWidths,
