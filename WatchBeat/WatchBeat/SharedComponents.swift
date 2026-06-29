@@ -61,11 +61,11 @@ struct SimpleTipsBlock: View {
     let tips: [(icon: String, text: String)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 2)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.primary)
+                .padding(.bottom, 4)
             ForEach(0..<tips.count, id: \.self) { i in
                 tipRow(icon: tips[i].icon, text: tips[i].text)
             }

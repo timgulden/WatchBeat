@@ -20,10 +20,11 @@ struct RecordingScreen: View {
 
     var body: some View {
         SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
-            SimpleTipsBlock(title: "While listening…", tips: [
+            SimpleTipsBlock(title: "Analyzing…", tips: [
                 ("hand.raised", "Hold steady."),
                 ("ear", "Stay quiet."),
                 ("clock", "Usually finishes in 15 seconds."),
+                ("hourglass", "Up to 60 seconds with a weak signal."),
             ])
         } bigSquare: {
             ListenPanel(data: coordinator.spectrogramData)
