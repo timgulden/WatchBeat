@@ -69,9 +69,11 @@ public struct SignalConditioner {
     /// Band-energy envelope at a target sample rate.
     ///
     /// Bandpass-filters the input at [centerHz − halfWidthHz, centerHz + halfWidthHz],
-    /// squares (energy), and decimates by averaging consecutive blocks of
+    /// squares (energy), and decimates by summing consecutive blocks of
     /// `sampleRate / targetRateHz` input samples. Each output sample is the
-    /// mean energy over its block.
+    /// total energy in its block (sum, not mean — mean over 2400 samples of
+    /// bandpassed audio drops to ~1e-7, below the precision floor of the
+    /// `log10f(1 + v)` rendering path; sum is ~1000× larger, well above it).
     ///
     /// Used by the Listen-screen visualizations:
     ///   - Trace: targetRateHz = 20 Hz (one envelope sample per 50 ms display column)
@@ -106,10 +108,10 @@ public struct SignalConditioner {
         var output = [Float](repeating: 0, count: outputCount)
         squared.withUnsafeBufferPointer { sq in
             for i in 0..<outputCount {
-                var mean: Float = 0
-                vDSP_meanv(sq.baseAddress! + i * blockSize, 1,
-                           &mean, vDSP_Length(blockSize))
-                output[i] = mean
+                var sum: Float = 0
+                vDSP_sve(sq.baseAddress! + i * blockSize, 1,
+                         &sum, vDSP_Length(blockSize))
+                output[i] = sum
             }
         }
         return output
