@@ -128,29 +128,40 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Replace the entire trace buffer with a fresh interpretation of
-    /// the same audio (typically because the best-band selector has
-    /// switched to a different frequency band, and the existing trace
-    /// — which mixes old-band and new-band samples — would otherwise
-    /// look discontinuous). Caller supplies the newSamples in order
-    /// (oldest at index 0, newest at the end); the buffer is laid out
-    /// so the newest sample sits at the right edge of the visible
-    /// window.
+    /// Replace the trace samples with a fresh re-interpretation of the
+    /// same audio (typically because the best-band selector has switched
+    /// to a different frequency band). Two cases:
+    ///
+    /// • **Partial fill** (totalTraceWritten < traceSampleCount, i.e.,
+    ///   we're still in the left-to-right "growing" phase): write the
+    ///   rebuild samples into trace[0..k] and leave writeIndex /
+    ///   totalTraceWritten unchanged. Subsequent emits continue
+    ///   appending at writeIndex as before, so the growing-from-left
+    ///   visual continues uninterrupted — only the trace's SHAPE
+    ///   changes (now reinterpreted through the new band).
+    ///
+    /// • **Full buffer** (already wrapped): place the rebuild samples
+    ///   in linear order across the whole buffer (oldest at index 0,
+    ///   newest at n-1) and reset writeIndex to 0. The scrolling
+    ///   behavior continues from there.
     @MainActor
     func replaceTrace(with newSamples: [Float]) {
         let n = Self.traceSampleCount
         let k = min(newSamples.count, n)
         let startInNew = newSamples.count - k
-        // Linear layout: trace[0] = oldest visible, trace[n-1] = newest.
-        // Pad with zeros on the left if we have less than a full window.
-        for i in 0..<(n - k) { trace[i] = 0 }
-        for i in 0..<k { trace[n - k + i] = newSamples[startInNew + i] }
-        // Reset writeIndex to 0 (next emit overwrites the oldest slot).
-        traceWriteIndex = 0
-        // Ensure visibleTrace uses the wrapped path so it returns the
-        // buffer in [oldest..newest] order starting at writeIndex.
+
         if totalTraceWritten < n {
-            totalTraceWritten = n
+            // Partial fill: overwrite trace[0..k] with the new-band
+            // interpretation. Don't touch writeIndex / totalTraceWritten —
+            // any post-snapshot samples that have arrived (positions
+            // trace[k..writeIndex]) were already computed under the new
+            // band and stay valid.
+            for i in 0..<k { trace[i] = newSamples[startInNew + i] }
+        } else {
+            // Full buffer: linear layout, scrolling mode.
+            for i in 0..<(n - k) { trace[i] = 0 }
+            for i in 0..<k { trace[n - k + i] = newSamples[startInNew + i] }
+            traceWriteIndex = 0
         }
     }
 }
