@@ -2,12 +2,13 @@ import SwiftUI
 
 /// Two-square layout used by idle, listening, and measuring screens.
 ///
-/// The bottom content is a near-screen-width square (graph + caption); the
-/// top content is a smaller square (wheel + 12-o'clock marker) that centers
-/// in the remaining space above it. Both squares counter-rotate together by
-/// `rotation` so the content reads upright regardless of phone pose —
-/// squares are chosen so their bounding boxes are invariant under 90°
-/// rotation. The title and bottom controls never rotate.
+/// The top square is sized to full available width (capped at 400 for
+/// huge phones). The bottom square fits inside the rectangle of
+/// remaining vertical space — its side is the smaller of (top-square
+/// width, vertical space between top square and controls) — and centers
+/// horizontally. Both squares counter-rotate together by `rotation` so
+/// content reads upright in position-study mode; both being square
+/// keeps the rotated bounding boxes invariant under 90° rotation.
 struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>: View {
     var rotation: Double = 0
     /// When false (default), the small (flexible) square is on top and the
@@ -19,64 +20,57 @@ struct SquareScreenLayout<SmallContent: View, BigContent: View, Controls: View>:
     /// fixed footprint and the short instructional bullets get the
     /// flexible-space slot at the bottom.
     var bigOnTop: Bool = false
+    /// Vertical budget reserved for the controls area at the bottom.
+    /// RecordingScreen has a single Cancel button (70 fits comfortably);
+    /// IdleScreen has a primary action button plus a secondary row, so it
+    /// passes a larger value. Squares grow to fill whatever vertical
+    /// remains after title + controls.
+    var controlsHeight: CGFloat = 70
     @ViewBuilder var smallSquare: SmallContent
     @ViewBuilder var bigSquare: BigContent
     @ViewBuilder var controls: Controls
 
     var body: some View {
         GeometryReader { outer in
-            // max(0, ...) guards the initial layout pass where outer.size is
-            // still zero — without it, .frame() gets a negative side and
-            // SwiftUI logs "Invalid frame dimension".
-            //
-            // bigSide is constrained by three factors:
-            //   - screen width (minus padding)
-            //   - half the available vertical space (so the two squares
-            //     can be roughly equal-sized — small uses the remaining
-            //     space and naturally matches when this is the limit)
-            //   - an absolute cap (400) for huge screens
-            // ~190 pt is reserved for title + controls + padding.
-            let availableVertical = outer.size.height - 190
-            let bigSide = max(0, min(outer.size.width - 16,
-                                     availableVertical / 2,
-                                     400))
+            // Top square: width-limited (capped at 400).
+            // Bottom square: largest square fitting into the rectangle
+            //   that remains after title (60) + top square + controls.
+            // max(0, ...) on every dimension guards the initial layout
+            // pass where outer.size is still zero (otherwise SwiftUI logs
+            // "Invalid frame dimension").
+            let bigSide = max(0, min(outer.size.width - 16, 400))
+            let smallAvailable = max(0, outer.size.height - 60 - bigSide - controlsHeight)
+            let smallSide = min(bigSide, smallAvailable)
             VStack(spacing: 0) {
                 Text("WatchBeat")
                     .font(.largeTitle.bold())
                     .padding(.top, 12)
 
                 if bigOnTop {
-                    bigSquareView(bigSide: bigSide)
-                    smallSquareView
+                    squareSlot(side: bigSide) { bigSquare }
+                    squareSlot(side: smallSide) { smallSquare }
                 } else {
-                    smallSquareView
-                    bigSquareView(bigSide: bigSide)
+                    squareSlot(side: smallSide) { smallSquare }
+                    squareSlot(side: bigSide) { bigSquare }
                 }
 
-                // Bottom controls — fixed height, never rotates.
+                // Bottom controls — never rotates. Height is per-screen
+                // (see controlsHeight).
                 controls
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
                     .padding(.bottom, 20)
-                    .frame(height: 110)
+                    .frame(height: controlsHeight)
             }
         }
     }
 
-    /// Flexible-space slot. Caller's content is expected to be square-
-    /// shaped (e.g., via .aspectRatio(1, contentMode: .fit)) so the
-    /// rotation effect is invariant under 90°.
-    private var smallSquareView: some View {
-        smallSquare
-            .rotationEffect(.degrees(rotation))
-            .animation(.easeInOut(duration: 0.28), value: rotation)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    /// Fixed-size square slot. Caller's content fills the square.
-    private func bigSquareView(bigSide: CGFloat) -> some View {
-        bigSquare
-            .frame(width: bigSide, height: bigSide)
+    /// Fixed-size square slot. Content fills `side × side` and rotates
+    /// as a unit; the outer `maxWidth: .infinity` centers it horizontally
+    /// inside the parent VStack column.
+    private func squareSlot<C: View>(side: CGFloat, @ViewBuilder content: () -> C) -> some View {
+        content()
+            .frame(width: side, height: side)
             .rotationEffect(.degrees(rotation))
             .animation(.easeInOut(duration: 0.28), value: rotation)
             .frame(maxWidth: .infinity)

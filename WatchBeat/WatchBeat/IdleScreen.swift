@@ -5,7 +5,9 @@ struct IdleScreen: View {
     @AppStorage("positionStudyEnabled") private var positionStudyEnabled: Bool = false
 
     var body: some View {
-        SquareScreenLayout {
+        // 130 pt controls area: ActionButton (~50) + spacing (10) +
+        // BottomRow (30) + top/bottom padding (36).
+        SquareScreenLayout(controlsHeight: 130) {
             WatchLogo()
         } bigSquare: {
             // Updated post-multiband / post-template-matching: placement

@@ -54,9 +54,8 @@ struct ListeningCaption: View {
 
 // MARK: - Simple Tips Block
 
-/// Compact instructional bullets used by the lower (flexible) square of
-/// the Listen screen. Square-ish via .aspectRatio(1) so it rotates
-/// cleanly with the rest of the layout during position studies.
+/// Compact instructional bullets used by the lower box of the Listen
+/// screen. Fills its parent slot — no internal aspect-ratio constraint.
 struct SimpleTipsBlock: View {
     let title: String
     let tips: [(icon: String, text: String)]
@@ -73,7 +72,7 @@ struct SimpleTipsBlock: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
