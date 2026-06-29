@@ -161,9 +161,7 @@ struct ResultScreen: View {
                     coordinator.startMonitoring()
                 }
                 HStack {
-                    Text("← CROWN LEFT")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(.primary)
+                    CrownLeftTipOrNothing()
                     Spacer()
                     SendDebugButton(coordinator: coordinator)
                 }
