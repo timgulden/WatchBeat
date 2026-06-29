@@ -45,6 +45,18 @@ public struct MeasurementPipeline {
     /// sick reading.
     public static let lowConfidenceMaxClassSigmaMs: Double = 8.0
 
+    /// Minimum confirmedFraction below which we treat the recording as
+    /// untrusted regardless of how clean the per-class σ looks. Catches
+    /// the case where the picker locks onto a self-consistent grid that
+    /// has tight residuals but isn't actually tracking the watch's ticks
+    /// (e.g., user delayed putting the phone on the watch, picker found
+    /// 73 events at 167.4 ms grid that fit non-watch periodic energy).
+    /// Threshold sits in a clean 78 → 91 % gap in the 121-file corpus —
+    /// every legitimate sick reading has conf ≥ 91 %, every recording in
+    /// the 65–80 % zone is either already flagged via other gates or is
+    /// the NH35_2026-06-29_03-20-09 false-positive this gate catches.
+    public static let lowConfidenceMinConfirmedFraction: Double = 0.80
+
     /// Quartz detector threshold. Ratio of FFT magnitude sum at integer
     /// Hz (1+2+3+4) over half-integer Hz (1.5+2.5+3.5+4.5), measured on
     /// the rectified+highpassed envelope of the raw audio. Quartz watches

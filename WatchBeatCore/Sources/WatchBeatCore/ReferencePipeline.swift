@@ -1096,7 +1096,7 @@ extension MeasurementPipeline {
         // below the 30% display gate while real watches saturate above 50.
         let quality = max(0.0, min(1.0, 1.0 - exp(-snr / 10.0)))
 
-        // Low-confidence routing — three independent gates:
+        // Low-confidence routing — four independent gates:
         //
         // (a) High-σ gate: route to LowAnalyticalConfidence whenever
         //     the AVERAGE per-class residual scatter exceeds the
@@ -1118,6 +1118,18 @@ extension MeasurementPipeline {
         //     reported rate of -32 s/day instead of the real ~+4 s/day).
         //     The OLS regression in those cases compromises the slope
         //     to fit the outliers, distorting the reported rate.
+        //
+        // (d) Low confirmedFraction gate: a substantial fraction of
+        //     expected beats failed extraction or outlier-rejection. The
+        //     surviving beats may still fit a low-σ line, but that line
+        //     can be a self-consistent fit to non-watch periodic energy.
+        //     Caught on the 2026-06-29 NH35 recording (phone not yet on
+        //     the watch for the first ~7 s — picker locked onto 73 beats
+        //     at 167.4 ms grid with tight σ ≈ 1.1 ms, reported -361 s/day
+        //     for a watch that runs +4 s/day). Threshold 0.80 is in a
+        //     clean gap in the 121-file test corpus: nothing between
+        //     conf 78 % (the bad case) and conf 91 % (the next-borderline
+        //     legitimate case) exists.
         //
         // evenStd / oddStd were unpacked from the winner above and may have
         // been updated by the cross-class rescue. Use those values here.
@@ -1155,9 +1167,12 @@ extension MeasurementPipeline {
             pairAbsFlippingFailure = sdOverMad >= 5.0 && pairSD >= 1.0
         }
 
+        let lowConfirmedFractionFailure = confirmedFraction < Self.lowConfidenceMinConfirmedFraction
+
         let isLowConfidence = avgClassStd > Self.lowConfidenceMaxClassSigmaMs
                             || asymmetricClassFailure
                             || pairAbsFlippingFailure
+                            || lowConfirmedFractionFailure
 
         let beatErrorReported: Double? = beAsymmetryMs
         // Only emit ticks that survived outlier rejection. A pick that
