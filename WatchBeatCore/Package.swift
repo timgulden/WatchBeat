@@ -57,6 +57,10 @@ let package = Package(
             name: "FilterAudio",
             targets: ["FilterAudio"]
         ),
+        .executable(
+            name: "BarsTrace",
+            targets: ["BarsTrace"]
+        ),
     ],
     targets: [
         .target(
@@ -118,6 +122,13 @@ let package = Package(
         .executableTarget(
             name: "FilterAudio",
             dependencies: ["WatchBeatCore"]
+        ),
+        .executableTarget(
+            name: "BarsTrace",
+            dependencies: ["WatchBeatCore"],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+            ]
         ),
         .testTarget(
             name: "WatchBeatCoreTests",

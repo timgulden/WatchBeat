@@ -432,44 +432,103 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
-    /// Window length (seconds) of trace data used for the bar FFT.
-    /// Shorter than the 15-s visible window so the bars reflect "what's
-    /// happening now" rather than the integrated whole. 5 s gives 0.2 Hz
-    /// Goertzel resolution — comfortable margin over the 0.5 Hz spacing
-    /// between adjacent standard rates (5 / 5.5 Hz).
+    /// Window length (seconds) of envelope used for the bar Goertzel.
+    /// 5 s gives 0.2 Hz Goertzel resolution — comfortable margin over
+    /// the 0.5 Hz spacing between adjacent standard rates (5 / 5.5 Hz).
     private let barAnalysisWindowSec: Double = 5.0
 
-    /// Compute Goertzel magnitudes at each standard beat rate against the
-    /// MOST RECENT `barAnalysisWindowSec` of trace data. Normalize so the
-    /// strongest rate is 1.0 and publish for the bar display.
+    /// Hop size (seconds) for the bar envelope. 10 ms = 100 Hz sampling,
+    /// Nyquist 50 Hz. This is deliberately MUCH higher than the 50-ms
+    /// display trace hop (20 Hz, Nyquist 10 Hz). At 20 Hz the harmonics
+    /// of any standard beat rate fold onto neighbouring standard bars
+    /// (e.g. a 6 Hz tick's 12 Hz second harmonic aliases to 8 Hz,
+    /// inflating the 28800 bph bar to nearly the height of the real
+    /// 21600 bph bar on NH35 recordings). At 100 Hz the first several
+    /// harmonics stay below Nyquist and no aliasing reaches the
+    /// standard-rate bins.
+    private let barEnvelopeHopSec: Double = 0.010
+
+    /// Compute Goertzel magnitudes at each standard beat rate against a
+    /// freshly-built 100 Hz band-energy envelope over the most recent
+    /// `barAnalysisWindowSec` of audio. Normalize so the strongest rate
+    /// is 1.0 and publish for the bar display.
     private func updateBars() {
-        let totalWritten = data.totalTraceWritten
-        // Need at least 2 s of trace to distinguish 5/5.5 Hz reliably.
-        guard totalWritten >= 40 else {
+        // Need at least 2 s of audio to distinguish 5 / 5.5 Hz reliably.
+        // Use the full 5-s window once we have it; ramp up gracefully
+        // during the first few seconds.
+        let minBarWindowSec = 2.0
+        let minSamples = Int(minBarWindowSec * sampleRate) + fftWindowSize
+        guard samplesAccumulated >= minSamples,
+              rollingBuffer.count >= minSamples,
+              let setup = fftSetup else {
             Task { @MainActor in self.data.rateMagnitudes = [:] }
             return
         }
-        let visible = data.visibleTrace()
+        let targetWindowSamples = Int(barAnalysisWindowSec * sampleRate)
+        let envWindowSamples = min(targetWindowSamples,
+                                   min(samplesAccumulated, rollingBuffer.count) - fftWindowSize)
 
-        // Slice the most-recent `barAnalysisWindowSec` (or however much
-        // we have, if it's still less than that).
-        let windowSamples = Int(barAnalysisWindowSec / SpectrogramData.traceDtSec)
-        let availSamples = min(totalWritten, SpectrogramData.traceSampleCount)
-        let n = min(windowSamples, availSamples)
-        let start = SpectrogramData.traceSampleCount - n
-        var series = Array(visible[start..<visible.count])
+        let barHop = max(1, Int(sampleRate * barEnvelopeHopSec))
+        let barFrameRate = sampleRate / Double(barHop)
+        let n = max(1, (envWindowSamples - fftWindowSize) / barHop + 1)
+
+        // STFT over the last 5 s, hopped by `barHop`. Sum magnitudes in
+        // the currently-selected band per frame → 100 Hz band-energy
+        // envelope.
+        let start = rollingBuffer.count - envWindowSamples
+        var seg = [Float](repeating: 0, count: fftWindowSize)
+        let nBins = fftWindowSize / 2
+        var realPart = [Float](repeating: 0, count: nBins)
+        var imagPart = [Float](repeating: 0, count: nBins)
+        var envelope = [Float](repeating: 0, count: n)
+
+        let lo: Int
+        let hi: Int
+        if currentBandLowBin >= 0 {
+            lo = max(0, currentBandLowBin)
+            hi = min(nBins - 1, currentBandHighBin)
+        } else {
+            let binsPerHz = Double(fftWindowSize) / sampleRate
+            lo = max(1, Int(4000.0 * binsPerHz))
+            hi = min(nBins - 1, Int(22000.0 * binsPerHz))
+        }
+
+        for t in 0..<n {
+            let off = start + t * barHop
+            for i in 0..<fftWindowSize {
+                seg[i] = rollingBuffer[off + i] * hannWindow[i]
+            }
+            for i in 0..<nBins {
+                realPart[i] = seg[2 * i]
+                imagPart[i] = seg[2 * i + 1]
+            }
+            realPart.withUnsafeMutableBufferPointer { rp in
+                imagPart.withUnsafeMutableBufferPointer { ip in
+                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                    vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                }
+            }
+            var s: Float = 0
+            if lo <= hi {
+                for k in lo...hi {
+                    let re = realPart[k]
+                    let im = imagPart[k]
+                    s += sqrt(re * re + im * im)
+                }
+            }
+            envelope[t] = s
+        }
 
         // Detrend.
         var mean: Float = 0
-        vDSP_meanv(series, 1, &mean, vDSP_Length(n))
+        vDSP_meanv(envelope, 1, &mean, vDSP_Length(n))
         var negMean = -mean
-        vDSP_vsadd(series, 1, &negMean, &series, 1, vDSP_Length(n))
+        vDSP_vsadd(envelope, 1, &negMean, &envelope, 1, vDSP_Length(n))
 
-        let frameRate = 1.0 / SpectrogramData.traceDtSec
         var raw: [StandardBeatRate: Float] = [:]
         var maxMag: Float = 0
         for rate in StandardBeatRate.allCases {
-            let mag = Float(goertzelMagnitude(series: series, frameRate: frameRate, targetHz: rate.hz))
+            let mag = Float(goertzelMagnitude(series: envelope, frameRate: barFrameRate, targetHz: rate.hz))
             raw[rate] = mag
             if mag > maxMag { maxMag = mag }
         }
