@@ -367,6 +367,45 @@ public struct AmplitudeEstimator {
             return m
         }
 
+        // Alternative qualification path (OR-combined with valley-prominence):
+        // outer-background ratio. Some NH35 recordings have a legitimate
+        // unlock event that reads as a soft ridge (~15 % of dom) rather than
+        // a sharp peak with deep valley — its (peak - valley) prominence is
+        // ~2 %, below the 5 % floor, so valley-prominence rejects it and the
+        // algorithm settles for the closer impulse (~7 ms) → pulse ~3.5 ms →
+        // amplitude 400°+ → out of range → nil. On those recordings we get
+        // no amplitude at all despite the real unlock being visible in the
+        // fold.
+        //
+        // Alternative gate: candidate qualifies if its peak value is at
+        // least `bgRatio` × the median of the outer band [-25,-15] ∪ [+15,+25] ms.
+        // That outer region is inside the search radius but outside the
+        // impulse complex, so its median is a good estimate of the true
+        // noise floor. A 15 % unlock over an 8 % noise floor = 1.9× —
+        // clears a 1.5× threshold. Real Seagull unlocks (20-30 % of dom
+        // over 5-8 % background = 3-4×) and Timex pin-lever locks (10-20 %
+        // of dom over 3-5 % background = 2-4×) all easily clear this too,
+        // so no regression on validated cases expected.
+        let outerBgWindowSamples = (Int(0.015 * sampleRate), Int(0.025 * sampleRate))
+        var outerValues: [Float] = []
+        for offset in -outerBgWindowSamples.1 ... -outerBgWindowSamples.0 {
+            let idx = domIdx + offset
+            if idx >= 0 && idx < n { outerValues.append(signal[idx]) }
+        }
+        for offset in outerBgWindowSamples.0 ... outerBgWindowSamples.1 {
+            let idx = domIdx + offset
+            if idx >= 0 && idx < n { outerValues.append(signal[idx]) }
+        }
+        let outerBgMedian: Float
+        if !outerValues.isEmpty {
+            outerValues.sort()
+            outerBgMedian = outerValues[outerValues.count / 2]
+        } else {
+            outerBgMedian = 0
+        }
+        let bgRatioMin: Float = 1.5
+        let bgRatioEnabled = ProcessInfo.processInfo.environment["WATCHBEAT_AMP_BG_RATIO"] != "0"
+
         // Find the FARTHEST qualifying peak on each side of dominant.
         //
         // Why farthest, not most prominent: the dominant peak is typically
@@ -399,6 +438,58 @@ public struct AmplitudeEstimator {
                 if -dist > farthestBefore { farthestBefore = -dist }
             } else {
                 if dist > farthestAfter { farthestAfter = dist }
+            }
+        }
+
+        // Fallback pass for the NH35-style "impulse instead of unlock"
+        // failure. When the primary valley-prominence pass produced a
+        // half-pulse short enough to yield an out-of-range amplitude
+        // (> 360° for any lift angle we support — pulse < ~4.5 ms), the
+        // picker was probably locking onto the impulse (~7 ms full
+        // traversal) instead of the real unlock (~10-11 ms). Look for an
+        // additional peak in [9 ms .. 25 ms] on BOTH sides using the
+        // outer-background ratio as an alternative gate. If found,
+        // replace the shorter primary pick with the extended one.
+        //
+        // Gate: only fires when primary pulse is unambiguously too short
+        // (< 4.5 ms). This preserves EVERY case where primary yields a
+        // valid amplitude — Seagulls, Timex pin-lever, Omega, etc. all
+        // produce pulses ≥ 5 ms so the fallback never touches them.
+        if bgRatioEnabled && outerBgMedian > 0 {
+            let primaryHalfPulse: Int
+            if farthestBefore > 0 && farthestAfter > 0 {
+                primaryHalfPulse = (farthestBefore + farthestAfter) / 4
+            } else if farthestBefore > 0 {
+                primaryHalfPulse = farthestBefore / 2
+            } else if farthestAfter > 0 {
+                primaryHalfPulse = farthestAfter / 2
+            } else {
+                primaryHalfPulse = 0
+            }
+            let primaryPulseMs = Double(primaryHalfPulse) / sampleRate * 1000.0
+            // 3.8 ms is the pulse below which amplitude would exceed 360°
+            // even at lift 55° (the highest common movement) — i.e., the
+            // primary is definitely going to be rejected. Above 3.8 ms,
+            // the primary is producing an in-range answer we should trust.
+            let fallbackTriggerMaxPulseMs: Double = 3.8
+            if primaryHalfPulse == 0 || primaryPulseMs < fallbackTriggerMaxPulseMs {
+                let bgThreshold: Float = bgRatioMin * outerBgMedian
+                let extensionMinMs: Double = 9.0
+                let extensionMinSamples = Int(extensionMinMs / 1000.0 * sampleRate)
+                for i in lo...hi {
+                    let dist = i - domIdx
+                    let absDist = abs(dist)
+                    if absDist < extensionMinSamples { continue }
+                    let v = signal[i]
+                    if v < bgThreshold { continue }
+                    guard v >= signal[i - 1] && v >= signal[i - 2]
+                          && v >= signal[i + 1] && v >= signal[i + 2] else { continue }
+                    if dist < 0 {
+                        if absDist > farthestBefore { farthestBefore = absDist }
+                    } else {
+                        if dist > farthestAfter { farthestAfter = dist }
+                    }
+                }
             }
         }
 
