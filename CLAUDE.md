@@ -72,6 +72,7 @@ Mechanical only (quartz removed — 1Hz conflicts with heartbeat).
    - Gate 4: |rate| > 2000 s/day → **Watch Needs Service**
    - Gate 5: else → **Result** (rate dial, timegraph, beat error, amplitude)
 5. **Result page** displays raw quality % weighted by confirmedFraction (cosmetic only — workflow logic uses raw fields). All failure pages have a **Try Again** button that returns to monitoring with a fresh 3 s gate.
+6. **Position Study** (toggle on Idle) — guided five-position workflow: Intro (grip diagram: caseback on phone bottom edge, crown left) → per position: Positioning screen (auto-starts recording after the target pose holds 1.5 s) → recording (15 s windows only count if the pose held the full span, via RecordingSession.windowValidator) → advance. Positions are the watchmakers' standard five — Dial Up, Dial Down, 6 Up, 3 Up, 9 Up (12 Up is the customarily-omitted sixth); verticals are named by which numeral points up, not by crown side. Failures route to an in-study Retry/Skip screen, never to the normal failure pages. Summary shows mean rate on the dial, positional delta (max − min), and a per-position rate/beat-error/amplitude table — beat error and amplitude are not averaged. Study state lives in `PositionStudy` (value type on the coordinator); screens are `StudyIntroScreen`, `StudyPositioningScreen`, `StudyRetryScreen`, `StudyResultScreen`. Outside study mode no position is ever displayed (the grip assumption doesn't hold), and study readings never save debug recordings.
 
 ## Key Conventions
 

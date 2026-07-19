@@ -36,6 +36,14 @@ struct ContentView: View {
                 QuartzDetectedScreen(coordinator: coordinator)
             case .micUnavailable(let diagnostic):
                 MicUnavailableScreen(diagnostic: diagnostic, coordinator: coordinator)
+            case .studyIntro:
+                StudyIntroScreen(coordinator: coordinator)
+            case .studyPositioning:
+                StudyPositioningScreen(coordinator: coordinator)
+            case .studyRetry(let reason):
+                StudyRetryScreen(reason: reason, coordinator: coordinator)
+            case .studyResult:
+                StudyResultScreen(coordinator: coordinator)
             }
         }
         // iOS-style edge-pan swipe-right "back" gesture. Triggers when the
@@ -70,6 +78,10 @@ struct ContentView: View {
         case .needsService, .rateConfusion, .weakSignal,
              .lowAnalyticalConfidence, .quartzDetected, .micUnavailable:
             coordinator.startMonitoring()
+        case .studyIntro, .studyPositioning, .studyRetry:
+            coordinator.cancelStudy()
+        case .studyResult:
+            coordinator.finishStudy()
         case .idle, .analyzing:
             break
         }

@@ -128,6 +128,12 @@ final class MeasurementCoordinator: ObservableObject {
         case lowAnalyticalConfidence
         case quartzDetected
         case micUnavailable(diagnostic: String?)
+        // Position Study flow. Study progress/results live in `study`,
+        // not in state payloads — these cases are pure screen selectors.
+        case studyIntro
+        case studyPositioning
+        case studyRetry(reason: String)
+        case studyResult
     }
 
     /// Shown when a high-quality result is obtained but the rate error is
@@ -187,6 +193,12 @@ final class MeasurementCoordinator: ObservableObject {
     /// Live watch position (from accelerometer). Nil while the phone is
     /// between positions or motion isn't running.
     @Published var currentPosition: WatchPosition?
+    /// Active Position Study, or nil outside study mode. Mutations publish
+    /// (value type), so screens track progress by observing this.
+    @Published private(set) var study: PositionStudy?
+    /// 0→1 progress of the "hold the pose" dwell before a study recording
+    /// auto-starts. Drives the ring on the positioning screen.
+    @Published private(set) var poseHoldProgress: Double = 0
     /// Counter-rotation (degrees) to apply to the Listening/Measuring content
     /// so it reads upright regardless of phone pose. Latched: only updates
     /// when a new unambiguous position arrives — intermediate nil states
@@ -274,6 +286,13 @@ final class MeasurementCoordinator: ObservableObject {
     private let orientationMonitor = OrientationMonitor()
     private var recordingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
+    /// Watches for the target pose being held during .studyPositioning and
+    /// auto-starts the recording when the dwell completes.
+    private var poseHoldTask: Task<Void, Never>?
+    /// Seconds the strict pose classification must hold before a study
+    /// recording auto-starts. Long enough to skip transits through a pose,
+    /// short enough to feel immediate.
+    private static let poseHoldDuration: Double = 1.5
 
     // 50° is the dominant cluster for modern Swiss/Japanese automatics
     // (ETA 2824/2892/7750, Sellita SW200, Omega 8500/8800/1120, Rolex
@@ -318,6 +337,11 @@ final class MeasurementCoordinator: ObservableObject {
             stopMonitoring()
         case .recording:
             cancelMeasurement()
+        case .studyIntro, .studyPositioning, .studyRetry:
+            // Mid-study backgrounding abandons the study (matches the
+            // app-wide policy of releasing mic + motion and returning to
+            // idle). A completed .studyResult persists like .result does.
+            cancelStudy()
         default:
             break
         }
@@ -389,11 +413,150 @@ final class MeasurementCoordinator: ObservableObject {
         recordingTask = nil
         monitorTask?.cancel()
         monitorTask = nil
+        poseHoldTask?.cancel()
+        poseHoldTask = nil
         captureService.onSamples = nil
         captureService.stopRecording()
         orientationMonitor.stop()
+        study = nil
         state = .idle
         ratePowers = [:]
+    }
+
+    // MARK: - Position Study
+
+    /// Entered from the Idle screen's Listen button when the Position
+    /// Study toggle is on. Shows the grip instructions; motion and mic
+    /// stay off until the user taps Begin.
+    func startStudy() {
+        study = PositionStudy()
+        state = .studyIntro
+    }
+
+    /// The intro screen's Begin button. Starts motion tracking and moves
+    /// to the first position.
+    func beginStudyPositions() {
+        orientationMonitor.start()
+        enterStudyPositioning()
+    }
+
+    /// Retry the current (not-yet-recorded) position after a failed reading.
+    func retryStudyPosition() {
+        enterStudyPositioning()
+    }
+
+    /// Give up on the current position and move on. Reachable from both
+    /// the positioning screen (pose never achieved) and the retry screen.
+    func skipStudyPosition() {
+        poseHoldTask?.cancel()
+        poseHoldTask = nil
+        study?.record(.skipped)
+        advanceStudyOrFinish()
+    }
+
+    /// Done button on the study summary.
+    func finishStudy() {
+        study = nil
+        state = .idle
+    }
+
+    /// Abandon the study entirely: release motion + mic, drop progress.
+    func cancelStudy() {
+        cancelMeasurement()
+    }
+
+    private func enterStudyPositioning() {
+        poseHoldProgress = 0
+        state = .studyPositioning
+        startPoseHoldWatch()
+    }
+
+    private func advanceStudyOrFinish() {
+        if study?.isComplete == true {
+            orientationMonitor.stop()
+            state = .studyResult
+        } else {
+            enterStudyPositioning()
+        }
+    }
+
+    /// Poll the live position at 10 Hz; when the target pose has held for
+    /// poseHoldDuration, auto-start the recording. Leaving the pose resets
+    /// the dwell. The task ends itself if the state moves off
+    /// .studyPositioning (skip, cancel, backgrounding).
+    private func startPoseHoldWatch() {
+        poseHoldTask?.cancel()
+        poseHoldTask = Task { [weak self] in
+            var held: Double = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self else { return }
+                guard case .studyPositioning = self.state,
+                      let target = self.study?.target else { return }
+                if self.currentPosition == target {
+                    held += 0.1
+                    self.poseHoldProgress = min(1, held / Self.poseHoldDuration)
+                    if held >= Self.poseHoldDuration {
+                        self.poseHoldTask = nil
+                        self.startStudyRecording()
+                        return
+                    }
+                } else {
+                    held = 0
+                    self.poseHoldProgress = 0
+                }
+            }
+        }
+    }
+
+    /// Bring up audio capture and kick off the analysis loop for the
+    /// current study position. Mirrors startMonitoring's audio path; the
+    /// study-specific behavior (window validation, routing) lives in
+    /// performContinuousMeasurement, keyed off `study`.
+    private func startStudyRecording() {
+        Task { [weak self] in
+            guard let self else { return }
+            let granted = await self.captureService.requestPermission()
+            guard granted else {
+                self.cancelStudy()
+                self.state = .micUnavailable(diagnostic: nil)
+                return
+            }
+            await self.captureService.resetBuffer()
+            self.frequencyMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+            self.spectrogramMonitor.initializeForExternalFeed(sampleRate: self.captureService.sampleRate)
+            self.captureService.onSamples = { [weak self] samples in
+                self?.frequencyMonitor.feedSamples(samples)
+                self?.spectrogramMonitor.feedSamples(samples)
+            }
+            do {
+                try self.captureService.startRecording()
+            } catch {
+                self.cancelStudy()
+                self.state = .micUnavailable(diagnostic: "Could not start audio: \(error.localizedDescription)")
+                return
+            }
+            self.startMeasurement()
+        }
+    }
+
+    /// User-facing reason line for the in-study retry screen. Maps the
+    /// routing decision to recovery-oriented language (no DSP jargon).
+    private static func studyRetryReason(_ decision: Router.Decision) -> String {
+        switch decision {
+        case .weakSignal:
+            return "The ticks were too quiet, or the phone moved out of position."
+        case .lowAnalyticalConfidence:
+            return "Ticks were heard, but their timing was too irregular to measure."
+        case .rateConfusion:
+            return "Couldn't lock onto a standard beat rate in this position."
+        case .needsService:
+            return "The rate in this position is too far off to measure reliably."
+        case .quartzDetected:
+            return "This sounds like a quartz watch — the study needs a mechanical movement."
+        case .displayResult:
+            return ""  // never routed here
+        }
     }
 
     private func performContinuousMeasurement() async {
@@ -415,6 +578,9 @@ final class MeasurementCoordinator: ObservableObject {
         let startTime = ContinuousClock.now
         recordingStartTime = startTime
         let maxRate = MeasurementConstants.maxPlausibleRateError
+        // Snapshot the study target once — it defines this recording even
+        // if the study advances/cancels while the loop runs.
+        let studyTarget = study?.target
 
         // Keep the bars live during recording. Polls frequencyMonitor's
         // rate powers at ~5 Hz; the view reads elapsed time via TimelineView.
@@ -441,6 +607,17 @@ final class MeasurementCoordinator: ObservableObject {
             progressHandler: { [weak self] current, best in
                 self?.currentQuality = current
                 self?.bestQualitySoFar = best
+            },
+            // In study mode, only windows whose full 15 s span held the
+            // target position are scored — a drift out of pose can't
+            // contaminate the reading.
+            windowValidator: studyTarget.map { target in
+                { [weak self] windowEnd in
+                    guard let self else { return false }
+                    return self.orientationMonitor.position(
+                        endingAt: windowEnd,
+                        duration: self.analysisWindow) == target
+                }
             }
         )
         let bestWindow = await session.run()
@@ -460,7 +637,11 @@ final class MeasurementCoordinator: ObservableObject {
             return orientationMonitor.position(endingAt: endTime,
                                                duration: analysisWindow)
         }()
-        orientationMonitor.stop()
+        // A study needs motion tracking for its next position; normal
+        // measurements are done with it.
+        if study == nil {
+            orientationMonitor.stop()
+        }
 
         guard !Task.isCancelled else {
             state = .idle
@@ -480,7 +661,7 @@ final class MeasurementCoordinator: ObservableObject {
         // or the iOS Files app on the development device.
         #if DEBUG
         if let r = bestResult, let buf = bestBuffer {
-            saveRawAudio(buf, result: r)
+            saveRawAudio(buf, result: r, position: studyTarget)
         }
         #endif
 
@@ -500,7 +681,10 @@ final class MeasurementCoordinator: ObservableObject {
         // which has no diagnostic value). Saving here means the file
         // is in place by the time the screen renders. State didSet
         // takes care of discarding when the user leaves the screen.
-        let outcomeName = Self.debugOutcomeName(decision: decision)
+        // Study readings never save a debug recording: the study states
+        // aren't debug-holding states (no Send Debug button), so a saved
+        // file would just be orphaned until the next cleanup.
+        let outcomeName = study == nil ? Self.debugOutcomeName(decision: decision) : ""
         if !outcomeName.isEmpty, let buf = bestBuffer {
             let ctx = DebugRecording.Context(
                 appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
@@ -519,6 +703,26 @@ final class MeasurementCoordinator: ObservableObject {
                 timestamp: ISO8601DateFormatter().string(from: Date())
             )
             debugRecording.save(buffer: buf, context: ctx)
+        }
+
+        // Study mode: successes append a reading and advance; every
+        // failure becomes an in-study retry screen so four good readings
+        // are never thrown away over one stubborn position.
+        if study != nil {
+            if case .displayResult = decision,
+               let result = bestResult,
+               let diagnostics = bestDiagnostics,
+               let audioBuffer = bestBuffer {
+                let data = await buildDisplayData(result: result,
+                                                  diagnostics: diagnostics,
+                                                  audioBuffer: audioBuffer,
+                                                  windowPosition: studyTarget)
+                study?.record(.measured(data))
+                advanceStudyOrFinish()
+            } else {
+                state = .studyRetry(reason: Self.studyRetryReason(decision))
+            }
+            return
         }
 
         switch decision {
@@ -549,15 +753,46 @@ final class MeasurementCoordinator: ObservableObject {
         }
     }
 
-    /// Build a display payload for the .result state. Computes pulse widths
-    /// off-main-actor (amplitude estimation is non-trivial work) and
-    /// formats the diagnostic blob the result page may surface for support.
+    /// Build a display payload for the .result state, then transition.
+    /// Also folds the amplitude into the debug-recording sidecar.
     private func displayResult(
         result: MeasurementResult,
         diagnostics: PipelineDiagnostics,
         audioBuffer: WatchBeatCore.AudioBuffer,
         windowPosition: WatchPosition?
     ) async {
+        let displayData = await buildDisplayData(result: result,
+                                                 diagnostics: diagnostics,
+                                                 audioBuffer: audioBuffer,
+                                                 windowPosition: windowPosition)
+
+        // Now that pulse widths are computed, fold the user-visible
+        // amplitude into the debug recording's JSON sidecar so a
+        // Send Debug from this screen carries the same number the user
+        // is reading. Subsequent lift-angle changes update the JSON
+        // again via liftAngleDegrees didSet.
+        if let pw = displayData.pulseWidths {
+            let initialAmplitude = AmplitudeEstimator.combinedAmplitude(
+                pulseWidths: pw,
+                beatRate: result.snappedRate,
+                rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
+                liftAngleDegrees: liftAngleDegrees
+            )
+            debugRecording.updateAmplitude(initialAmplitude, liftAngleDegrees: liftAngleDegrees)
+        }
+
+        state = .result(displayData)
+    }
+
+    /// Shared payload construction for both the single-measurement result
+    /// and study readings. Computes pulse widths off-main-actor (amplitude
+    /// estimation is non-trivial work) and formats the diagnostic blob.
+    private func buildDisplayData(
+        result: MeasurementResult,
+        diagnostics: PipelineDiagnostics,
+        audioBuffer: WatchBeatCore.AudioBuffer,
+        windowPosition: WatchPosition?
+    ) async -> MeasurementDisplayData {
         let pulseWidths = await Task.detached { [amplitudeEstimator] in
             amplitudeEstimator.measurePulseWidths(
                 input: audioBuffer,
@@ -584,7 +819,7 @@ final class MeasurementCoordinator: ObservableObject {
         Top rates: \(scoresText)
         """
 
-        let displayData = MeasurementDisplayData(
+        return MeasurementDisplayData(
             rateBPH: result.snappedRate.rawValue,
             rateError: result.rateErrorSecondsPerDay,
             rateErrorFormatted: formatRateError(result.rateErrorSecondsPerDay),
@@ -598,33 +833,21 @@ final class MeasurementCoordinator: ObservableObject {
             isLowConfidence: result.isLowConfidence,
             watchPosition: windowPosition
         )
-
-        // Now that pulse widths are computed, fold the user-visible
-        // amplitude into the debug recording's JSON sidecar so a
-        // Send Debug from this screen carries the same number the user
-        // is reading. Subsequent lift-angle changes update the JSON
-        // again via liftAngleDegrees didSet.
-        let initialAmplitude = AmplitudeEstimator.combinedAmplitude(
-            pulseWidths: pulseWidths,
-            beatRate: result.snappedRate,
-            rateErrorSecondsPerDay: result.rateErrorSecondsPerDay,
-            liftAngleDegrees: liftAngleDegrees
-        )
-        debugRecording.updateAmplitude(initialAmplitude, liftAngleDegrees: liftAngleDegrees)
-
-        state = .result(displayData)
     }
 
     // MARK: - File saving (DEBUG-only diagnostic — call site gated above)
 
     #if DEBUG
-    private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer, result: MeasurementResult) {
+    private func saveRawAudio(_ buffer: WatchBeatCore.AudioBuffer,
+                              result: MeasurementResult,
+                              position: WatchPosition? = nil) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let q = Int(result.qualityScore * 100)
         let rate = result.snappedRate.rawValue
-        let filename = "watchbeat_\(formatter.string(from: Date()))_\(rate)bph_q\(q).wav"
+        let posSuffix = position.map { "_\($0.shortCode)" } ?? ""
+        let filename = "watchbeat_\(formatter.string(from: Date()))_\(rate)bph_q\(q)\(posSuffix).wav"
         let url = docs.appendingPathComponent(filename)
 
         let samples = buffer.samples

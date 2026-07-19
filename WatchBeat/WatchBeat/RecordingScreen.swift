@@ -18,14 +18,35 @@ import SwiftUI
 struct RecordingScreen: View {
     @ObservedObject var coordinator: MeasurementCoordinator
 
+    /// The position being measured when this recording is part of a
+    /// Position Study, nil for a normal measurement.
+    private var studyTarget: WatchPosition? { coordinator.study?.target }
+
     var body: some View {
         SquareScreenLayout(rotation: coordinator.latchedUIRotation, bigOnTop: true) {
-            SimpleTipsBlock(title: "Analyzing…", tips: [
-                ("hand.raised", "Hold steady."),
-                ("ear", "Stay quiet."),
-                ("clock", "Usually finishes in 15 seconds."),
-                ("hourglass", "Up to 60 seconds with a weak signal."),
-            ])
+            if let target = studyTarget {
+                SimpleTipsBlock(title: "Measuring \(target.displayName)…", tips: [
+                    ("hand.raised", "Hold this position steady."),
+                    ("ear", "Stay quiet."),
+                    ("clock", "Usually finishes in 15 seconds."),
+                ])
+                .overlay(alignment: .bottomLeading) {
+                    if coordinator.currentPosition != target {
+                        Label("Off position — hold \(target.displayName) steady",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(12)
+                    }
+                }
+            } else {
+                SimpleTipsBlock(title: "Analyzing…", tips: [
+                    ("hand.raised", "Hold steady."),
+                    ("ear", "Stay quiet."),
+                    ("clock", "Usually finishes in 15 seconds."),
+                    ("hourglass", "Up to 60 seconds with a weak signal."),
+                ])
+            }
         } bigSquare: {
             ListenPanel(data: coordinator.spectrogramData)
         } controls: {

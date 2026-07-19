@@ -32,14 +32,44 @@ enum WatchPosition: String, CaseIterable, Sendable {
     case twelveUp    // 12U / PU — 12-o'clock at top
     case sixUp       // 6U  / PD — 6-o'clock at top
 
+    /// Vertical positions are named by which dial numeral points up ("3 Up"
+    /// rather than "Crown Up") — unambiguous for users who don't know
+    /// crown-side terminology.
     var displayName: String {
         switch self {
         case .dialUp:     return "Dial Up"
         case .dialDown:   return "Dial Down"
-        case .crownUp:    return "Crown Up"
-        case .crownDown:  return "Crown Down"
+        case .crownUp:    return "3 Up"
+        case .crownDown:  return "9 Up"
         case .twelveUp:   return "12 Up"
         case .sixUp:      return "6 Up"
+        }
+    }
+
+    /// Compact code used in saved-recording filenames.
+    var shortCode: String {
+        switch self {
+        case .dialUp:     return "DU"
+        case .dialDown:   return "DD"
+        case .crownUp:    return "3U"
+        case .crownDown:  return "9U"
+        case .twelveUp:   return "12U"
+        case .sixUp:      return "6U"
+        }
+    }
+
+    /// How to hold the *phone* to put the watch in this position, given the
+    /// study grip (caseback on the phone's bottom edge, crown left). Phone-
+    /// centric wording because the user reasons about the thing in their
+    /// hand, not the watch's frame of reference.
+    var phonePoseInstruction: String {
+        switch self {
+        case .dialUp:     return "Hold the phone vertical, upside down — watch above the phone."
+        case .dialDown:   return "Hold the phone vertical, upright — watch below the phone."
+        case .sixUp:      return "Lay the phone flat on its back, screen up."
+        case .twelveUp:   return "Lay the phone flat, screen down."
+        case .crownUp:    return "Turn the phone on its side — left edge (volume buttons) up."
+        case .crownDown:  return "Turn the phone on its side — right edge (side button) up."
         }
     }
 

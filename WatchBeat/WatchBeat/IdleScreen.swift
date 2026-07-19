@@ -26,8 +26,12 @@ struct IdleScreen: View {
             .padding(.vertical, 14)
         } controls: {
             VStack(spacing: 10) {
-                ActionButton(title: "Listen") {
-                    coordinator.startMonitoring()
+                ActionButton(title: positionStudyEnabled ? "Start Study" : "Listen") {
+                    if positionStudyEnabled {
+                        coordinator.startStudy()
+                    } else {
+                        coordinator.startMonitoring()
+                    }
                 }
                 BottomRow {
                     Button {

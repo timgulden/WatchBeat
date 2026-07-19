@@ -29,6 +29,12 @@ struct RecordingSession {
     /// bestDisplayedPercentSoFar). Runs on the main actor so it can update
     /// the coordinator's @Published counters directly.
     let progressHandler: @MainActor (Int, Int) -> Void
+    /// Optional acceptance gate called with each analysis window's end
+    /// time. A window that fails is neither scored nor allowed to
+    /// auto-stop. Position Study uses this to reject windows during which
+    /// the phone left the target position; nil (normal measurements)
+    /// accepts every window.
+    var windowValidator: (@MainActor (ContinuousClock.Instant) -> Bool)? = nil
 
     /// The single best-scoring window across the recording budget, or nil
     /// if the loop ended (cancelled / timed out) before any window completed.
@@ -62,6 +68,20 @@ struct RecordingSession {
             if elapsed > maxRecordingTime { break }
 
             if let buffer = await captureService.getRecentAudio(duration: analysisWindow) {
+                // Stamp the window's end before the pipeline runs — the
+                // pick takes long enough that "now" afterwards would let
+                // post-window movement pollute the position check.
+                let windowEnd = ContinuousClock.now
+
+                if let validator = windowValidator {
+                    let accepted = await MainActor.run { validator(windowEnd) }
+                    if !accepted {
+                        let remaining = maxRecordingTime - (ContinuousClock.now - startTime).asSeconds
+                        try? await Task.sleep(for: .seconds(min(analysisInterval, max(0.05, remaining))))
+                        continue
+                    }
+                }
+
                 let (result, diagnostics) = await Task.detached { [pipeline] in
                     pipeline.pick(buffer)
                 }.value
@@ -77,11 +97,10 @@ struct RecordingSession {
                 let s = score(result)
                 if s > bestScore {
                     bestScore = s
-                    // Stamp the moment this analysis window ended so the
-                    // coordinator can later ask the orientation monitor
-                    // whether the phone stayed in one position across its
-                    // 15-second span.
-                    best = (result, diagnostics, buffer, ContinuousClock.now)
+                    // The window-end stamp lets the coordinator later ask
+                    // the orientation monitor whether the phone stayed in
+                    // one position across the window's 15-second span.
+                    best = (result, diagnostics, buffer, windowEnd)
                 }
 
                 // Auto-stop only on a fully-trustworthy window: high quality,
