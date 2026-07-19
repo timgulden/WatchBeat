@@ -8,6 +8,7 @@ struct ResultScreen: View {
     @FocusState private var liftAngleFocused: Bool
     @State private var showLiftAngleInfo = false
     @State private var showAmplitudeInfo = false
+    @AppStorage("positionStudyEnabled") private var positionStudyEnabled: Bool = false
 
     /// Compute amplitude on the fly from stored pulse widths + current lift angle.
     private var amplitudeDegrees: Double? {
@@ -49,9 +50,12 @@ struct ResultScreen: View {
                 // Dial. Result screen never shows a low-confidence result —
                 // the coordinator routes those to ErrorScreen. So we can
                 // assume isLowConfidence is always false here.
+                // Position is only meaningful under the Position Study grip
+                // assumption (caseback on phone, crown left); in normal use
+                // the inferred position is wrong, so don't show it.
                 RateDialView(rateError: data.rateError,
                              beatErrorMs: data.beatErrorMs,
-                             watchPosition: data.watchPosition)
+                             watchPosition: positionStudyEnabled ? data.watchPosition : nil)
                     .frame(maxHeight: 310)
                     .padding(.top, -8)
 
