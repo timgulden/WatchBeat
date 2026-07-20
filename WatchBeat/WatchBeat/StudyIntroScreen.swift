@@ -35,6 +35,7 @@ struct StudyIntroScreen: View {
                 tipRow(icon: "1.circle", text: "Hold the watch caseback against the phone's bottom edge, crown pointing left.")
                 tipRow(icon: "2.circle", text: "Move the phone into each of 5 positions — the app tells you which and starts by itself.")
                 tipRow(icon: "3.circle", text: "Hold steady while each reading runs (15–60 seconds).")
+                tipRow(icon: "4.circle", text: "Rest the phone on a table to keep positions steady.")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)
