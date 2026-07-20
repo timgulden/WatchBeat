@@ -164,11 +164,22 @@ struct ResultScreen: View {
                 ActionButton(title: "Measure Again") {
                     coordinator.startMonitoring()
                 }
-                HStack {
-                    CrownLeftTipOrNothing()
-                    Spacer()
-                    SendDebugButton(coordinator: coordinator)
+                // Same shape as BottomRow: leading tip + trailing Send
+                // Debug with the red Cancel centered between them. Cancel
+                // returns to the Idle screen, where the Position Study
+                // toggle lives.
+                ZStack {
+                    HStack {
+                        CrownLeftTipOrNothing()
+                        Spacer()
+                        SendDebugButton(coordinator: coordinator)
+                    }
+                    Button("Cancel") {
+                        coordinator.cancelMeasurement()
+                    }
+                    .foregroundStyle(.red)
                 }
+                .frame(height: 30)
                 .padding(.top, 6)
                 .padding(.bottom, 20)
             }
