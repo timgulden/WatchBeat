@@ -434,11 +434,43 @@ public struct AmplitudeEstimator {
             let valley = valleyMin(from: domIdx, to: i)
             let prominence = v - valley
             if prominence < prominenceFloor { continue }
+            // Significance gate: the peak must also clear the outer-band
+            // noise floor by bgRatioMin. Valley-prominence alone accepts
+            // ridges that sit barely above a HIGH noise floor (NH35 good
+            // 06-27 tick fold: a 20 %-of-dom noise bump at -22 ms over an
+            // 18.5 % floor passed and became "farthest", displacing the
+            // real unlock at -11 ms). Real sub-events on validated
+            // recordings (Seagull, Timex pin-lever, Omega) run 2-4× their
+            // outer background, so this gate costs them nothing.
+            if bgRatioEnabled && outerBgMedian > 0 && v < bgRatioMin * outerBgMedian { continue }
             if dist < 0 {
                 if -dist > farthestBefore { farthestBefore = -dist }
             } else {
                 if dist > farthestAfter { farthestAfter = dist }
             }
+        }
+
+        // Combine the two sides into a half-traversal (the formula's `t`).
+        // Average only when the sides roughly agree — symmetric lock/drop
+        // sub-events flanking the impulse (Swiss ~±5 ms). When one side is
+        // several times shorter it isn't the matching sub-event, it's
+        // post-impulse ringing (~2 ms), and averaging it in halves the
+        // estimate (the NH35 no-amplitude failure: real unlock at -11 ms
+        // averaged with +2 ms ringing → pulse 3.3 ms → >360° → nil).
+        // Asymmetric case: trust the far side alone.
+        let symmetryMinRatio = 0.6
+        func combinedHalfPulse(_ before: Int, _ after: Int) -> Int {
+            if before > 0 && after > 0 {
+                let lesser = Double(min(before, after))
+                let greater = max(before, after)
+                if lesser >= symmetryMinRatio * Double(greater) {
+                    return (before + after) / 4
+                }
+                return greater / 2
+            }
+            if before > 0 { return before / 2 }
+            if after > 0 { return after / 2 }
+            return 0
         }
 
         // Fallback pass for the NH35-style "impulse instead of unlock"
@@ -456,16 +488,7 @@ public struct AmplitudeEstimator {
         // valid amplitude — Seagulls, Timex pin-lever, Omega, etc. all
         // produce pulses ≥ 5 ms so the fallback never touches them.
         if bgRatioEnabled && outerBgMedian > 0 {
-            let primaryHalfPulse: Int
-            if farthestBefore > 0 && farthestAfter > 0 {
-                primaryHalfPulse = (farthestBefore + farthestAfter) / 4
-            } else if farthestBefore > 0 {
-                primaryHalfPulse = farthestBefore / 2
-            } else if farthestAfter > 0 {
-                primaryHalfPulse = farthestAfter / 2
-            } else {
-                primaryHalfPulse = 0
-            }
+            let primaryHalfPulse = combinedHalfPulse(farthestBefore, farthestAfter)
             let primaryPulseMs = Double(primaryHalfPulse) / sampleRate * 1000.0
             // 3.8 ms is the pulse below which amplitude would exceed 360°
             // even at lift 55° (the highest common movement) — i.e., the
@@ -493,19 +516,15 @@ public struct AmplitudeEstimator {
             }
         }
 
-        // Use distance to farthest qualifying sub-event divided by 2 to get
-        // half-traversal (the formula's expected `t`). If sub-events are
-        // visible on both sides, average the half-traversals.
-        let halfPulseSamples: Int
-        if farthestBefore > 0 && farthestAfter > 0 {
-            halfPulseSamples = (farthestBefore + farthestAfter) / 4
-        } else if farthestBefore > 0 {
-            halfPulseSamples = farthestBefore / 2
-        } else if farthestAfter > 0 {
-            halfPulseSamples = farthestAfter / 2
-        } else {
-            return nil
+        if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_AMP_SPACING"] != nil {
+            let bMs = Double(farthestBefore) / sampleRate * 1000
+            let aMs = Double(farthestAfter) / sampleRate * 1000
+            FileHandle.standardError.write(
+                "[amp-spacing] domIdx=\(domIdx) center=\(center) domVal=\(domVal) outerBgMedian=\(outerBgMedian) bgEnabled=\(bgRatioEnabled) farthestBefore=\(String(format: "%.2f", bMs))ms farthestAfter=\(String(format: "%.2f", aMs))ms\n".data(using: .utf8)!)
         }
+
+        let halfPulseSamples = combinedHalfPulse(farthestBefore, farthestAfter)
+        guard halfPulseSamples > 0 else { return nil }
         return Double(halfPulseSamples) / sampleRate * 1000.0
     }
 
