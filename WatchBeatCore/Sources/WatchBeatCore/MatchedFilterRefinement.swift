@@ -111,16 +111,61 @@ enum MatchedFilterRefinement {
         // through two levels), so the flipped ticks detrend to ~0 and
         // pass 3σ. Holistic view: real jitter is unimodal; a big empty
         // gap between two tight clusters is a lock-state change, and only
-        // one state can feed the regression and beat error. Keep the
-        // majority cluster, drop the minority — we don't try to "shift"
-        // the minority back because that would fabricate data; dropping
-        // it gives the same slope and a clean per-class line.
+        // one state can feed the regression and beat error.
+        //
+        // The minority cluster's positions are BANNED — then, for each
+        // banned beat, we attempt a constrained re-pick: correlate its
+        // envelope (re-extracted at the majority line's prediction for
+        // that beat) against a template rebuilt from surviving ticks
+        // only, searching a window small enough that the banned
+        // sub-event is unreachable. A real event near the expected spot
+        // is recovered as a genuine measurement; a correlation peak
+        // pinned at the window edge means "best match is elsewhere" and
+        // the tick stays dropped. No unconditional shifting — every
+        // recovered position comes from actual signal at the expected
+        // location.
         var keptFlags = [Bool](repeating: true, count: n)
         for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
+        var repickTargets: [RepickTarget] = []
         rejectSplitLock(
             tickPositions: tickPositions, offsetMs: offsetMs,
-            beatIndices: beatIndices, keptFlags: &keptFlags
+            beatIndices: beatIndices, keptFlags: &keptFlags,
+            repickTargets: &repickTargets
         )
+        if !repickTargets.isEmpty {
+            // Template from surviving ticks only — the banned sub-event's
+            // shape must not vote on where the re-pick lands.
+            var keptOffsets = offsetMs
+            for i in 0..<n where !keptFlags[i] { keptOffsets[i] = nil }
+            let template = buildAlignedTemplate(
+                envs: envs, offsetMs: keptOffsets, msPerPoint: msPerPoint
+            )
+            var recovered = 0
+            if !template.isEmpty {
+                for target in repickTargets {
+                    let centerSample = Int(round(target.predictedSec * sampleRate))
+                    let env = downsampleEnvelope(
+                        squared: squared, centerSample: centerSample,
+                        sampleRate: sampleRate, halfMs: envHalfMs,
+                        points: envPoints, smoothHalf: smoothHalf
+                    )
+                    let maxLag = max(2, Int(target.searchHalfMs / msPerPoint))
+                    let lag = subSampleLag(template: template, candidate: env, maxLag: maxLag)
+                    // Interior-peak requirement: an argmax at the window
+                    // edge is not a detection.
+                    guard abs(lag) < Double(maxLag) - 0.51 else { continue }
+                    let newAbsSec = target.predictedSec + (lag * msPerPoint) / 1000.0
+                    offsetMs[target.idx] = (newAbsSec - tickPositions[target.idx]) * 1000.0
+                    keptFlags[target.idx] = true
+                    recovered += 1
+                }
+            }
+            if ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_SPLIT_LOCK"] != nil {
+                FileHandle.standardError.write(
+                    "[split-lock] repick attempted=\(repickTargets.count) recovered=\(recovered)\n"
+                        .data(using: .utf8)!)
+            }
+        }
 
         // 3σ class-wise iterative trim with linear detrending and a robust
         // σ estimate (computed from the tightest 75% of detrended residuals
@@ -235,23 +280,35 @@ enum MatchedFilterRefinement {
 
     // MARK: - Split-lock rejection
 
-    /// Detect and reject a class-wide sub-event re-lock. See the call
-    /// site for the failure mode. Runs up to two rounds because removing
-    /// one class's flipped block changes the joint regression the other
-    /// class is measured against.
+    /// A banned tick eligible for constrained re-picking: where the
+    /// majority line predicts its event should be, and how far around
+    /// that prediction the re-pick may search (kept below half the
+    /// cluster gap so the banned lock is unreachable).
+    struct RepickTarget {
+        let idx: Int
+        let predictedSec: Double
+        let searchHalfMs: Double
+    }
+
+    /// Detect a class-wide sub-event re-lock and ban the minority
+    /// cluster. See the call site for the failure mode. Runs up to two
+    /// rounds because removing one class's flipped block changes the
+    /// joint regression the other class is measured against.
     ///
     /// Per class: detrend residuals with a Theil–Sen line (median of
     /// pairwise slopes — robust to the ~30 % contamination a flipped
     /// block represents, which drags a least-squares line), sort the
     /// detrended residuals, and find the largest interior gap. Split
-    /// there when the gap is decisive (see `splitDecision`); keep the
-    /// bigger cluster.
+    /// there when the gap is decisive; keep the bigger cluster, ban the
+    /// smaller, and emit a RepickTarget per banned tick so the caller
+    /// can attempt a constrained recovery.
     ///
     /// Set WATCHBEAT_NO_SPLIT_LOCK=1 to disable; WATCHBEAT_DEBUG_SPLIT_LOCK=1
     /// to dump per-class gap diagnostics to stderr.
     private static func rejectSplitLock(
         tickPositions: [Double], offsetMs: [Double?],
-        beatIndices: [Int], keptFlags: inout [Bool]
+        beatIndices: [Int], keptFlags: inout [Bool],
+        repickTargets: inout [RepickTarget]
     ) {
         guard ProcessInfo.processInfo.environment["WATCHBEAT_NO_SPLIT_LOCK"] == nil else { return }
         let debug = ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_SPLIT_LOCK"] != nil
@@ -345,8 +402,14 @@ enum MatchedFilterRefinement {
                 }
                 guard isSplit else { continue }
 
-                // Drop the minority cluster (tie → the one farther from
-                // the class's detrended zero line, i.e., larger |median|).
+                // Ban the minority cluster (tie → the one farther from
+                // the class's detrended zero line, i.e., larger |median|),
+                // and emit a re-pick target per banned tick. The
+                // prediction is the joint line plus the class's Theil–Sen
+                // detrend line at that beat — i.e., where the majority
+                // says this beat's event should be. The search half-width
+                // must (a) cover honest local jitter, (b) never reach the
+                // banned cluster (≤ 45 % of the gap).
                 let dropBelow: Bool
                 if below.count != above.count {
                     dropBelow = below.count < above.count
@@ -355,8 +418,18 @@ enum MatchedFilterRefinement {
                     let medAbove = abs(above[above.count / 2].d)
                     dropBelow = medBelow > medAbove
                 }
+                let majoritySigma = dropBelow ? sigmaAbove : sigmaBelow
+                let searchHalfMs = min(max(0.35, 4.0 * majoritySigma), 0.45 * gapSize)
                 for e in (dropBelow ? below : above) {
                     keptFlags[e.i] = false
+                    let x = Double(beatIndices[e.i])
+                    let predictedSec = slope * x + intercept
+                        + (tsSlope * x + tsIntercept) / 1000.0
+                    repickTargets.append(RepickTarget(
+                        idx: e.i,
+                        predictedSec: predictedSec,
+                        searchHalfMs: searchHalfMs
+                    ))
                 }
                 changed = true
             }
