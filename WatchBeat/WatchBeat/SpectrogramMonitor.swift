@@ -37,7 +37,12 @@ final class SpectrogramMonitor: @unchecked Sendable {
     private var rollingBufferSize: Int = 0
     private var samplesAccumulated: Int = 0
 
-    // Trace-emit cadence (matches one STFT hop).
+    // Trace-emit cadence. Emissions happen every `traceEmitIntervalSec`
+    // (50 ms, also the STFT hop for band scoring), but each emission
+    // appends a BATCH of trace samples at the finer traceDtSec (10 ms)
+    // resolution — 5 per emit. Batching keeps main-thread updates at
+    // ~20 Hz while the trace itself resolves individual ticks.
+    private let traceEmitIntervalSec: Double = 0.05
     private var samplesSinceLastColumn: Int = 0
     private var samplesPerColumn: Int = 2400
     /// When trace buffer first hit "full" (totalTraceWritten ==
@@ -166,7 +171,7 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.samplesSinceLastColumn = 0
         self.samplesSinceLastBandSelect = 0
         self.samplesSinceLastBarUpdate = 0
-        self.samplesPerColumn = Int(sampleRate * SpectrogramData.traceDtSec)
+        self.samplesPerColumn = Int(sampleRate * traceEmitIntervalSec)
         self.samplesPerBandSelect = Int(sampleRate * 1.0)
         self.samplesPerBarUpdate = Int(sampleRate * 0.25)
 
@@ -241,21 +246,22 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
-    /// Emit one trace sample = mean band energy over the most recent
-    /// `traceDtSec` of audio (50 ms). Uses a time-domain bandpass at the
+    /// Emit one batch of trace samples = band energy over each of the
+    /// most recent five 10 ms blocks. Uses a time-domain bandpass at the
     /// currently-selected band — no FFT, no coverage gap. Each tick of
-    /// the watch shows up as a brief energy spike.
+    /// the watch shows up as a brief energy spike, positioned to ±5 ms.
     ///
-    /// We process more than one block at a time (`lookbackSec`) so the
-    /// IIR filter's startup transient (~1 ms for a 1 kHz-wide passband)
-    /// is in the discarded prefix, and the returned last sample is fully
-    /// settled.
+    /// We process more than one emit interval at a time (`lookbackSec`)
+    /// so the IIR filter's startup transient (~1 ms for a 1 kHz-wide
+    /// passband) is in the discarded prefix, and the returned tail
+    /// samples are fully settled.
     private func emitTraceSample() {
-        let targetRateHz = 1.0 / SpectrogramData.traceDtSec   // 20 Hz
-        let lookbackSec = 0.2   // 200 ms → 4 output blocks; last is settled
+        let targetRateHz = 1.0 / SpectrogramData.traceDtSec   // 100 Hz
+        let batchCount = max(1, Int(round(traceEmitIntervalSec / SpectrogramData.traceDtSec)))  // 5
+        let lookbackSec = 0.2   // 200 ms → 20 output blocks; tail is settled
         let lookbackSamples = min(rollingBuffer.count,
                                   Int(lookbackSec * sampleRate))
-        guard lookbackSamples >= Int(sampleRate / targetRateHz) else { return }
+        guard lookbackSamples >= Int(sampleRate * traceEmitIntervalSec) else { return }
         let start = rollingBuffer.count - lookbackSamples
         let block = Array(rollingBuffer[start..<rollingBuffer.count])
 
@@ -266,8 +272,8 @@ final class SpectrogramMonitor: @unchecked Sendable {
             halfWidthHz: bandHalfWidthHz,
             targetRateHz: targetRateHz
         )
-        guard let sample = env.last else { return }
-        data.appendTraceSample(sample)
+        guard env.count >= batchCount else { return }
+        data.appendTraceSamples(Array(env.suffix(batchCount)))
     }
 
     /// Look for a narrow frequency band whose energy time-series shows
@@ -275,10 +281,10 @@ final class SpectrogramMonitor: @unchecked Sendable {
     /// rate. If one beats broadband by a margin, switch the trace
     /// source to it.
     private func updateBestBand() {
-        // Need enough audio history. With ~20 trace samples/sec, 60
+        // Need enough audio history. With 100 trace samples/sec, 300
         // samples = 3 s — enough for Goertzel to distinguish 5/5.5/6 Hz.
         let totalCols = data.totalTraceWritten
-        guard totalCols >= 60 else { return }
+        guard totalCols >= 300 else { return }
 
         // We need column-by-column STFT slices to score per-bin
         // rhythmicity. Compute them from the rolling raw buffer.

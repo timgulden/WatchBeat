@@ -20,10 +20,17 @@ import WatchBeatCore
 /// confident best band, the trace narrows to that band and the bars
 /// sharpen.
 final class SpectrogramData: ObservableObject, @unchecked Sendable {
-    /// Number of trace samples in the visible 15 s window. 300 × 50 ms.
-    static let traceSampleCount = 300
+    /// Number of trace samples in the visible 15 s window. 1500 × 10 ms.
+    ///
+    /// 10 ms bins matter: at the previous 50 ms (20 Hz) resolution, a
+    /// 6 Hz tick train landed every 3⅓ bins, producing a visible moiré —
+    /// displayed tick spacing alternated 150/200 ms and drifted with the
+    /// tick-vs-bin phase, and ticks straddling a bin boundary split
+    /// their energy and disappeared. At 100 Hz there are ~16 bins per
+    /// beat and the structure renders faithfully.
+    static let traceSampleCount = 1500
 
-    /// Seconds per trace sample.
+    /// Seconds per trace sample (10 ms).
     static let traceDtSec: Double = 15.0 / Double(traceSampleCount)
 
     /// Rolling 15-second buffer of best-band energy. Circular.
@@ -60,16 +67,21 @@ final class SpectrogramData: ObservableObject, @unchecked Sendable {
         trace = [Float](repeating: 0, count: Self.traceSampleCount)
     }
 
-    /// Append one trace sample on the right edge. Called from the analysis
-    /// queue at ~20 Hz. All state mutation happens inside the @MainActor
-    /// Task body to avoid the data race that previously dropped updates
-    /// (analysis thread reading stale @Published state, multiple tasks
-    /// overwriting each other).
-    func appendTraceSample(_ sample: Float) {
+    /// Append a batch of trace samples on the right edge. Called from
+    /// the analysis queue every ~50 ms with five 10 ms samples — batching
+    /// keeps the UI-update rate at ~20 Hz even though the trace's
+    /// temporal resolution is 100 Hz. All state mutation happens inside
+    /// the @MainActor Task body to avoid the data race that previously
+    /// dropped updates (analysis thread reading stale @Published state,
+    /// multiple tasks overwriting each other).
+    func appendTraceSamples(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
         Task { @MainActor in
-            self.trace[self.traceWriteIndex] = sample
-            self.traceWriteIndex = (self.traceWriteIndex + 1) % Self.traceSampleCount
-            self.totalTraceWritten += 1
+            for sample in samples {
+                self.trace[self.traceWriteIndex] = sample
+                self.traceWriteIndex = (self.traceWriteIndex + 1) % Self.traceSampleCount
+                self.totalTraceWritten += 1
+            }
         }
     }
 
