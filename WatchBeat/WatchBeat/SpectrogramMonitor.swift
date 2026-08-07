@@ -37,14 +37,26 @@ final class SpectrogramMonitor: @unchecked Sendable {
     private var rollingBufferSize: Int = 0
     private var samplesAccumulated: Int = 0
 
-    // Trace-emit cadence. Emissions happen every `traceEmitIntervalSec`
-    // (50 ms, also the STFT hop for band scoring), but each emission
-    // appends a BATCH of trace samples at the finer traceDtSec (10 ms)
-    // resolution — 5 per emit. Batching keeps main-thread updates at
-    // ~20 Hz while the trace itself resolves individual ticks.
+    // STFT hop for band-selection scoring (50 ms). No longer drives
+    // trace emission — see `traceBinsEmitted`.
     private let traceEmitIntervalSec: Double = 0.05
-    private var samplesSinceLastColumn: Int = 0
     private var samplesPerColumn: Int = 2400
+
+    // Stream-aligned trace emission. The audio tap delivers ~171 ms
+    // chunks (8192 samples), so any "emit the buffer's most recent X ms
+    // every Y ms of credit" scheme reads the SAME buffer tail several
+    // times per chunk — appending duplicate bins (clumps) while the
+    // audio between chunk tails never renders (gaps). Instead we treat
+    // the audio stream as a sequence of absolute 10 ms bins (bin k =
+    // samples [k·spb, (k+1)·spb)) and, on each callback, compute exactly
+    // the not-yet-emitted bins from their true positions in the rolling
+    // buffer. Every bin renders exactly once, in order, regardless of
+    // callback chunking.
+    private var traceBinsEmitted: Int = 0
+    /// Warmup prefix (whole bins) run through the bandpass ahead of the
+    /// bins actually emitted, so the IIR transient settles in discarded
+    /// output. 10 bins = 100 ms — generous for a ~1 ms transient.
+    private let traceWarmupBins = 10
     /// When trace buffer first hit "full" (totalTraceWritten ==
     /// traceSampleCount). Trace emissions pause briefly here so the
     /// trace doesn't scroll during the picker's analysis-decision time
@@ -168,7 +180,7 @@ final class SpectrogramMonitor: @unchecked Sendable {
         self.rollingBufferSize = Int(rollingBufferDuration * sampleRate)
         self.rollingBuffer = [Float](repeating: 0, count: rollingBufferSize)
         self.samplesAccumulated = 0
-        self.samplesSinceLastColumn = 0
+        self.traceBinsEmitted = 0
         self.samplesSinceLastBandSelect = 0
         self.samplesSinceLastBarUpdate = 0
         self.samplesPerColumn = Int(sampleRate * traceEmitIntervalSec)
@@ -211,29 +223,31 @@ final class SpectrogramMonitor: @unchecked Sendable {
             rollingBuffer.replaceSubrange(shift..<rollingBufferSize, with: newSamples)
         }
         samplesAccumulated += newCount
-        samplesSinceLastColumn += newCount
         samplesSinceLastBandSelect += newCount
         samplesSinceLastBarUpdate += newCount
 
-        // Emit trace samples whenever enough audio has accumulated.
-        while samplesSinceLastColumn >= samplesPerColumn {
-            samplesSinceLastColumn -= samplesPerColumn
-            guard samplesAccumulated >= fftWindowSize else { continue }
-
-            // Pause emissions briefly once the trace buffer first hits
-            // full so the trace doesn't visibly scroll during the
-            // picker's analysis-decision time for a successful
-            // first-window recording. Resume after traceFullPauseSeconds
-            // if the recording is still going (marginal case — user
-            // sees fresh data again).
+        // Emit every complete not-yet-rendered 10 ms bin.
+        //
+        // Pause emissions briefly once the trace buffer first hits full
+        // so the trace doesn't visibly scroll during the picker's
+        // analysis-decision time for a successful first-window
+        // recording. Resume after traceFullPauseSeconds if the recording
+        // is still going (marginal case). During the pause,
+        // traceBinsEmitted doesn't advance, so the resume emits the
+        // paused span as a single catch-up batch — the trace stays
+        // continuous rather than skipping the paused audio.
+        if samplesAccumulated >= fftWindowSize {
+            var paused = false
             if data.totalTraceWritten >= SpectrogramData.traceSampleCount {
                 if traceFullTimestamp == nil {
                     traceFullTimestamp = ContinuousClock.now
                 }
                 let pausedFor = (ContinuousClock.now - traceFullTimestamp!).asSeconds
-                if pausedFor < traceFullPauseSeconds { continue }
+                paused = pausedFor < traceFullPauseSeconds
             }
-            emitTraceSample()
+            if !paused {
+                emitPendingTraceBins()
+            }
         }
 
         if samplesSinceLastBandSelect >= samplesPerBandSelect {
@@ -246,34 +260,53 @@ final class SpectrogramMonitor: @unchecked Sendable {
         }
     }
 
-    /// Emit one batch of trace samples = band energy over each of the
-    /// most recent five 10 ms blocks. Uses a time-domain bandpass at the
+    /// Emit every complete 10 ms bin not yet rendered, from its true
+    /// position in the audio stream. Uses a time-domain bandpass at the
     /// currently-selected band — no FFT, no coverage gap. Each tick of
     /// the watch shows up as a brief energy spike, positioned to ±5 ms.
     ///
-    /// We process more than one emit interval at a time (`lookbackSec`)
-    /// so the IIR filter's startup transient (~1 ms for a 1 kHz-wide
-    /// passband) is in the discarded prefix, and the returned tail
-    /// samples are fully settled.
-    private func emitTraceSample() {
-        let targetRateHz = 1.0 / SpectrogramData.traceDtSec   // 100 Hz
-        let batchCount = max(1, Int(round(traceEmitIntervalSec / SpectrogramData.traceDtSec)))  // 5
-        let lookbackSec = 0.2   // 200 ms → 20 output blocks; tail is settled
-        let lookbackSamples = min(rollingBuffer.count,
-                                  Int(lookbackSec * sampleRate))
-        guard lookbackSamples >= Int(sampleRate * traceEmitIntervalSec) else { return }
-        let start = rollingBuffer.count - lookbackSamples
-        let block = Array(rollingBuffer[start..<rollingBuffer.count])
+    /// Bin k of the stream covers samples [k·spb, (k+1)·spb). The block
+    /// handed to the bandpass starts a whole number of bins before the
+    /// first pending bin (warmup for the IIR transient) and ends at the
+    /// last complete bin, so the envelope's block boundaries land
+    /// exactly on stream-bin boundaries and `suffix(pending)` is exactly
+    /// the missing bins.
+    private func emitPendingTraceBins() {
+        let samplesPerBin = Int(sampleRate * SpectrogramData.traceDtSec)
+        guard samplesPerBin > 0 else { return }
+        let availableBins = samplesAccumulated / samplesPerBin
+        var firstPending = traceBinsEmitted
+        // If we somehow fell behind by more than the visible window
+        // (shouldn't happen — the 16 s rolling buffer covers the 15 s
+        // window plus warmup), skip ahead rather than reading samples
+        // the buffer no longer holds.
+        let maxBins = SpectrogramData.traceSampleCount
+        if availableBins - firstPending > maxBins {
+            firstPending = availableBins - maxBins
+        }
+        let pending = availableBins - firstPending
+        guard pending > 0 else { return }
+
+        let warmup = min(traceWarmupBins, firstPending)
+        let blockStartStream = (firstPending - warmup) * samplesPerBin
+        let blockEndStream = availableBins * samplesPerBin
+        // Stream position → rolling-buffer index. The buffer's last
+        // sample is stream position samplesAccumulated − 1.
+        let bufStart = rollingBuffer.count - (samplesAccumulated - blockStartStream)
+        let bufEnd = rollingBuffer.count - (samplesAccumulated - blockEndStream)
+        guard bufStart >= 0, bufEnd <= rollingBuffer.count, bufStart < bufEnd else { return }
+        let block = Array(rollingBuffer[bufStart..<bufEnd])
 
         let env = conditioner.bandpassEnergyEnvelope(
             samples: block,
             sampleRate: sampleRate,
             centerHz: currentBandCenterHz,
             halfWidthHz: bandHalfWidthHz,
-            targetRateHz: targetRateHz
+            targetRateHz: 1.0 / SpectrogramData.traceDtSec
         )
-        guard env.count >= batchCount else { return }
-        data.appendTraceSamples(Array(env.suffix(batchCount)))
+        guard env.count >= pending else { return }
+        data.appendTraceSamples(Array(env.suffix(pending)))
+        traceBinsEmitted = availableBins
     }
 
     /// Look for a narrow frequency band whose energy time-series shows
@@ -291,8 +324,19 @@ final class SpectrogramMonitor: @unchecked Sendable {
         // For efficiency, only re-do this once per second (we're inside
         // that gate already).
         let analyzeWindowSeconds = min(15.0, Double(totalCols) * SpectrogramData.traceDtSec)
-        let analyzeSampleCount = Int(analyzeWindowSeconds * sampleRate)
+        var analyzeSampleCount = Int(analyzeWindowSeconds * sampleRate)
         guard rollingBuffer.count >= analyzeSampleCount else { return }
+        // Align the snapshot's start to a stream-bin boundary so the
+        // trace rebuilt from it (replaceTrace below) has bins landing on
+        // the same 10 ms grid the live emitter uses — otherwise the
+        // splice between rebuilt and subsequently-appended bins shifts
+        // tick positions by a sub-bin offset.
+        let samplesPerBin = Int(sampleRate * SpectrogramData.traceDtSec)
+        if samplesPerBin > 0 {
+            let streamStart = samplesAccumulated - analyzeSampleCount
+            let aligned = ((streamStart + samplesPerBin - 1) / samplesPerBin) * samplesPerBin
+            analyzeSampleCount -= (aligned - streamStart)
+        }
         let start = rollingBuffer.count - analyzeSampleCount
         let snapshot = Array(rollingBuffer[start..<rollingBuffer.count])
 
@@ -426,6 +470,13 @@ final class SpectrogramMonitor: @unchecked Sendable {
             halfWidthHz: bandHalfWidthHz,
             targetRateHz: traceRate
         )
+
+        // The rebuild covers every complete bin up to "now" — including
+        // any bins pending during a trace-full pause. Mark them emitted
+        // so the post-pause catch-up doesn't append them a second time.
+        if samplesPerBin > 0 {
+            traceBinsEmitted = samplesAccumulated / samplesPerBin
+        }
 
         Task { @MainActor in
             self.data.bestBandHz = bestHz
