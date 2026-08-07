@@ -99,6 +99,29 @@ enum MatchedFilterRefinement {
             if maxDelta < convergeMs { break }
         }
 
+        // Split-lock rejection: catch the mid-recording re-lock failure
+        // BEFORE the σ-based trim below. When the picker (or the matched
+        // filter itself — the template contains every sub-event, so
+        // correlation can lock onto any of them) flips a whole class onto
+        // a different sub-event partway through the recording, the class's
+        // residuals become BIMODAL: two tight parallel lines separated by
+        // the sub-event spacing (2–10 ms). Neither existing guard sees
+        // this: the OutlierRejector's quadratic bends to follow the step,
+        // and the linear detrend below absorbs it completely (a line
+        // through two levels), so the flipped ticks detrend to ~0 and
+        // pass 3σ. Holistic view: real jitter is unimodal; a big empty
+        // gap between two tight clusters is a lock-state change, and only
+        // one state can feed the regression and beat error. Keep the
+        // majority cluster, drop the minority — we don't try to "shift"
+        // the minority back because that would fabricate data; dropping
+        // it gives the same slope and a clean per-class line.
+        var keptFlags = [Bool](repeating: true, count: n)
+        for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
+        rejectSplitLock(
+            tickPositions: tickPositions, offsetMs: offsetMs,
+            beatIndices: beatIndices, keptFlags: &keptFlags
+        )
+
         // 3σ class-wise iterative trim with linear detrending and a robust
         // σ estimate (computed from the tightest 75% of detrended residuals
         // by absolute value). Linear detrending absorbs slow class-mean
@@ -113,8 +136,6 @@ enum MatchedFilterRefinement {
         // against that tighter reference. Adapts per-watch — clean
         // recordings get a tight threshold (~1 ms), noisy ones a looser
         // one — without an arbitrary millisecond cap.
-        var keptFlags = [Bool](repeating: true, count: n)
-        for i in 0..<n where offsetMs[i] == nil { keptFlags[i] = false }
         let trimK = 3.0
         let trimIters = 4
         let detrendDegree = 1
@@ -210,6 +231,138 @@ enum MatchedFilterRefinement {
             out[i] = tickPositions[i] + off / 1000.0
         }
         return out
+    }
+
+    // MARK: - Split-lock rejection
+
+    /// Detect and reject a class-wide sub-event re-lock. See the call
+    /// site for the failure mode. Runs up to two rounds because removing
+    /// one class's flipped block changes the joint regression the other
+    /// class is measured against.
+    ///
+    /// Per class: detrend residuals with a Theil–Sen line (median of
+    /// pairwise slopes — robust to the ~30 % contamination a flipped
+    /// block represents, which drags a least-squares line), sort the
+    /// detrended residuals, and find the largest interior gap. Split
+    /// there when the gap is decisive (see `splitDecision`); keep the
+    /// bigger cluster.
+    ///
+    /// Set WATCHBEAT_NO_SPLIT_LOCK=1 to disable; WATCHBEAT_DEBUG_SPLIT_LOCK=1
+    /// to dump per-class gap diagnostics to stderr.
+    private static func rejectSplitLock(
+        tickPositions: [Double], offsetMs: [Double?],
+        beatIndices: [Int], keptFlags: inout [Bool]
+    ) {
+        guard ProcessInfo.processInfo.environment["WATCHBEAT_NO_SPLIT_LOCK"] == nil else { return }
+        let debug = ProcessInfo.processInfo.environment["WATCHBEAT_DEBUG_SPLIT_LOCK"] != nil
+        let n = tickPositions.count
+
+        for round in 0..<2 {
+            // Joint regression on currently-kept refined positions.
+            var sumBi = 0.0, sumPos = 0.0; var nKept = 0
+            var positions = [Double](repeating: 0, count: n)
+            for i in 0..<n where keptFlags[i] {
+                guard let off = offsetMs[i] else { continue }
+                positions[i] = tickPositions[i] + off / 1000.0
+                sumBi += Double(beatIndices[i]); sumPos += positions[i]; nKept += 1
+            }
+            guard nKept >= 8 else { return }
+            let meanBi = sumBi / Double(nKept)
+            let meanPos = sumPos / Double(nKept)
+            var sxx = 0.0, sxy = 0.0
+            for i in 0..<n where keptFlags[i] && offsetMs[i] != nil {
+                let dx = Double(beatIndices[i]) - meanBi
+                sxx += dx * dx; sxy += dx * (positions[i] - meanPos)
+            }
+            guard sxx > 0 else { return }
+            let slope = sxy / sxx
+            let intercept = meanPos - slope * meanBi
+
+            var changed = false
+            for parity in 0...1 {
+                // (index-in-arrays, beatIndex, residualMs) for this class.
+                var pts: [(i: Int, x: Double, r: Double)] = []
+                for i in 0..<n where keptFlags[i] && offsetMs[i] != nil && beatIndices[i] % 2 == parity {
+                    let r = (positions[i] - (slope * Double(beatIndices[i]) + intercept)) * 1000.0
+                    pts.append((i, Double(beatIndices[i]), r))
+                }
+                guard pts.count >= 8 else { continue }
+
+                // Theil–Sen detrend of the class residuals.
+                var slopes: [Double] = []
+                slopes.reserveCapacity(pts.count * (pts.count - 1) / 2)
+                for a in 0..<pts.count {
+                    for b in (a + 1)..<pts.count where pts[b].x != pts[a].x {
+                        slopes.append((pts[b].r - pts[a].r) / (pts[b].x - pts[a].x))
+                    }
+                }
+                guard !slopes.isEmpty else { continue }
+                slopes.sort()
+                let tsSlope = slopes[slopes.count / 2]
+                var intercepts = pts.map { $0.r - tsSlope * $0.x }
+                intercepts.sort()
+                let tsIntercept = intercepts[intercepts.count / 2]
+
+                // Sorted detrended residuals → largest interior gap.
+                let detrended = pts
+                    .map { (i: $0.i, d: $0.r - (tsSlope * $0.x + tsIntercept)) }
+                    .sorted { $0.d < $1.d }
+                var gapAt = 0
+                var gapSize = 0.0
+                for k in 0..<(detrended.count - 1) {
+                    let g = detrended[k + 1].d - detrended[k].d
+                    if g > gapSize { gapSize = g; gapAt = k }
+                }
+                let below = Array(detrended[0...gapAt])
+                let above = Array(detrended[(gapAt + 1)...])
+
+                // Spread of the tighter side (MAD-based σ) — the gap must
+                // dwarf genuine jitter for a split verdict.
+                func madSigma(_ xs: [Double]) -> Double {
+                    let vals = xs.sorted()
+                    let med = vals[vals.count / 2]
+                    let devs = xs.map { abs($0 - med) }.sorted()
+                    return 1.4826 * devs[devs.count / 2]
+                }
+                let sigmaBelow = madSigma(below.map { $0.d })
+                let sigmaAbove = madSigma(above.map { $0.d })
+                let tightSigma = min(sigmaBelow, sigmaAbove)
+
+                // Split verdict: minority is a real block (≥2 ticks), the
+                // gap is physically a sub-event spacing (≥0.7 ms), and it
+                // is far beyond what the class's own jitter could open by
+                // chance (≥6× the tighter cluster's σ).
+                let minority = min(below.count, above.count)
+                let isSplit = minority >= 2
+                    && gapSize >= 0.7
+                    && gapSize >= 6.0 * max(tightSigma, 0.02)
+
+                if debug {
+                    FileHandle.standardError.write(String(format:
+                        "[split-lock] round=%d parity=%d n=%d gap=%.2fms clusters=%d/%d sigma=%.3f/%.3f verdict=%@\n",
+                        round, parity, pts.count, gapSize, below.count, above.count,
+                        sigmaBelow, sigmaAbove, isSplit ? "SPLIT" : "ok").data(using: .utf8)!)
+                }
+                guard isSplit else { continue }
+
+                // Drop the minority cluster (tie → the one farther from
+                // the class's detrended zero line, i.e., larger |median|).
+                let dropBelow: Bool
+                if below.count != above.count {
+                    dropBelow = below.count < above.count
+                } else {
+                    let medBelow = abs(below[below.count / 2].d)
+                    let medAbove = abs(above[above.count / 2].d)
+                    dropBelow = medBelow > medAbove
+                }
+                for e in (dropBelow ? below : above) {
+                    keptFlags[e.i] = false
+                }
+                changed = true
+            }
+            if !changed { break }
+            _ = round
+        }
     }
 
     // MARK: - Internal helpers
