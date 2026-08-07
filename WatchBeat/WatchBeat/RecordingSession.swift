@@ -34,7 +34,7 @@ struct RecordingSession {
     /// auto-stop. Position Study uses this to reject windows during which
     /// the phone left the target position; nil (normal measurements)
     /// accepts every window.
-    var windowValidator: (@MainActor (ContinuousClock.Instant) -> Bool)? = nil
+    var windowValidator: (@MainActor @Sendable (ContinuousClock.Instant) -> Bool)? = nil
 
     /// The single best-scoring window across the recording budget, or nil
     /// if the loop ended (cancelled / timed out) before any window completed.

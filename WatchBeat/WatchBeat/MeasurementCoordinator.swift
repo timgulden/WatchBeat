@@ -612,7 +612,7 @@ final class MeasurementCoordinator: ObservableObject {
             // target position are scored — a drift out of pose can't
             // contaminate the reading.
             windowValidator: studyTarget.map { target in
-                { [weak self] windowEnd in
+                { @MainActor @Sendable [weak self] windowEnd in
                     guard let self else { return false }
                     return self.orientationMonitor.position(
                         endingAt: windowEnd,
