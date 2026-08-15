@@ -45,6 +45,21 @@ Open `WatchBeat/WatchBeat.xcodeproj` in Xcode. Build with Cmd+B, run on device f
    (b) `DebugRecording` (transient, all builds) — when a measurement transitions to a result/failure screen (other than Quartz Detected), one WAV + JSON sidecar is held in `tmp/`. Discarded on state transitions OUT of those screens (via `state` didSet) and again at app launch (`cleanupStaleOnLaunch`). The user can tap "Send Debug" to share via the iOS share sheet; that's the only way audio leaves the device, and the sheet's disclosure copy explicitly states the recording captures ambient room audio. This is the privacy-friendly equivalent of a crash reporter — single-recording, transient, opt-in transmission.
    The App Store listing copy must accurately reflect both paths: audio is held only during the active measurement session and discarded on screen change; transmission off-device requires explicit user action via Send Debug. Future features that touch storage or transmission must update the listing copy in the same commit; no silent expansion of the persistence surface.
 
+## Release & Deployment
+
+App Store distribution state and process. Update this section whenever release status changes.
+
+**Status (as of 2026-08-15):** Program License Agreement accepted; Apple Distribution certificate created on Tim's Mac (team `4B46FMPHHL`); first successful Distribute-to-App-Store-Connect upload completed; TestFlight in use (Jeff is an external tester from earlier builds). Repo shows `MARKETING_VERSION = 0.9.4`, `CURRENT_PROJECT_VERSION = 15` — if a later build was uploaded via the Xcode UI without committing the bump, verify actual numbers in App Store Connect. `ITSAppUsesNonExemptEncryption = NO` is in Info.plist, so uploads skip the export-compliance question.
+
+**Remaining before public release:**
+1. Decide marketing version for release (1.0 is the natural choice) and bump build number for each upload.
+2. Refresh screenshots — `AppStore/` has three PNGs (Idle, Listening, Result) that predate Position Study and the high-res trace. One 6.9"-class size is mandatory; a Study summary shot is a selling point.
+3. App Store metadata: description, keywords, support URL, privacy policy URL. App Privacy questionnaire answer is **Data Not Collected** (all processing on-device; Send Debug is explicit user action via share sheet — not collection). Category: Utilities.
+4. **Reviewer notes are critical:** the reviewer almost certainly has no mechanical watch. Notes must say the app requires a ticking mechanical watch (not quartz/Apple Watch) held to the phone, that Weak Signal with recovery tips is correct no-watch behavior, and ideally link a ~30 s demo video of a full measurement.
+5. TestFlight pass on the exact archive being submitted, then attach that build to the App Store version and submit. Choose manual release for the first version.
+
+**Process reminders:** archive via Any iOS Device (arm64) → Product → Archive → Distribute App. Internal TestFlight testers get builds instantly; external groups need a light Beta App Review on the first build of each version. TestFlight approval ≠ App Store approval. The App Store listing copy must accurately reflect the audio-persistence surface (see rule 9 under Architecture Rules) — any feature that changes storage/transmission updates the listing in the same commit.
+
 ## Standard Beat Rates
 
 Mechanical only (quartz removed — 1Hz conflicts with heartbeat).
